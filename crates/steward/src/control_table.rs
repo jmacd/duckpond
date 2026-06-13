@@ -372,10 +372,7 @@ impl ControlTable {
         error_message: String,
         duration_ms: i64,
     ) -> Result<(), StewardError> {
-        let metadata_json = serde_json::to_string(&serde_json::json!({
-            "reason": error_message,
-        }))
-        .unwrap_or_else(|_| "{}".into());
+        let metadata_json = reason_json(&error_message);
         let mut record = self.base_record(RecordKind::Failed, txn_meta);
         record.duration_ms = Some(duration_ms);
         record.metadata_json = metadata_json;
@@ -588,17 +585,13 @@ impl ControlTable {
     /// that into `metadata_json`).
     pub async fn record_post_push_pending(&mut self, txn_seq: i64) -> Result<String, StewardError> {
         let txn_id = new_txn_id();
-        let record = ControlRecord {
-            pond_id: self.pond_id_uuid(),
-            record_kind: RecordKind::PostPushPending,
+        let record = self.post_push_record(
+            RecordKind::PostPushPending,
             txn_seq,
-            txn_id: txn_id.clone(),
-            commit_kind: None,
-            parent_seq: None,
-            duration_ms: None,
-            ts_micros: Utc::now().timestamp_micros(),
-            metadata_json: "{}".to_string(),
-        };
+            txn_id.clone(),
+            None,
+            "{}".to_string(),
+        );
         self.inner.write_record(record).await.map_err(map_err)?;
         Ok(txn_id)
     }
@@ -612,19 +605,14 @@ impl ControlTable {
         txn_id: String,
         pending_started_micros: i64,
     ) -> Result<(), StewardError> {
-        let now = Utc::now().timestamp_micros();
-        let duration_ms = ((now - pending_started_micros) / 1000).max(0);
-        let record = ControlRecord {
-            pond_id: self.pond_id_uuid(),
-            record_kind: RecordKind::PostPushCompleted,
+        let duration_ms = elapsed_ms_since(pending_started_micros);
+        let record = self.post_push_record(
+            RecordKind::PostPushCompleted,
             txn_seq,
             txn_id,
-            commit_kind: None,
-            parent_seq: None,
-            duration_ms: Some(duration_ms),
-            ts_micros: now,
-            metadata_json: "{}".to_string(),
-        };
+            Some(duration_ms),
+            "{}".to_string(),
+        );
         self.inner.write_record(record).await.map_err(map_err)
     }
 
@@ -638,21 +626,14 @@ impl ControlTable {
         pending_started_micros: i64,
         reason: String,
     ) -> Result<(), StewardError> {
-        let now = Utc::now().timestamp_micros();
-        let duration_ms = ((now - pending_started_micros) / 1000).max(0);
-        let metadata_json = serde_json::to_string(&serde_json::json!({"reason": reason}))
-            .unwrap_or_else(|_| "{}".into());
-        let record = ControlRecord {
-            pond_id: self.pond_id_uuid(),
-            record_kind: RecordKind::PostPushFailed,
+        let duration_ms = elapsed_ms_since(pending_started_micros);
+        let record = self.post_push_record(
+            RecordKind::PostPushFailed,
             txn_seq,
             txn_id,
-            commit_kind: None,
-            parent_seq: None,
-            duration_ms: Some(duration_ms),
-            ts_micros: now,
-            metadata_json,
-        };
+            Some(duration_ms),
+            reason_json(&reason),
+        );
         self.inner.write_record(record).await.map_err(map_err)
     }
 
@@ -743,6 +724,31 @@ impl ControlTable {
             metadata_json: "{}".to_string(),
         }
     }
+
+    /// Build a `PostPush*` lifecycle record for the local pond_id.  Unlike
+    /// [`Self::base_record`], these are keyed off a raw `(txn_seq, txn_id)`
+    /// pair (the sync-remote adapter owns the id) and carry no factory
+    /// metadata or `parent_seq`.
+    fn post_push_record(
+        &self,
+        kind: RecordKind,
+        txn_seq: i64,
+        txn_id: String,
+        duration_ms: Option<i64>,
+        metadata_json: String,
+    ) -> ControlRecord {
+        ControlRecord {
+            pond_id: self.pond_id_uuid(),
+            record_kind: kind,
+            txn_seq,
+            txn_id,
+            commit_kind: None,
+            parent_seq: None,
+            duration_ms,
+            ts_micros: Utc::now().timestamp_micros(),
+            metadata_json,
+        }
+    }
 }
 
 // ---- helpers ----
@@ -753,6 +759,17 @@ fn pond_id_to_std(id: &uuid7::Uuid) -> StdUuid {
 
 fn map_err(e: sync_steward::StewardError) -> StewardError {
     StewardError::ControlTable(format!("{}", e))
+}
+
+/// Serialize an error reason into the `{"reason": ...}` metadata_json shape
+/// used by `Failed` and `PostPushFailed` records.
+fn reason_json(reason: &str) -> String {
+    serde_json::to_string(&serde_json::json!({ "reason": reason })).unwrap_or_else(|_| "{}".into())
+}
+
+/// Milliseconds elapsed from `started_micros` until now, clamped to >= 0.
+fn elapsed_ms_since(started_micros: i64) -> i64 {
+    ((Utc::now().timestamp_micros() - started_micros) / 1000).max(0)
 }
 
 async fn seed_pond_metadata(
