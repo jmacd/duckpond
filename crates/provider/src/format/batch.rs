@@ -15,6 +15,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use futures::stream::Stream;
 use std::pin::Pin;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 /// Boxed, pinned stream of [`RecordBatch`] results as returned by
 /// [`crate::format::FormatProvider::open_stream`].
@@ -55,4 +56,45 @@ pub(crate) fn finish_batch(schema: SchemaRef, columns: Vec<ArrayRef>) -> Result<
         &RecordBatchOptions::new().with_row_count(Some(row_count)),
     )
     .map_err(|e| Error::Arrow(e.to_string()))
+}
+
+/// Read newline-delimited input, calling `handle` for each non-empty line.
+///
+/// Centralizes the line-reading loop shared by the JSON-lines providers
+/// (`jsonlogs`, `oteljson`): each line has NUL bytes stripped (flash-storage
+/// corruption robustness) and surrounding whitespace trimmed, and blank lines
+/// are skipped. `handle` returns `Ok(true)` when it consumed the line or
+/// `Ok(false)` to count it as skipped; returning `Err` aborts the read. The
+/// total number of skipped lines is returned so callers can emit a warning.
+pub(crate) async fn read_clean_lines<F>(
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+    mut handle: F,
+) -> Result<u64>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    let mut skipped = 0u64;
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        // Strip NUL bytes (flash-storage corruption) and trim whitespace.
+        let cleaned: String = line.chars().filter(|c| *c != '\0').collect();
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !handle(trimmed)? {
+            skipped += 1;
+        }
+    }
+
+    Ok(skipped)
 }

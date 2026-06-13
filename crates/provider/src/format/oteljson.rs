@@ -27,7 +27,7 @@ use opentelemetry_proto::tonic::metrics::v1::metric::Data;
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::AsyncRead;
 
 /// OpenTelemetry JSON format provider
 pub struct OtelJsonProvider;
@@ -51,13 +51,6 @@ struct Observation {
     timestamp_ns: i64,
     metric_name: String,
     value: f64,
-}
-
-/// Schema discovery result
-#[derive(Debug)]
-struct SchemaInfo {
-    /// All unique metric names found (sorted for consistent column ordering)
-    metric_names: Vec<String>,
 }
 
 /// Parse a single JSON line using official OTLP types and extract gauge observations
@@ -94,47 +87,36 @@ fn parse_line(line: &str) -> Result<Vec<Observation>> {
     Ok(observations)
 }
 
-/// Discover schema by reading entire file
-async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<SchemaInfo> {
-    let mut reader = BufReader::new(reader);
-    let mut metric_names_set = BTreeSet::new();
-    let mut line = String::new();
-    let mut skipped = 0u64;
+/// Read+parse the entire OTLP JSON Lines input.
+///
+/// Returns every gauge observation together with the sorted set of unique
+/// metric names discovered (used to build the wide schema). Shared by
+/// `infer_schema` and `open_stream` so the input is read and parsed once per
+/// call instead of via two separate copies of the read loop.
+async fn read_all(
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+) -> Result<(Vec<Observation>, Vec<String>)> {
+    let mut metric_names = BTreeSet::new();
+    let mut observations: Vec<Observation> = Vec::new();
 
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
-
-        if bytes_read == 0 {
-            break; // EOF
-        }
-
-        // Strip null bytes (flash storage corruption) and whitespace
-        let trimmed: String = line.chars().filter(|c| *c != '\0').collect();
-        let trimmed = trimmed.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        match parse_line(trimmed) {
-            Ok(observations) => {
-                for obs in observations {
-                    let _ = metric_names_set.insert(obs.metric_name);
+    let skipped =
+        crate::format::batch::read_clean_lines(reader, |trimmed| match parse_line(trimmed) {
+            Ok(obs) => {
+                for o in &obs {
+                    let _ = metric_names.insert(o.metric_name.clone());
                 }
+                observations.extend(obs);
+                Ok(true)
             }
-            Err(_) => {
-                skipped += 1;
-            }
-        }
-    }
+            Err(_) => Ok(false),
+        })
+        .await?;
 
     if skipped > 0 {
-        log::warn!("oteljson: skipped {skipped} corrupt line(s) during schema discovery");
+        log::warn!("oteljson: skipped {skipped} corrupt line(s) during read");
     }
 
-    Ok(SchemaInfo {
-        metric_names: metric_names_set.into_iter().collect(),
-    })
+    Ok((observations, metric_names.into_iter().collect()))
 }
 
 /// Create Arrow schema from discovered metric names
@@ -206,8 +188,8 @@ impl FormatProvider for OtelJsonProvider {
         reader: Pin<Box<dyn AsyncRead + Send>>,
         _url: &Url,
     ) -> Result<SchemaRef> {
-        let schema_info = discover_schema(reader).await?;
-        Ok(create_arrow_schema(&schema_info.metric_names))
+        let (_observations, metric_names) = read_all(reader).await?;
+        Ok(create_arrow_schema(&metric_names))
     }
 
     async fn open_stream(
@@ -218,53 +200,10 @@ impl FormatProvider for OtelJsonProvider {
         SchemaRef,
         Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
     )> {
-        // Read entire file and build schema + data
-        let mut reader = BufReader::new(reader);
-        let mut metric_names_set = BTreeSet::new();
-        let mut all_observations = Vec::new();
-        let mut line = String::new();
-        let mut skipped = 0u64;
-
-        loop {
-            line.clear();
-            let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
-
-            if bytes_read == 0 {
-                break; // EOF
-            }
-
-            // Strip null bytes (flash storage corruption) and whitespace
-            let trimmed: String = line.chars().filter(|c| *c != '\0').collect();
-            let trimmed = trimmed.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            match parse_line(trimmed) {
-                Ok(observations) => {
-                    for obs in &observations {
-                        let _ = metric_names_set.insert(obs.metric_name.clone());
-                    }
-                    all_observations.extend(observations);
-                }
-                Err(_) => {
-                    skipped += 1;
-                }
-            }
-        }
-
-        if skipped > 0 {
-            log::warn!("oteljson: skipped {skipped} corrupt line(s) during read");
-        }
-
-        let metric_names: Vec<String> = metric_names_set.into_iter().collect();
+        let (observations, metric_names) = read_all(reader).await?;
         let schema = create_arrow_schema(&metric_names);
-
-        // Build single batch
-        let batch = build_record_batch(schema.clone(), &all_observations, &metric_names)?;
-
+        let batch = build_record_batch(schema.clone(), &observations, &metric_names)?;
         let stream = crate::format::batch::single_batch_stream(batch);
-
         Ok((schema, stream))
     }
 }
@@ -294,10 +233,10 @@ mod tests {
         let cursor = Cursor::new(data);
         let reader: Pin<Box<dyn AsyncRead + Send>> = Box::pin(cursor);
 
-        let schema_info = discover_schema(reader).await.unwrap();
-        assert_eq!(schema_info.metric_names.len(), 2);
-        assert!(schema_info.metric_names.contains(&"metric_a".to_string()));
-        assert!(schema_info.metric_names.contains(&"metric_b".to_string()));
+        let (_observations, metric_names) = read_all(reader).await.unwrap();
+        assert_eq!(metric_names.len(), 2);
+        assert!(metric_names.contains(&"metric_a".to_string()));
+        assert!(metric_names.contains(&"metric_b".to_string()));
     }
 
     #[tokio::test]
