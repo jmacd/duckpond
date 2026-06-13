@@ -956,6 +956,22 @@ mod tests {
             .await
             .expect("zero-match input must not fail the join");
 
+        // Re-evaluate the SAME node through a different ProviderContext that
+        // shares the DataFusion session but has a fresh provider cache.  This
+        // is what happens when a derived node is read more than once within a
+        // single build (e.g. one sitegen export per resolution): the cache
+        // misses, so registration runs again against the shared session.  The
+        // empty placeholder must be registered idempotently and not fail with
+        // "table 'sql_derived_empty_...' already exists".
+        let provider_context2 = crate::ProviderContext::new(
+            provider_context.datafusion_session.clone(),
+            provider_context.persistence.clone(),
+        );
+        let _second = join_file
+            .as_table_provider(root_id, &provider_context2)
+            .await
+            .expect("re-registering the empty placeholder must be idempotent");
+
         let ctx = &provider_context.datafusion_session;
         let df_state = ctx.state();
         let plan = table_provider

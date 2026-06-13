@@ -1421,6 +1421,28 @@ impl SqlDerivedFile {
 
         let ctx = &context.datafusion_session;
 
+        // The placeholder name is deterministic in (pattern, node_id), and the
+        // session context is shared across reads, so the same node re-evaluated
+        // within a build (e.g. one export per resolution) would otherwise try
+        // to register the same table twice.  Mirror the real-table path: if it
+        // already exists, just (re)record the mapping and return.
+        let node_id_hex = id.node_id().to_string().replace('-', "");
+        let table_name = format!("sql_derived_empty_{}_{}", pattern_name, node_id_hex);
+
+        let already_registered = matches!(
+            ctx.catalog("datafusion")
+                .expect("registered")
+                .schema("public")
+                .expect("defined")
+                .table(&table_name)
+                .await,
+            Ok(Some(_))
+        );
+        if already_registered {
+            _ = table_mappings.insert(pattern_name.to_string(), table_name);
+            return Ok(());
+        }
+
         let schema = match self
             .sibling_scope_schema(ctx, pattern_name, table_mappings)
             .await
@@ -1446,8 +1468,6 @@ impl SqlDerivedFile {
             }
         };
 
-        let node_id_hex = id.node_id().to_string().replace('-', "");
-        let table_name = format!("sql_derived_empty_{}_{}", pattern_name, node_id_hex);
         let empty = MemTable::try_new(schema, vec![vec![]]).map_other()?;
         _ = ctx
             .register_table(
