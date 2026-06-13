@@ -277,17 +277,15 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         }
 
         // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
-        let mut sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
+        let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
                 crate::transform::null_padding::null_padding_table(
                     provider,
                     expected_columns.clone(),
                 )
                 .map_err(crate::Error::from)
-            });
-
-        // Add transforms if configured
-        sql_config.transforms = self.config.transforms.clone();
+            })
+            .with_transforms(self.config.transforms.clone());
 
         // Use SqlDerivedSeries factory to create the file
         let sql_file =
@@ -314,17 +312,16 @@ fn create_timeseries_pivot_handle(
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesPivotConfig =
-        serde_json::from_value(config).map_other_context("Invalid timeseries-pivot config")?;
+        crate::factory::config_util::config_from_value(config, "Invalid timeseries-pivot config")?;
 
     let pivot_file = TimeseriesPivotFile::new(cfg, context);
     Ok(pivot_file.create_handle())
 }
 
 fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
-
-    let cfg: TimeseriesPivotConfig =
-        serde_yaml::from_str(config_str).map_other_context("Invalid config")?;
+    let (_config_value, cfg) = crate::factory::config_util::parse_yaml_config::<
+        TimeseriesPivotConfig,
+    >(config, "Invalid timeseries-pivot config")?;
 
     // Validate scheme is recognized (no fallback for unknown schemes)
     let scheme = cfg.pattern.scheme();

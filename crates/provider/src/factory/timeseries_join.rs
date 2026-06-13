@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::ResultExt;
 use tinyfs::{FileHandle, Result as TinyFSResult};
 
 /// Time range bounds for filtering
@@ -278,16 +277,9 @@ impl TimeseriesJoinFile {
             log::debug!("[SEARCH] Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes and pattern transforms
-            let mut sql_config = if scope_prefixes.is_empty() {
-                SqlDerivedConfig::new(patterns, Some(sql_query))
-            } else {
-                SqlDerivedConfig::new_scoped(patterns, Some(sql_query), scope_prefixes)
-            };
-
-            // Add pattern transforms if any inputs have them
-            if !pattern_transforms.is_empty() {
-                sql_config.pattern_transforms = Some(pattern_transforms);
-            }
+            let sql_config = SqlDerivedConfig::new(patterns, Some(sql_query))
+                .with_scope_prefixes(scope_prefixes)
+                .with_pattern_transforms(pattern_transforms);
 
             // Create SqlDerivedFile in Series mode
             log::debug!(
@@ -529,23 +521,20 @@ fn create_timeseries_join_handle(
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesJoinConfig =
-        serde_json::from_value(config).map_other_context("Invalid timeseries-join config")?;
+        crate::factory::config_util::config_from_value(config, "Invalid timeseries-join config")?;
 
     let join_file = TimeseriesJoinFile::new(cfg, context)?;
     Ok(join_file.create_handle())
 }
 
 fn validate_timeseries_join_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
-
-    let config_value: Value = serde_yaml::from_str(config_str).map_other_context("Invalid YAML")?;
-
-    // Validate by deserializing
-    let _cfg: TimeseriesJoinConfig =
-        serde_json::from_value(config_value.clone()).map_other_context("Invalid configuration")?;
+    let (config_value, cfg) = crate::factory::config_util::parse_yaml_config::<TimeseriesJoinConfig>(
+        config,
+        "Invalid timeseries-join config",
+    )?;
 
     // Additional validation: generate SQL to catch errors early
-    let (_sql, _patterns) = generate_timeseries_join_sql(&_cfg)?;
+    let (_sql, _patterns) = generate_timeseries_join_sql(&cfg)?;
 
     Ok(config_value)
 }

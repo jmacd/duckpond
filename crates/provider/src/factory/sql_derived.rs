@@ -165,6 +165,39 @@ impl SqlDerivedConfig {
         self
     }
 
+    /// Builder method to set the global transform factory paths.
+    #[must_use]
+    pub fn with_transforms(mut self, transforms: Option<Vec<String>>) -> Self {
+        self.transforms = transforms;
+        self
+    }
+
+    /// Builder method to add scope prefixes. An empty map is ignored, leaving
+    /// `scope_prefixes` as `None` so callers need not branch on emptiness.
+    #[must_use]
+    pub fn with_scope_prefixes(
+        mut self,
+        scope_prefixes: HashMap<String, (String, String)>,
+    ) -> Self {
+        if !scope_prefixes.is_empty() {
+            self.scope_prefixes = Some(scope_prefixes);
+        }
+        self
+    }
+
+    /// Builder method to add per-pattern transforms. An empty map is ignored,
+    /// leaving `pattern_transforms` as `None`.
+    #[must_use]
+    pub fn with_pattern_transforms(
+        mut self,
+        pattern_transforms: HashMap<String, Vec<String>>,
+    ) -> Self {
+        if !pattern_transforms.is_empty() {
+            self.pattern_transforms = Some(pattern_transforms);
+        }
+        self
+    }
+
     /// Validate that all patterns are valid URLs with appropriate schemes for the given mode
     pub fn validate(&self, _mode: &SqlDerivedMode) -> TinyFSResult<()> {
         if self.patterns.is_empty() {

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod column_rename;
+mod config_util;
 pub mod dynamic_dir;
 pub mod journal_ingest;
 mod lazy_sql_file;

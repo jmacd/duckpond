@@ -69,7 +69,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, EntryType, Node, NodeMetadata, NodeType, Result as TinyFSResult,
 };
@@ -401,18 +400,15 @@ impl TemporalReduceSqlFile {
                 tinyfs::Error::Other(format!("Invalid pattern URL '{}': {}", self.pattern_url, e))
             })?;
 
-            let sql_config = SqlDerivedConfig {
-                patterns: {
+            let sql_config = SqlDerivedConfig::new(
+                {
                     let mut patterns = HashMap::new();
                     _ = patterns.insert(pattern_name.clone(), source_url);
                     patterns
                 },
-                query: Some(sql_query.clone()),
-                transforms: self.config.transforms.clone(),
-                pattern_transforms: None,
-                scope_prefixes: None,
-                provider_wrapper: None,
-            };
+                Some(sql_query.clone()),
+            )
+            .with_transforms(self.config.transforms.clone());
 
             log::debug!(
                 "[SEARCH] TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}",
@@ -1035,12 +1031,7 @@ fn create_temporal_reduce_directory(
     context: crate::FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let temporal_config: TemporalReduceConfig =
-        serde_json::from_value(config.clone()).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Invalid temporal-reduce config: {}: {:?}",
-                e, config
-            ))
-        })?;
+        crate::factory::config_util::config_from_value(config, "Invalid temporal-reduce config")?;
 
     let directory = TemporalReduceDirectory::new(temporal_config, context)?;
     Ok(directory.create_handle())
@@ -1048,24 +1039,15 @@ fn create_temporal_reduce_directory(
 
 /// Validate temporal reduce configuration
 fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8 in config")?;
-
-    let config_value: Value =
-        serde_yaml::from_str(config_str).map_other_context("Invalid YAML config")?;
-
-    // Validate by deserializing to our config struct
-    let _temporal_config: TemporalReduceConfig = serde_json::from_value(config_value.clone())
-        .map_other_context("Invalid temporal-reduce config")?;
+    let (config_value, temporal_config) = crate::factory::config_util::parse_yaml_config::<
+        TemporalReduceConfig,
+    >(config, "Invalid temporal-reduce config")?;
 
     // Additional validation: check that resolutions can be parsed
-    if let Some(resolutions) = config_value.get("resolutions").and_then(|r| r.as_array()) {
-        for resolution in resolutions {
-            if let Some(res_str) = resolution.as_str() {
-                _ = humantime::parse_duration(res_str).map_err(|e| {
-                    tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
-                })?;
-            }
-        }
+    for res_str in &temporal_config.resolutions {
+        _ = humantime::parse_duration(res_str).map_err(|e| {
+            tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
+        })?;
     }
 
     Ok(config_value)
