@@ -4,6 +4,7 @@
 
 use crate::EntryType;
 use crate::dir::*;
+use crate::error::ResultExt;
 use crate::error::*;
 use crate::fs::FS;
 use crate::node::*;
@@ -1155,7 +1156,7 @@ impl WD {
         let async_read: Pin<Box<dyn AsyncRead + Send>> = Box::pin(reader);
         crate::async_helpers::buffer_helpers::read_all_to_vec(async_read)
             .await
-            .map_err(|e| Error::Other(format!("Failed to read file content: {}", e)))
+            .map_other_context("Failed to read file content")
     }
 
     /// Write entire buffer to file via path (convenience for tests/special cases)
@@ -1170,11 +1171,11 @@ impl WD {
         writer
             .write_all(content)
             .await
-            .map_err(|e| Error::Other(format!("Failed to write file content: {}", e)))?;
+            .map_other_context("Failed to write file content")?;
         writer
             .shutdown()
             .await
-            .map_err(|e| Error::Other(format!("Failed to shutdown writer: {}", e)))?;
+            .map_other_context("Failed to shutdown writer")?;
         Ok(())
     }
 

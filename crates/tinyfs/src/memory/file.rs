@@ -6,6 +6,7 @@ use crate::EntryType;
 use crate::FileID;
 use crate::chained_reader::ChainedReader;
 use crate::error;
+use crate::error::ResultExt;
 use crate::file::{AsyncReadSeek, File, Handle};
 use crate::memory::MemoryPersistence;
 use crate::metadata::{Metadata, NodeMetadata};
@@ -135,10 +136,8 @@ impl File for MemoryFile {
             // Small files (<= 16KB with chunk_log=4) have empty bao outboards, rely on blake3
             if let Some(bao_outboard_bytes) = &metadata.bao_outboard {
                 use utilities::bao_outboard::VersionOutboard;
-                let version_outboard =
-                    VersionOutboard::from_bytes(bao_outboard_bytes).map_err(|e| {
-                        error::Error::Other(format!("Failed to deserialize VersionOutboard: {}", e))
-                    })?;
+                let version_outboard = VersionOutboard::from_bytes(bao_outboard_bytes)
+                    .map_other_context("Failed to deserialize VersionOutboard")?;
 
                 // Only validate with bao-tree if outboard is non-empty (file > 16KB)
                 if !version_outboard.outboard.is_empty() {
@@ -147,9 +146,7 @@ impl File for MemoryFile {
                         &version_outboard.outboard,
                         version_outboard.size,
                     )
-                    .map_err(|e| {
-                        error::Error::Other(format!("Bao-tree validation failed: {}", e))
-                    })?;
+                    .map_other_context("Bao-tree validation failed")?;
                 }
             }
 
@@ -227,8 +224,8 @@ impl crate::file::QueryableFile for MemoryFile {
             id.node_id()
         );
 
-        let table_url = ListingTableUrl::parse(&url_pattern)
-            .map_err(|e| error::Error::Other(format!("Failed to parse table URL: {}", e)))?;
+        let table_url =
+            ListingTableUrl::parse(&url_pattern).map_other_context("Failed to parse table URL")?;
 
         // Create ListingTable configuration with Parquet format
         let file_format = Arc::new(ParquetFormat::default());
@@ -240,11 +237,11 @@ impl crate::file::QueryableFile for MemoryFile {
         let config_with_schema = config
             .infer_schema(&ctx.state())
             .await
-            .map_err(|e| error::Error::Other(format!("Schema inference failed: {}", e)))?;
+            .map_other_context("Schema inference failed")?;
 
         // Create ListingTable
         let listing_table = ListingTable::try_new(config_with_schema)
-            .map_err(|e| error::Error::Other(format!("ListingTable creation failed: {}", e)))?;
+            .map_other_context("ListingTable creation failed")?;
 
         // Get temporal bounds for filtering (if any)
         let (min_time, max_time) = context

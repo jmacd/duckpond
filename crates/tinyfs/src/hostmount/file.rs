@@ -4,6 +4,7 @@
 
 use crate::FileID;
 use crate::error;
+use crate::error::ResultExt;
 use crate::file::{AsyncReadSeek, File, Handle};
 use crate::metadata::{Metadata, NodeMetadata};
 use async_trait::async_trait;
@@ -33,9 +34,9 @@ pub struct HostFile {
 impl Metadata for HostFile {
     async fn metadata(&self) -> error::Result<NodeMetadata> {
         let path = self.require_path()?;
-        let metadata = tokio::fs::metadata(path).await.map_err(|e| {
-            error::Error::Other(format!("Failed to stat '{}': {}", path.display(), e))
-        })?;
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_other_context(format!("Failed to stat '{}'", path.display()))?;
 
         let size = metadata.len();
         let timestamp = metadata
@@ -60,26 +61,18 @@ impl Metadata for HostFile {
 impl File for HostFile {
     async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let path = self.require_path()?;
-        let file = tokio::fs::File::open(path).await.map_err(|e| {
-            error::Error::Other(format!(
-                "Failed to open '{}' for reading: {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_other_context(format!("Failed to open '{}' for reading", path.display()))?;
 
         Ok(Box::pin(file))
     }
 
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let path = self.require_path()?;
-        let file = tokio::fs::File::create(path).await.map_err(|e| {
-            error::Error::Other(format!(
-                "Failed to open '{}' for writing: {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let file = tokio::fs::File::create(path)
+            .await
+            .map_other_context(format!("Failed to open '{}' for writing", path.display()))?;
 
         Ok(Box::pin(HostFileWriter { inner: file }))
     }

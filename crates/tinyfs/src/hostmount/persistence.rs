@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::error::ResultExt;
 use crate::error::{Error, Result};
 use crate::node::{FileID, Node, NodeType};
 use crate::persistence::{FileVersionInfo, PersistenceLayer};
@@ -36,13 +37,10 @@ impl HostmountPersistence {
     ///
     /// The directory must exist and be a directory.
     pub fn new(root_path: PathBuf) -> Result<Self> {
-        let canonical = root_path.canonicalize().map_err(|e| {
-            Error::Other(format!(
-                "Hostmount root '{}' cannot be resolved: {}",
-                root_path.display(),
-                e
-            ))
-        })?;
+        let canonical = root_path.canonicalize().map_other_context(format!(
+            "Hostmount root '{}' cannot be resolved",
+            root_path.display()
+        ))?;
 
         if !canonical.is_dir() {
             return Err(Error::Other(format!(
@@ -85,7 +83,7 @@ impl HostmountPersistence {
     /// Build a Node from a host path with the given FileID
     fn build_node_from_path(path: &Path, file_id: FileID) -> Result<Node> {
         let metadata = std::fs::metadata(path)
-            .map_err(|e| Error::Other(format!("Failed to stat '{}': {}", path.display(), e)))?;
+            .map_other_context(format!("Failed to stat '{}'", path.display()))?;
 
         let node_type = if metadata.is_dir() {
             NodeType::Directory(super::HostDirectory::new_handle(
@@ -218,7 +216,7 @@ impl PersistenceLayer for HostmountPersistence {
 
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| Error::Other(format!("Failed to stat '{}': {}", path.display(), e)))?;
+            .map_other_context(format!("Failed to stat '{}'", path.display()))?;
 
         let timestamp = metadata
             .modified()
@@ -256,7 +254,7 @@ impl PersistenceLayer for HostmountPersistence {
 
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| Error::Other(format!("Failed to stat '{}': {}", path.display(), e)))?;
+            .map_other_context(format!("Failed to stat '{}'", path.display()))?;
 
         if metadata.is_dir() {
             return Ok(Vec::new());
@@ -287,7 +285,7 @@ impl PersistenceLayer for HostmountPersistence {
 
         tokio::fs::read(&path)
             .await
-            .map_err(|e| Error::Other(format!("Failed to read '{}': {}", path.display(), e)))
+            .map_other_context(format!("Failed to read '{}'", path.display()))
     }
 
     async fn set_extended_attributes(
