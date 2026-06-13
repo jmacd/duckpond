@@ -857,6 +857,141 @@ mod tests {
         );
     }
 
+    // Regression: a timeseries-join input whose glob matches zero nodes must
+    // not break the whole query.  The generated SQL references every input by
+    // its `inputN` alias, so before the empty-placeholder fix an unmatched
+    // input produced "table 'inputN' not found" and aborted the build.  This
+    // mirrors the noyo combine, where a decommissioned instrument has archive
+    // data but no live `/hydrovu/...` series, leaving the live input empty.
+    #[tokio::test]
+    async fn test_timeseries_join_zero_match_input_is_empty_set() {
+        let (fs, provider_context) = create_test_environment().await;
+
+        // Helper to write a single-column series at `path`.
+        async fn write_series(
+            fs: &tinyfs::FS,
+            path: &str,
+            col: &str,
+            ts: Vec<i64>,
+            vals: Vec<f64>,
+        ) {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    false,
+                ),
+                Field::new(col, DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampSecondArray::from(ts)),
+                    Arc::new(Float64Array::from(vals)),
+                ],
+            )
+            .unwrap();
+            let mut buf = Vec::new();
+            {
+                let cursor = Cursor::new(&mut buf);
+                let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+                writer.write(&batch).unwrap();
+                _ = writer.close().unwrap();
+            }
+            _ = create_parquet_file(fs, path, buf, EntryType::TablePhysicalSeries)
+                .await
+                .unwrap();
+        }
+
+        // "archive" (resolves) and a same-scope "live" input that matches
+        // nothing, plus a second scope that resolves so we exercise the join.
+        write_series(
+            &fs,
+            "/silver_archive.series",
+            "temp",
+            vec![1, 2, 3],
+            vec![10.0, 20.0, 30.0],
+        )
+        .await;
+        write_series(
+            &fs,
+            "/field_live.series",
+            "pressure",
+            vec![2, 3, 4],
+            vec![100.0, 101.0, 102.0],
+        )
+        .await;
+
+        let root_id = FileID::root();
+        let context = test_context(&provider_context, root_id);
+
+        let config = TimeseriesJoinConfig {
+            time_column: "timestamp".to_string(),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: crate::Url::parse("series:///silver_archive.series").unwrap(),
+                    scope: Some("Silver".to_string()),
+                    range: None,
+                    transforms: None,
+                },
+                // Decommissioned-instrument live counterpart: matches no node.
+                TimeseriesInput {
+                    pattern: crate::Url::parse("series:///does_not_exist_*.series").unwrap(),
+                    scope: Some("Silver".to_string()),
+                    range: None,
+                    transforms: None,
+                },
+                TimeseriesInput {
+                    pattern: crate::Url::parse("series:///field_live.series").unwrap(),
+                    scope: Some("Field".to_string()),
+                    range: None,
+                    transforms: None,
+                },
+            ],
+        };
+
+        let join_file = TimeseriesJoinFile::new(config, context).unwrap();
+        let table_provider = join_file
+            .as_table_provider(root_id, &provider_context)
+            .await
+            .expect("zero-match input must not fail the join");
+
+        let ctx = &provider_context.datafusion_session;
+        let df_state = ctx.state();
+        let plan = table_provider
+            .scan(&df_state, None, &[], None)
+            .await
+            .unwrap();
+        let task_ctx = ctx.task_ctx();
+        let stream = plan.execute(0, task_ctx).unwrap();
+
+        use futures::StreamExt;
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(!batches.is_empty(), "join should still produce rows");
+        let column_names: Vec<String> = batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert!(
+            column_names.iter().any(|n| n == "Silver.temp"),
+            "resolved Silver input data must survive the empty same-scope sibling, got {column_names:?}"
+        );
+        assert!(
+            column_names.iter().any(|n| n == "Field.pressure"),
+            "second scope must be present, got {column_names:?}"
+        );
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 4, "union of timestamps 1,2,3,4 = 4 rows");
+    }
+
     #[tokio::test]
     async fn test_timeseries_join_same_scope_non_overlapping_ranges() {
         // Test the Silver case: two Vulink devices with same scope but non-overlapping time ranges
