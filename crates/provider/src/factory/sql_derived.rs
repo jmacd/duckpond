@@ -374,12 +374,10 @@ impl SqlDerivedFile {
                 .persistence
                 .get_dynamic_node_config(node_id)
                 .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Failed to get factory config for transform '{}': {}",
-                        transform_path, e
-                    ))
-                })?
+                .map_other_context(format!(
+                    "Failed to get factory config for transform '{}'",
+                    transform_path
+                ))?
                 .ok_or_else(|| {
                     tinyfs::Error::Other(format!(
                         "Transform file '{}' has no associated factory",
@@ -426,9 +424,7 @@ impl SqlDerivedFile {
             // Apply the transform - factory will read its own config from FileID
             table_provider = apply_fn(transform_context, table_provider)
                 .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!("Transform '{}' failed: {}", transform_path, e))
-                })?;
+                .map_other_context(format!("Transform '{}' failed", transform_path))?;
 
             debug!(
                 "[FIX] SQL-DERIVED: Transform {} applied successfully",
@@ -516,9 +512,7 @@ impl SqlDerivedFile {
         // form for tinyfs path matching.
         let tinyfs_path_decoded = percent_encoding::percent_decode_str(url.path())
             .decode_utf8()
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Invalid UTF-8 in URL path '{}': {}", url.path(), e))
-            })?
+            .map_other_context(format!("Invalid UTF-8 in URL path '{}'", url.path()))?
             .to_string();
         let tinyfs_path = tinyfs_path_decoded.as_str();
 
@@ -570,12 +564,7 @@ impl SqlDerivedFile {
             let pattern_matches = tinyfs_root
                 .collect_matches(tinyfs_path)
                 .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Failed to resolve pattern '{}': {}",
-                        tinyfs_path, e
-                    ))
-                })?;
+                .map_other_context(format!("Failed to resolve pattern '{}'", tinyfs_path))?;
 
             // Convert Vec<(NodePath, Vec<String>)> to Vec<(NodePath, HashMap<String, String>)>
             pattern_matches
@@ -987,8 +976,7 @@ impl SqlDerivedFile {
 
                 for node_path in queryable_files {
                     let file_url_str = Self::node_file_url(scheme, node_path);
-                    let file_url = crate::Url::parse(&file_url_str)
-                        .map_err(|e: crate::error::Error| tinyfs::Error::Other(e.to_string()))?;
+                    let file_url = crate::Url::parse(&file_url_str).map_other()?;
 
                     let (node_id, versions) = provider_api
                         .ensure_url_cached(&file_url, format_provider.as_ref(), cache_dir)

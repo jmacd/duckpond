@@ -79,9 +79,8 @@ impl ColumnRenameConfig {
     pub fn validate(&self) -> Result<(), tinyfs::Error> {
         for rule in &self.rules {
             if let RenameRule::Pattern { pattern, .. } = rule {
-                let _regex = Regex::new(pattern).map_err(|e| {
-                    tinyfs::Error::Other(format!("Invalid regex pattern '{}': {}", pattern, e))
-                })?;
+                let _regex = Regex::new(pattern)
+                    .map_other_context(format!("Invalid regex pattern '{}'", pattern))?;
             }
         }
         Ok(())
@@ -229,9 +228,7 @@ async fn apply_column_rename_transform(
     // Wrap with ColumnRenameTableProvider
     let provider =
         crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn, cast_map)
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to create rename provider: {}", e))
-            })?;
+            .map_other_context("Failed to create rename provider")?;
 
     Ok(std::sync::Arc::new(provider))
 }

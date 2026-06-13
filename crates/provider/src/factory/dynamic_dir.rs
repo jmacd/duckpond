@@ -99,12 +99,10 @@ impl DynamicDirDirectory {
         );
 
         // Convert the configuration to JSON bytes for factory validation
-        let config_bytes = serde_json::to_vec(&entry.config).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to serialize config for entry '{}': {}",
-                entry.name, e
-            ))
-        })?;
+        let config_bytes = serde_json::to_vec(&entry.config).map_other_context(format!(
+            "Failed to serialize config for entry '{}'",
+            entry.name
+        ))?;
 
         // Deterministically generate FileID for entry node based on entry name, factory, and config.
         // This MUST be computed before creating the factory so the factory receives its own
@@ -367,12 +365,10 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         }
 
         // Serialize entry config as JSON bytes for nested factory validation
-        let entry_config_bytes = serde_json::to_vec(&entry.config).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to serialize config for entry '{}': {}",
-                entry.name, e
-            ))
-        })?;
+        let entry_config_bytes = serde_json::to_vec(&entry.config).map_other_context(format!(
+            "Failed to serialize config for entry '{}'",
+            entry.name
+        ))?;
 
         // Validate the nested factory's configuration
         let validated_config =

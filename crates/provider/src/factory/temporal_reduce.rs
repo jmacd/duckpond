@@ -237,12 +237,10 @@ impl TemporalReduceSqlFile {
         let table_provider = provider
             .create_table_provider(&source_url, &datafusion_ctx)
             .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Failed to create table provider for source '{}': {}",
-                    source_url, e
-                ))
-            })?;
+            .map_other_context(format!(
+                "Failed to create table provider for source '{}'",
+                source_url
+            ))?;
 
         // Get schema and extract all column names, filtering out only the timestamp column
         // We include all columns (numeric and non-numeric) and let the aggregation functions
@@ -592,9 +590,8 @@ impl TemporalReduceDirectory {
         let mut parsed_resolutions = Vec::new();
 
         for res_str in &config.resolutions {
-            let duration = humantime::parse_duration(res_str).map_err(|e| {
-                tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
-            })?;
+            let duration = humantime::parse_duration(res_str)
+                .map_other_context(format!("Invalid resolution '{}'", res_str))?;
             parsed_resolutions.push((res_str.clone(), duration));
         }
 
@@ -1031,9 +1028,8 @@ fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
 
     // Additional validation: check that resolutions can be parsed
     for res_str in &temporal_config.resolutions {
-        _ = humantime::parse_duration(res_str).map_err(|e| {
-            tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
-        })?;
+        _ = humantime::parse_duration(res_str)
+            .map_other_context(format!("Invalid resolution '{}'", res_str))?;
     }
 
     Ok(config_value)

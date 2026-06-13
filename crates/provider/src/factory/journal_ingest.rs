@@ -195,12 +195,7 @@ async fn collect_journal_entries(
     let output = std::process::Command::new(&config.journalctl_command)
         .args(&cmd_args)
         .output()
-        .map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to spawn {}: {}",
-                config.journalctl_command, e
-            ))
-        })?;
+        .map_other_context(format!("Failed to spawn {}", config.journalctl_command))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
