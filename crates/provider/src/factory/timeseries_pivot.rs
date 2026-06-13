@@ -5,7 +5,9 @@
 //! Timeseries Pivot Factory
 //!
 //! Creates a series file that pivots specific columns from multiple inputs matched by a pattern.
-//! Performs dynamic schema introspection on each query to handle schema changes.
+//! Schema introspection is performed on first read; within a single transaction the
+//! filesystem is a consistent snapshot, so the resolved inputs are cached for the
+//! lifetime of the file instance (a fresh instance is built for each transaction).
 //!
 //! Example config:
 //! ```yaml
@@ -19,14 +21,12 @@
 
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use crate::register_dynamic_factory;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::ResultExt;
-use tinyfs::{EntryType, FileHandle, FileID, NodeMetadata, Result as TinyFSResult};
+use tinyfs::{FileHandle, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
 /// Configuration for timeseries-pivot factory
@@ -58,12 +58,18 @@ fn default_time_column() -> String {
 pub struct TimeseriesPivotFile {
     config: TimeseriesPivotConfig,
     context: crate::FactoryContext,
+    /// Lazily-built inner SqlDerivedFile (resolved on first read, then cached).
+    inner: Arc<Mutex<Option<SqlDerivedFile>>>,
 }
 
 impl TimeseriesPivotFile {
     #[must_use]
     pub fn new(config: TimeseriesPivotConfig, context: crate::FactoryContext) -> Self {
-        Self { config, context }
+        Self {
+            config,
+            context,
+            inner: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Resolve pattern to matched inputs, extracting captured site names
@@ -184,56 +190,14 @@ impl TimeseriesPivotFile {
         (sql, patterns)
     }
 
-    #[must_use]
-    pub fn create_handle(self) -> FileHandle {
-        FileHandle::new(Arc::new(Mutex::new(Box::new(self))))
-    }
-}
+    /// Ensure the inner SqlDerivedFile is created by resolving the pattern,
+    /// generating the pivot SQL, and configuring scope prefixes + null padding.
+    async fn ensure_inner(&self) -> TinyFSResult<()> {
+        let mut inner_guard = self.inner.lock().await;
+        if inner_guard.is_some() {
+            return Ok(());
+        }
 
-#[async_trait]
-impl tinyfs::File for TimeseriesPivotFile {
-    async fn async_reader(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
-        Err(tinyfs::Error::Other(
-            "TimeseriesPivotFile does not support direct reading".to_string(),
-        ))
-    }
-
-    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
-        Err(tinyfs::Error::Other(
-            "TimeseriesPivotFile is read-only".to_string(),
-        ))
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
-        Some(self)
-    }
-}
-
-#[async_trait]
-impl tinyfs::Metadata for TimeseriesPivotFile {
-    async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
-        Ok(NodeMetadata {
-            version: 1,
-            size: None,
-            blake3: None,
-            bao_outboard: None,
-            entry_type: EntryType::TableDynamic,
-            timestamp: 0,
-        })
-    }
-}
-
-#[async_trait]
-impl tinyfs::QueryableFile for TimeseriesPivotFile {
-    async fn as_table_provider(
-        &self,
-        id: FileID,
-        context: &tinyfs::ProviderContext,
-    ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         log::debug!(
             "[SEARCH] TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
             self.config.pattern,
@@ -287,14 +251,22 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
             })
             .with_transforms(self.config.transforms.clone());
 
-        // Use SqlDerivedSeries factory to create the file
         let sql_file =
             SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
+        *inner_guard = Some(sql_file);
+        Ok(())
+    }
 
-        // Delegate to SqlDerivedFile - it handles everything from here
-        sql_file.as_table_provider(id, context).await
+    #[must_use]
+    pub fn create_handle(self) -> FileHandle {
+        FileHandle::new(Arc::new(Mutex::new(Box::new(self))))
     }
 }
+
+crate::factory::lazy_sql_file::impl_lazy_sql_derived_delegation!(
+    TimeseriesPivotFile,
+    "TimeseriesPivotFile"
+);
 
 impl std::fmt::Debug for TimeseriesPivotFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -372,7 +344,7 @@ mod tests {
         let provider_context = create_provider_context();
         let context = test_context(&provider_context, FileID::root());
 
-        TimeseriesPivotFile { config, context }
+        TimeseriesPivotFile::new(config, context)
     }
 
     #[test]
