@@ -1,0 +1,3 @@
+The duckpond logo is a clipart version of @caspar_duckpond.jpg
+
+It should match colors with the blue in @../caspar.water/site/img/logo.svg
