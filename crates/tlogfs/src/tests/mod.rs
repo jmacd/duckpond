@@ -2198,6 +2198,278 @@ async fn test_file_physical_series_collapse_and_append() {
     verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
 }
 
+/// Append one `FilePhysicalSeries` version, creating `create_dir` first when
+/// provided. Shared by the collapse coverage tests below.
+async fn append_series_version(
+    persistence: &mut OpLogPersistence,
+    file_path: &str,
+    chunk: &[u8],
+    create_dir: Option<&str>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let tx = persistence.begin_test().await.expect("begin write tx");
+    let wd = tx.root().await.expect("root");
+    if let Some(dir) = create_dir {
+        _ = wd.create_dir_path(dir).await.expect("create dir");
+    }
+    let mut writer = wd
+        .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+        .await
+        .expect("writer");
+    writer.write_all(chunk).await.expect("write");
+    writer.shutdown().await.expect("shutdown");
+    tx.commit_test().await.expect("commit");
+}
+
+/// Number of live (non-superseded) versions of a series file.
+async fn live_version_count(persistence: &mut OpLogPersistence, file_path: &str) -> usize {
+    use tinyfs::persistence::PersistenceLayer;
+    let tx = persistence.begin_test().await.expect("begin read tx");
+    let wd = tx.root().await.expect("root");
+    let id = wd.get_node_path(file_path).await.expect("node").id();
+    let versions = tx
+        .state()
+        .expect("state")
+        .list_file_versions(id)
+        .await
+        .expect("list versions");
+    let n = versions.len();
+    tx.commit_test().await.expect("commit read");
+    n
+}
+
+/// Collapse of versions whose content exceeds `LARGE_FILE_THRESHOLD` must keep
+/// the externally stored bytes intact and preserve cumulative bao continuity
+/// across a post-collapse append.
+#[tokio::test]
+async fn test_collapse_large_file_series() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    use crate::large_files::LARGE_FILE_THRESHOLD;
+
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+    let file_path = "data/large.bin";
+
+    // Three versions, each over the large-file threshold so HybridWriter stores
+    // them externally rather than inline.
+    let chunk_len = LARGE_FILE_THRESHOLD + 4096;
+    let mut cumulative: Vec<u8> = Vec::new();
+    for (i, byte) in [11u8, 22u8, 33u8].iter().enumerate() {
+        let chunk = vec![*byte; chunk_len];
+        cumulative.extend_from_slice(&chunk);
+        let create = if i == 0 { Some("data") } else { None };
+        append_series_version(&mut persistence, file_path, &chunk, create).await;
+    }
+    assert_eq!(live_version_count(&mut persistence, file_path).await, 3);
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+
+    // Collapse the three large versions into one merged version.
+    {
+        let tx = persistence.begin_test().await.expect("begin collapse tx");
+        let wd = tx.root().await.expect("root");
+        let id = wd.get_node_path(file_path).await.expect("node").id();
+        let stats = tx
+            .state()
+            .expect("state")
+            .collapse_file_series(id)
+            .await
+            .expect("collapse_file_series");
+        assert!(stats.collapsed, "expected a collapse");
+        assert_eq!(stats.versions_before, 3);
+        assert_eq!(stats.bytes, cumulative.len() as u64);
+        tx.commit_test().await.expect("commit collapse");
+    }
+    assert_eq!(
+        live_version_count(&mut persistence, file_path).await,
+        1,
+        "collapse leaves a single live version"
+    );
+
+    // Content and cumulative bao are identical after collapse.
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let wd = tx.root().await.expect("root");
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("read collapsed");
+        assert_eq!(content, cumulative, "collapsed large content matches");
+        tx.commit_test().await.expect("commit read");
+    }
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+
+    // Append after collapse and confirm the bao state resumed from the merged
+    // baseline rather than double-counting the superseded large versions.
+    let tail = vec![44u8; chunk_len];
+    cumulative.extend_from_slice(&tail);
+    append_series_version(&mut persistence, file_path, &tail, None).await;
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+}
+
+/// Collapsing a file that was already collapsed once must use the highest
+/// `collapsed_through` sentinel, so only the versions written after the first
+/// collapse are merged and the content stays correct.
+#[tokio::test]
+async fn test_collapse_double_collapse() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+    let file_path = "data/events.csv";
+
+    let mut cumulative: Vec<u8> = Vec::new();
+    let first_batch: [&[u8]; 3] = [b"a,1\n", b"b,2\n", b"c,3\n"];
+    for (i, chunk) in first_batch.iter().enumerate() {
+        cumulative.extend_from_slice(chunk);
+        let create = if i == 0 { Some("data") } else { None };
+        append_series_version(&mut persistence, file_path, chunk, create).await;
+    }
+
+    // First collapse: 3 versions -> merged version 4 (collapsed_through = 3).
+    let merged_one = collapse_now(&mut persistence, file_path).await;
+    assert_eq!(merged_one, 4);
+    assert_eq!(live_version_count(&mut persistence, file_path).await, 1);
+
+    // Append two more versions after the first collapse.
+    for chunk in [b"d,4\n".as_slice(), b"e,5\n".as_slice()] {
+        cumulative.extend_from_slice(chunk);
+        append_series_version(&mut persistence, file_path, chunk, None).await;
+    }
+    assert_eq!(
+        live_version_count(&mut persistence, file_path).await,
+        3,
+        "merged version plus two appends"
+    );
+
+    // Second collapse: merged version 4 plus versions 5,6 -> merged version 7
+    // (collapsed_through = 6).
+    let merged_two = collapse_now(&mut persistence, file_path).await;
+    assert_eq!(merged_two, 7);
+    assert_eq!(live_version_count(&mut persistence, file_path).await, 1);
+
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let wd = tx.root().await.expect("root");
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("read double-collapsed");
+        assert_eq!(
+            content, cumulative,
+            "double-collapse preserves full content"
+        );
+        tx.commit_test().await.expect("commit read");
+    }
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+}
+
+/// Collapse the series file at `file_path` and return the merged version.
+async fn collapse_now(persistence: &mut OpLogPersistence, file_path: &str) -> i64 {
+    let tx = persistence.begin_test().await.expect("begin collapse tx");
+    let wd = tx.root().await.expect("root");
+    let id = wd.get_node_path(file_path).await.expect("node").id();
+    let stats = tx
+        .state()
+        .expect("state")
+        .collapse_file_series(id)
+        .await
+        .expect("collapse_file_series");
+    assert!(stats.collapsed, "expected a collapse at {file_path}");
+    tx.commit_test().await.expect("commit collapse");
+    stats.merged_version
+}
+
+/// `list_collapsible_series` must honor the threshold, return only series files
+/// above it, and exclude files already collapsed to a single version.
+#[tokio::test]
+async fn test_list_collapsible_series_threshold() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+
+    let noisy = "data/noisy.csv";
+    let quiet = "data/quiet.csv";
+
+    // noisy: three versions; quiet: one version.
+    for (i, chunk) in [
+        b"n,1\n".as_slice(),
+        b"n,2\n".as_slice(),
+        b"n,3\n".as_slice(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let create = if i == 0 { Some("data") } else { None };
+        append_series_version(&mut persistence, noisy, chunk, create).await;
+    }
+    append_series_version(&mut persistence, quiet, b"q,1\n", None).await;
+
+    let noisy_id = node_id_of(&mut persistence, noisy).await;
+
+    // threshold 1: only the file with more than one live version qualifies.
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let candidates = tx
+            .state()
+            .expect("state")
+            .list_collapsible_series(1)
+            .await
+            .expect("list_collapsible_series");
+        assert_eq!(
+            candidates,
+            vec![noisy_id],
+            "only noisy qualifies at threshold 1"
+        );
+        tx.commit_test().await.expect("commit read");
+    }
+
+    // threshold 5: nothing qualifies.
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let candidates = tx
+            .state()
+            .expect("state")
+            .list_collapsible_series(5)
+            .await
+            .expect("list_collapsible_series");
+        assert!(candidates.is_empty(), "no file has more than five versions");
+        tx.commit_test().await.expect("commit read");
+    }
+
+    // After collapsing noisy, it is excluded because its live count drops to 1.
+    _ = collapse_now(&mut persistence, noisy).await;
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let candidates = tx
+            .state()
+            .expect("state")
+            .list_collapsible_series(1)
+            .await
+            .expect("list_collapsible_series");
+        assert!(
+            candidates.is_empty(),
+            "a collapsed file is no longer a candidate"
+        );
+        tx.commit_test().await.expect("commit read");
+    }
+}
+
+/// Resolve the `FileID` of a node by path.
+async fn node_id_of(persistence: &mut OpLogPersistence, file_path: &str) -> tinyfs::FileID {
+    let tx = persistence.begin_test().await.expect("begin read tx");
+    let wd = tx.root().await.expect("root");
+    let id = wd.get_node_path(file_path).await.expect("node").id();
+    tx.commit_test().await.expect("commit read");
+    id
+}
+
 /// Regression test: cumulative_blake3 must be correct for FilePhysicalSeries
 /// with externally stored large content (>= 64KB per version).
 ///

@@ -2094,4 +2094,74 @@ mod tests {
         );
         _ = tx.commit().await.expect("commit read");
     }
+
+    #[tokio::test]
+    async fn test_collapse_versions_multiple_files() {
+        use tinyfs::ResultExt;
+        use tokio::io::AsyncWriteExt;
+
+        async fn write_version(
+            ship: &mut Ship,
+            path: &'static str,
+            chunk: &'static [u8],
+            make_dir: bool,
+        ) {
+            let meta = PondUserMetadata::new(vec!["write".to_string()]);
+            ship.write_transaction(&meta, async move |fs| {
+                let root = fs.root().await?;
+                if make_dir {
+                    _ = root.create_dir_path("data").await?;
+                }
+                let mut writer = root
+                    .async_writer_path_with_type(path, tinyfs::EntryType::FilePhysicalSeries)
+                    .await?;
+                writer.write_all(chunk).await.map_other()?;
+                writer.shutdown().await.map_other()?;
+                Ok(())
+            })
+            .await
+            .expect("series write");
+        }
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond_multi_collapse");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
+
+        let noisy = "/data/noisy.csv";
+        let quiet = "/data/quiet.csv";
+
+        // noisy: three versions; quiet: a single version.
+        let noisy_chunks: [&[u8]; 3] = [b"n,1\n", b"n,2\n", b"n,3\n"];
+        let mut noisy_full: Vec<u8> = Vec::new();
+        for (i, chunk) in noisy_chunks.iter().enumerate() {
+            noisy_full.extend_from_slice(chunk);
+            write_version(&mut ship, noisy, chunk, i == 0).await;
+        }
+        write_version(&mut ship, quiet, b"q,1\n", false).await;
+
+        // Collapse anything with more than one live version: only noisy qualifies.
+        let report = ship.collapse_versions(1).await.expect("collapse versions");
+        assert_eq!(report.candidates, 1, "only the noisy file is a candidate");
+        assert_eq!(report.files_collapsed, 1);
+        assert_eq!(report.versions_collapsed, 3);
+
+        // noisy now reads as the merged concatenation; quiet is untouched.
+        let meta = PondUserMetadata::new(vec!["read".to_string()]);
+        let tx = ship.begin_read(&meta).await.expect("begin read");
+        let root = tx.root().await.expect("root");
+        let noisy_content = root.read_file_path_to_vec(noisy).await.expect("read noisy");
+        assert_eq!(
+            noisy_content, noisy_full,
+            "noisy collapsed to concatenation"
+        );
+        let quiet_content = root.read_file_path_to_vec(quiet).await.expect("read quiet");
+        assert_eq!(quiet_content, b"q,1\n", "quiet file is unchanged");
+        _ = tx.commit().await.expect("commit read");
+
+        // A second sweep is a clean no-op now that nothing qualifies.
+        let again = ship.collapse_versions(1).await.expect("second sweep");
+        assert_eq!(again.files_collapsed, 0, "nothing left to collapse");
+    }
 }
