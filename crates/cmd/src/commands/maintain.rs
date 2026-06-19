@@ -10,7 +10,13 @@ use log::info;
 ///
 /// Performs checkpoint creation, log cleanup, and vacuum.
 /// When `compact` is true, also merges small parquet files.
-pub async fn maintain_command(ship_context: &ShipContext, compact: bool) -> Result<()> {
+/// When `collapse_versions` is non-zero, also collapses multi-version
+/// `data:series` files whose live version count exceeds that threshold.
+pub async fn maintain_command(
+    ship_context: &ShipContext,
+    compact: bool,
+    collapse_versions: usize,
+) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
     info!("Running maintenance on pond: {}", pond_path.display());
 
@@ -20,6 +26,16 @@ pub async fn maintain_command(ship_context: &ShipContext, compact: bool) -> Resu
         .map_err(|e| anyhow!("Failed to open pond: {}", e))?;
 
     let report = ship.maintain(true, compact).await;
+
+    let collapse_report = if collapse_versions > 0 {
+        Some(
+            ship.collapse_versions(collapse_versions)
+                .await
+                .map_err(|e| anyhow!("Version collapse failed: {}", e))?,
+        )
+    } else {
+        None
+    };
 
     // Print results to stdout
     #[allow(clippy::print_stdout)]
@@ -35,6 +51,9 @@ pub async fn maintain_command(ship_context: &ShipContext, compact: bool) -> Resu
                 "  data compaction recorded as a transaction; \
                  run `pond push` to replicate it as a Compact bundle"
             );
+        }
+        if let Some(ref collapse) = collapse_report {
+            println!("{}", collapse);
         }
     }
 

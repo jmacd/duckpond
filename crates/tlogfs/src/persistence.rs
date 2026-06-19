@@ -157,6 +157,29 @@ pub struct State {
 // Re-export TableProviderKey from provider for backward compatibility
 pub use provider::TableProviderKey;
 
+/// Outcome of [`State::collapse_file_series`].
+#[derive(Debug, Clone)]
+pub struct CollapseStats {
+    /// True if a merged version was written; false for a no-op (fewer than
+    /// two live versions to merge).
+    pub collapsed: bool,
+    /// Number of live (non-superseded, non-empty) versions before the collapse.
+    pub versions_before: usize,
+    /// Version number of the merged row written, when `collapsed` is true.
+    pub merged_version: i64,
+    /// Total bytes of merged content.
+    pub bytes: u64,
+}
+
+/// Identity columns returned by the [`State::list_collapsible_series`]
+/// discovery query, deserialized straight from the projected record batch.
+#[derive(serde::Deserialize)]
+struct CollapseCandidate {
+    pond_id: String,
+    part_id: String,
+    node_id: String,
+}
+
 /// One reconstructed write transaction recovered from the data Delta
 /// table's commit history by [`OpLogPersistence::reconstruct_txn_history`].
 ///
@@ -552,7 +575,33 @@ impl OpLogPersistence {
                         found: part_cols.join(", "),
                     });
                 }
-                existing_table
+
+                // Schema migration: add any OplogEntry columns missing from the
+                // on-disk table. add_columns() emits a metadata-only Delta commit
+                // with no pond_txn, so it is tolerated by last_txn_seq recovery the
+                // same way vacuum/optimize commits are. Pre-existing rows read back
+                // the new columns as NULL. Idempotent: re-opening a migrated table
+                // finds no missing columns and emits no commit.
+                let missing_fields: Vec<deltalake::kernel::StructField> = {
+                    let existing_schema = existing_table.snapshot()?.schema();
+                    OplogEntry::for_delta()
+                        .into_iter()
+                        .filter(|f| !existing_schema.contains(&f.name))
+                        .collect()
+                };
+                if missing_fields.is_empty() {
+                    existing_table
+                } else {
+                    info!(
+                        "Migrating Delta schema at {}: adding column(s) {:?}",
+                        &path_str,
+                        missing_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+                    );
+                    existing_table
+                        .add_columns()
+                        .with_fields(missing_fields)
+                        .await?
+                }
             }
             Err(open_err) => {
                 debug!(
@@ -565,7 +614,7 @@ impl OpLogPersistence {
                     "delta.dataSkippingStatsColumns".to_string(),
                     // pond_id and part_id are partition columns (in the file path);
                     // partition columns do not need data-skipping stats.
-                    Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                    Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,collapsed_through".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -1030,6 +1079,263 @@ impl State {
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
         &self.large_file_options
+    }
+
+    /// Collapse all live versions of a `FilePhysicalSeries` node into a single
+    /// merged version so that subsequent reads are O(1) instead of O(versions).
+    ///
+    /// The merged version stores the full concatenated content plus a
+    /// `collapsed_through = M - 1` sentinel; the series read path then skips
+    /// every superseded version. The bytes read back from the file are
+    /// byte-identical before and after, which this method verifies, failing
+    /// the transaction on any mismatch.
+    ///
+    /// Must be called inside an open write transaction; the merged row is
+    /// committed with the surrounding transaction. Returns a no-op result when
+    /// fewer than two live versions exist.
+    ///
+    /// # Errors
+    /// Returns an error if `id` is not a `FilePhysicalSeries`, if reading or
+    /// writing the merged content fails, or if the post-collapse content does
+    /// not match the pre-collapse content.
+    pub async fn collapse_file_series(&self, id: FileID) -> Result<CollapseStats, TLogFSError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        if id.entry_type() != EntryType::FilePhysicalSeries {
+            return Err(TLogFSError::Transaction {
+                message: format!(
+                    "collapse_file_series requires a FilePhysicalSeries node, got {:?} for {id}",
+                    id.entry_type()
+                ),
+            });
+        }
+
+        // Assess current versions and gather metadata the merged row inherits.
+        let (versions_before, temporal, store_path, options) = {
+            let mut inner = self.inner.lock().await;
+            let records = inner.query_records(id).await?;
+            let collapsed_through = records.iter().filter_map(|r| r.collapsed_through).max();
+            let mut live: Vec<&OplogEntry> = records
+                .iter()
+                .filter(|r| r.size.unwrap_or(0) > 0)
+                .filter(|r| collapsed_through.is_none_or(|k| r.version > k))
+                .collect();
+            live.sort_by_key(|r| r.version);
+
+            if live.len() < 2 {
+                return Ok(CollapseStats {
+                    collapsed: false,
+                    versions_before: live.len(),
+                    merged_version: 0,
+                    bytes: 0,
+                });
+            }
+
+            let latest = *live.last().expect("live is non-empty");
+            let timestamp_column = latest
+                .get_extended_attributes()
+                .map(|a| a.timestamp_column().to_string())
+                .filter(|s| !s.is_empty());
+            let min_event = live.iter().filter_map(|r| r.min_event_time).min();
+            let max_event = live.iter().filter_map(|r| r.max_event_time).max();
+            let temporal = match (min_event, max_event, timestamp_column) {
+                (Some(min), Some(max), Some(col)) => Some((min, max, col)),
+                _ => None,
+            };
+
+            (
+                live.len(),
+                temporal,
+                inner.path.clone(),
+                inner.large_file_options.clone(),
+            )
+        };
+
+        // Read the merged content via the existing series reader. It already
+        // concatenates only the live versions oldest-first, so this is the
+        // authoritative post-collapse content.
+        let merged = {
+            let mut reader = self.inner.lock().await.async_file_reader(id).await?;
+            let mut buf = Vec::new();
+            _ = reader.read_to_end(&mut buf).await.map_err(|e| {
+                TLogFSError::Internal(format!("collapse: read merged content: {e}"))
+            })?;
+            buf
+        };
+
+        // Re-write the merged bytes as a fresh first-version body so the
+        // bao-tree cumulative state covers exactly this content; a later append
+        // then resumes correctly from the merged baseline.
+        let mut writer = crate::large_files::HybridWriter::with_options(&store_path, options);
+        writer
+            .write_all(&merged)
+            .await
+            .map_err(|e| TLogFSError::Internal(format!("collapse: write merged content: {e}")))?;
+        writer
+            .flush()
+            .await
+            .map_err(|e| TLogFSError::Internal(format!("collapse: flush merged content: {e}")))?;
+        let result = writer
+            .finalize()
+            .await
+            .map_err(|e| TLogFSError::Internal(format!("collapse: finalize merged: {e}")))?;
+
+        let content_len = result.size;
+        let series_outboard = utilities::bao_outboard::SeriesOutboard::from_first_version_state(
+            &result.bao_state,
+            content_len as u64,
+        );
+        let bao_outboard = series_outboard.to_bytes();
+
+        let content_ref = if result.content.is_empty()
+            && content_len >= crate::large_files::LARGE_FILE_THRESHOLD
+        {
+            crate::file_writer::ContentRef::Large(result.blake3, content_len as u64)
+        } else {
+            crate::file_writer::ContentRef::Small(result.content)
+        };
+
+        // Enqueue the merged version with the collapse sentinel.
+        let merged_version = {
+            let mut inner = self.inner.lock().await;
+            let version = inner.get_next_version_for_node(id).await?;
+            let now = Utc::now().timestamp_micros();
+            let txn_seq = inner.txn_seq;
+
+            let mut entry = match (content_ref, &temporal) {
+                (crate::file_writer::ContentRef::Small(content), Some((min, max, col))) => {
+                    let mut ea = crate::schema::ExtendedAttributes::default();
+                    _ = ea.set_timestamp_column(col);
+                    OplogEntry::new_file_series(id, now, version, content, *min, *max, ea, txn_seq)
+                }
+                (crate::file_writer::ContentRef::Small(content), None) => {
+                    OplogEntry::new_small_file(id, now, version, content, txn_seq)
+                }
+                (crate::file_writer::ContentRef::Large(b3, size), Some((min, max, col))) => {
+                    let mut ea = crate::schema::ExtendedAttributes::default();
+                    _ = ea.set_timestamp_column(col);
+                    OplogEntry::new_large_file_series(
+                        id,
+                        now,
+                        version,
+                        b3,
+                        size as i64,
+                        *min,
+                        *max,
+                        ea,
+                        txn_seq,
+                    )
+                }
+                (crate::file_writer::ContentRef::Large(b3, size), None) => {
+                    OplogEntry::new_large_file(id, now, version, b3, size as i64, txn_seq)
+                }
+            };
+            entry.set_bao_outboard(bao_outboard);
+            entry.collapsed_through = Some(version - 1);
+            inner.records.push(entry);
+            version
+        };
+
+        // Invariant: bytes read back must be identical to the merged content.
+        let after = {
+            let mut reader = self.inner.lock().await.async_file_reader(id).await?;
+            let mut buf = Vec::new();
+            _ = reader
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|e| TLogFSError::Internal(format!("collapse: verify read: {e}")))?;
+            buf
+        };
+        if after != merged {
+            return Err(TLogFSError::Transaction {
+                message: format!(
+                    "collapse invariant violated for {id}: merged {} bytes but post-collapse read {} bytes",
+                    merged.len(),
+                    after.len()
+                ),
+            });
+        }
+
+        Ok(CollapseStats {
+            collapsed: true,
+            versions_before,
+            merged_version,
+            bytes: content_len as u64,
+        })
+    }
+
+    /// Discover `FilePhysicalSeries` nodes with more than `threshold` live
+    /// versions, the candidates worth passing to [`State::collapse_file_series`].
+    ///
+    /// A live version has `size > 0` and a `version` greater than the node's
+    /// highest `collapsed_through` sentinel, so a node already collapsed to a
+    /// single merged version is never returned. The query spans all partitions
+    /// in the pond.
+    ///
+    /// # Errors
+    /// Returns an error if the discovery query fails or a returned identifier
+    /// cannot be parsed back into a [`FileID`].
+    pub async fn list_collapsible_series(
+        &self,
+        threshold: usize,
+    ) -> Result<Vec<FileID>, TLogFSError> {
+        let inner = self.inner.lock().await;
+        let series = EntryType::FilePhysicalSeries.as_str();
+        let sql = format!(
+            "SELECT t.pond_id AS pond_id, t.part_id AS part_id, t.node_id AS node_id \
+             FROM delta_table t \
+             JOIN ( \
+                 SELECT part_id, node_id, MAX(COALESCE(collapsed_through, -1)) AS k \
+                 FROM delta_table \
+                 WHERE file_type = '{series}' \
+                 GROUP BY part_id, node_id \
+             ) m ON t.part_id = m.part_id AND t.node_id = m.node_id \
+             WHERE t.file_type = '{series}' AND t.size > 0 AND t.version > m.k \
+             GROUP BY t.pond_id, t.part_id, t.node_id \
+             HAVING COUNT(*) > {threshold}"
+        );
+
+        let df = inner
+            .session_context
+            .sql(&sql)
+            .await
+            .map_err(|e| TLogFSError::Transaction {
+                message: format!("collapse discovery query failed: {e}"),
+            })?;
+        let batches = df.collect().await.map_err(|e| TLogFSError::Transaction {
+            message: format!("collapse discovery collect failed: {e}"),
+        })?;
+
+        let mut ids = Vec::new();
+        for batch in &batches {
+            let rows: Vec<CollapseCandidate> =
+                serde_arrow::from_record_batch(batch).map_err(|e| TLogFSError::Transaction {
+                    message: format!("collapse discovery deserialize failed: {e}"),
+                })?;
+            for row in rows {
+                let node_id = tinyfs::NodeID::from_string(&row.node_id).map_err(|e| {
+                    TLogFSError::Transaction {
+                        message: format!("collapse discovery bad node_id '{}': {e}", row.node_id),
+                    }
+                })?;
+                let part_id = tinyfs::PartID::from_hex_string(&row.part_id).map_err(|e| {
+                    TLogFSError::Transaction {
+                        message: format!("collapse discovery bad part_id '{}': {e}", row.part_id),
+                    }
+                })?;
+                let pond_id =
+                    row.pond_id
+                        .parse::<uuid7::Uuid>()
+                        .map_err(|e| TLogFSError::Transaction {
+                            message: format!(
+                                "collapse discovery bad pond_id '{}': {e}",
+                                row.pond_id
+                            ),
+                        })?;
+                ids.push(FileID::new_from_ids(part_id, node_id, pond_id));
+            }
+        }
+        Ok(ids)
     }
 
     /// Initialize root directory - delegates to inner StateImpl
@@ -2202,10 +2508,19 @@ impl InnerState {
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         use tinyfs::chained_reader::ChainedReader;
 
-        // Filter for non-empty versions and reverse to get oldest-first order
-        // (query_records returns newest-first)
-        let mut valid_records: Vec<&OplogEntry> =
-            records.iter().filter(|r| r.size.unwrap_or(0) > 0).collect();
+        // Versions at or below the highest `collapsed_through` sentinel have been
+        // superseded by a merged collapse row and must be skipped; otherwise their
+        // bytes would be double-counted alongside the merged version that replaced
+        // them. `None` (the common, un-collapsed case) keeps every version.
+        let collapsed_through = records.iter().filter_map(|r| r.collapsed_through).max();
+
+        // Filter for non-empty, non-superseded versions and reverse to get
+        // oldest-first order (query_records returns newest-first).
+        let mut valid_records: Vec<&OplogEntry> = records
+            .iter()
+            .filter(|r| r.size.unwrap_or(0) > 0) // Skip 0-byte versions
+            .filter(|r| collapsed_through.is_none_or(|k| r.version > k))
+            .collect();
         valid_records.reverse(); // Now oldest-first
 
         if valid_records.is_empty() {
@@ -3504,8 +3819,15 @@ impl InnerState {
         // Sort records by version number (which should match timestamp order anyway)
         records.sort_by_key(|record| record.version);
 
+        // Hide versions superseded by a collapse merge row: a FilePhysicalSeries
+        // merged version stores collapsed_through = M-1, so versions <= M-1 are no
+        // longer independently readable. collapsed_through is always None for other
+        // entry types, leaving their listings unchanged.
+        let collapsed_through = records.iter().filter_map(|r| r.collapsed_through).max();
+
         let version_infos = records
             .into_iter()
+            .filter(|record| collapsed_through.is_none_or(|k| record.version > k))
             .map(|record| {
                 // Use the actual database version number, not a re-enumerated logical version
                 let version = record.version as u64;

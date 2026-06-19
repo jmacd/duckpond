@@ -180,6 +180,20 @@ impl Steward {
         }
     }
 
+    /// Collapse multi-version `data:series` files whose live version count
+    /// exceeds `threshold` into a single merged version.
+    ///
+    /// Returns a default (empty) report for Host stewards.
+    pub async fn collapse_versions(
+        &mut self,
+        threshold: usize,
+    ) -> Result<crate::CollapseReport, StewardError> {
+        match self {
+            Steward::Pond(ship) => ship.collapse_versions(threshold).await,
+            Steward::Host(_) => Ok(crate::CollapseReport::default()),
+        }
+    }
+
     // -- Access to the underlying Ship (for pond-specific operations) --
 
     /// Get the underlying Ship if this is a Pond steward.

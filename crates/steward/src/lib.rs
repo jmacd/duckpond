@@ -30,7 +30,7 @@ pub use host::{HostSteward, HostTransaction};
 pub use rebuild::{RebuildReport, rebuild_control_table};
 pub use remote_adapter::{PushOutcome, ShipRemoteSteward, push_pending_to_remote};
 pub use remote_config::{RemoteAttachment, RemoteConfigError, RemoteMode};
-pub use ship::{CompactOutcome, Ship};
+pub use ship::{CollapseReport, CompactOutcome, Ship};
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
 /// Recovery command result

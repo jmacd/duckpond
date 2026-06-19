@@ -2062,6 +2062,142 @@ async fn test_file_physical_series_version_concatenation() {
     log::debug!("- Read back yielded concatenated content in correct order");
 }
 
+/// Collapse a multi-version FilePhysicalSeries into one merged version, then
+/// verify content, version count, and that an append AFTER collapse resumes
+/// the cumulative bao-tree from the merged baseline correctly.
+#[tokio::test]
+async fn test_file_physical_series_collapse_and_append() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+    let file_path = "data/events.csv";
+
+    let chunks: [&[u8]; 4] = [
+        b"name,value\n",
+        b"alice,100\n",
+        b"bob,200\n",
+        b"carol,300\n",
+    ];
+    let mut cumulative: Vec<u8> = Vec::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        cumulative.extend_from_slice(chunk);
+        let tx = persistence.begin_test().await.expect("begin write tx");
+        let wd = tx.root().await.expect("root");
+        if i == 0 {
+            _ = wd.create_dir_path("data").await.expect("create data dir");
+        }
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer");
+        writer.write_all(chunk).await.expect("write");
+        writer.shutdown().await.expect("shutdown");
+        tx.commit_test().await.expect("commit");
+    }
+
+    // Cumulative bao is correct across the four pre-collapse versions.
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+
+    // Collapse the four versions into one merged version.
+    let merged_version = {
+        let tx = persistence.begin_test().await.expect("begin collapse tx");
+        let wd = tx.root().await.expect("root");
+        let id = wd.get_node_path(file_path).await.expect("node").id();
+        let state = tx.state().expect("state");
+        let stats = state
+            .collapse_file_series(id)
+            .await
+            .expect("collapse_file_series");
+        assert!(stats.collapsed, "expected a collapse to occur");
+        assert_eq!(stats.versions_before, 4);
+        tx.commit_test().await.expect("commit collapse");
+        stats.merged_version
+    };
+    assert_eq!(merged_version, 5, "merged version is next after 4 writes");
+
+    // After collapse: content identical and exactly one live version remains.
+    {
+        use tinyfs::persistence::PersistenceLayer;
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let wd = tx.root().await.expect("root");
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("read collapsed");
+        assert_eq!(
+            content, cumulative,
+            "collapsed content must equal concatenation"
+        );
+
+        let id = wd.get_node_path(file_path).await.expect("node").id();
+        let versions = tx
+            .state()
+            .expect("state")
+            .list_file_versions(id)
+            .await
+            .expect("list versions");
+        assert_eq!(versions.len(), 1, "collapse leaves one live version");
+        assert_eq!(versions[0].version, 5);
+        tx.commit_test().await.expect("commit read");
+    }
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+
+    // Append AFTER collapse — this is the bao-continuity stress: the append must
+    // resume from the merged baseline, not double-count the superseded versions.
+    {
+        let chunk: &[u8] = b"dave,400\n";
+        cumulative.extend_from_slice(chunk);
+        let tx = persistence.begin_test().await.expect("begin append tx");
+        let wd = tx.root().await.expect("root");
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer append");
+        writer.write_all(chunk).await.expect("write append");
+        writer.shutdown().await.expect("shutdown append");
+        tx.commit_test().await.expect("commit append");
+    }
+
+    // Read back merged + appended content and confirm two live versions.
+    {
+        use tinyfs::persistence::PersistenceLayer;
+        let tx = persistence.begin_test().await.expect("begin read2 tx");
+        let wd = tx.root().await.expect("root");
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("read appended");
+        assert_eq!(
+            content, cumulative,
+            "post-collapse append must read merged + appended content"
+        );
+
+        let id = wd.get_node_path(file_path).await.expect("node").id();
+        let versions = tx
+            .state()
+            .expect("state")
+            .list_file_versions(id)
+            .await
+            .expect("list versions");
+        assert_eq!(
+            versions.len(),
+            2,
+            "merged version plus one appended version"
+        );
+        tx.commit_test().await.expect("commit read2");
+    }
+
+    // The decisive check: cumulative bao over the full logical content still
+    // matches a fresh computation, proving the append resumed correctly.
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative).await;
+}
+
 /// Regression test: cumulative_blake3 must be correct for FilePhysicalSeries
 /// with externally stored large content (>= 64KB per version).
 ///

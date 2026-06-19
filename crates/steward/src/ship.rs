@@ -42,6 +42,28 @@ pub struct CompactOutcome {
     pub data_delta_version: i64,
 }
 
+/// Outcome of a multi-version collapse sweep ([`Ship::collapse_versions`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CollapseReport {
+    /// Number of `FilePhysicalSeries` nodes that exceeded the version
+    /// threshold and were selected for collapse.
+    pub candidates: usize,
+    /// Number of nodes actually collapsed into a single merged version.
+    pub files_collapsed: usize,
+    /// Total live versions superseded across all collapsed nodes.
+    pub versions_collapsed: usize,
+}
+
+impl std::fmt::Display for CollapseReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "collapse: {} file(s) collapsed, {} version(s) superseded ({} candidate(s))",
+            self.files_collapsed, self.versions_collapsed, self.candidates
+        )
+    }
+}
+
 impl Ship {
     /// Initialize a completely new pond with proper transaction #1.
     ///
@@ -757,6 +779,72 @@ impl Ship {
         report.control = Some(control_result);
 
         report
+    }
+
+    /// Collapse every `FilePhysicalSeries` node with more than `threshold` live
+    /// versions into a single merged version, so subsequent reads are O(1)
+    /// instead of O(versions).
+    ///
+    /// Discovery runs first in a read transaction; only when at least one
+    /// candidate exists is a write transaction opened. The merged rows are
+    /// written as a NORMAL `Write` transaction so they replicate like any other
+    /// write. When nothing qualifies, no write transaction is opened and no
+    /// sequence number is consumed.
+    ///
+    /// # Errors
+    /// Returns an error if discovery fails, if any collapse fails, or if the
+    /// commit fails. A failed collapse aborts the whole transaction so no
+    /// partial merge is committed.
+    pub async fn collapse_versions(
+        &mut self,
+        threshold: usize,
+    ) -> Result<CollapseReport, StewardError> {
+        let meta = PondUserMetadata::new(vec![
+            "pond".to_string(),
+            "maintain".to_string(),
+            "--collapse-versions".to_string(),
+        ]);
+
+        // Phase 1: discover candidates under a read transaction. Reads take no
+        // control-table records and consume no sequence number, so a sweep that
+        // finds nothing leaves no trace.
+        let candidates = {
+            let tx = self.begin_read(&meta).await?;
+            let candidates = {
+                let state = tx.state()?;
+                state.list_collapsible_series(threshold).await?
+            };
+            _ = tx.commit().await?;
+            candidates
+        };
+
+        let mut report = CollapseReport {
+            candidates: candidates.len(),
+            ..CollapseReport::default()
+        };
+        if candidates.is_empty() {
+            return Ok(report);
+        }
+
+        // Phase 2: collapse the candidates inside a single write transaction.
+        let tx = self.begin_write(&meta).await?;
+        let state = match tx.state() {
+            Ok(state) => state,
+            Err(e) => return Err(tx.abort(e).await),
+        };
+        for id in candidates {
+            match state.collapse_file_series(id).await {
+                Ok(stats) if stats.collapsed => {
+                    report.files_collapsed += 1;
+                    report.versions_collapsed += stats.versions_before;
+                }
+                Ok(_) => {}
+                Err(e) => return Err(tx.abort(e).await),
+            }
+        }
+        _ = tx.commit().await?;
+
+        Ok(report)
     }
 
     /// Compact this pond's own data partitions as a RECORDED, pushable
@@ -1928,5 +2016,82 @@ mod tests {
         debug!(
             "[OK] Directory tree creation produces exactly one version per node with correct numbering"
         );
+    }
+
+    #[tokio::test]
+    async fn test_collapse_versions_end_to_end() {
+        use tinyfs::ResultExt;
+        use tokio::io::AsyncWriteExt;
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_pond_collapse");
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to create pond");
+
+        let file_path = "/data/events.csv";
+        let chunks: [&[u8]; 4] = [b"name,value\n", b"alice,1\n", b"bob,2\n", b"carol,3\n"];
+        let mut cumulative: Vec<u8> = Vec::new();
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            cumulative.extend_from_slice(chunk);
+            let meta = PondUserMetadata::new(vec![format!("write{i}")]);
+            let chunk = chunk.to_vec();
+            let first = i == 0;
+            ship.write_transaction(&meta, async move |fs| {
+                let root = fs.root().await?;
+                if first {
+                    _ = root.create_dir_path("data").await?;
+                }
+                let mut writer = root
+                    .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+                    .await?;
+                writer.write_all(&chunk).await.map_other()?;
+                writer.shutdown().await.map_other()?;
+                Ok(())
+            })
+            .await
+            .expect("series write transaction");
+        }
+
+        // A sweep below the version count finds nothing and opens no write txn.
+        let seq_before = ship.last_write_seq;
+        let none = ship
+            .collapse_versions(10)
+            .await
+            .expect("collapse with high threshold");
+        assert_eq!(
+            none.files_collapsed, 0,
+            "threshold above version count is a no-op"
+        );
+        assert_eq!(
+            ship.last_write_seq, seq_before,
+            "a no-op collapse must not consume a sequence number"
+        );
+
+        // Collapse anything with more than one live version.
+        let report = ship.collapse_versions(1).await.expect("collapse versions");
+        assert_eq!(
+            report.files_collapsed, 1,
+            "the one series file is collapsed"
+        );
+        assert_eq!(
+            report.versions_collapsed, 4,
+            "all four live versions merged"
+        );
+
+        // Content is byte-identical after the collapse.
+        let meta = PondUserMetadata::new(vec!["read".to_string()]);
+        let tx = ship.begin_read(&meta).await.expect("begin read");
+        let root = tx.root().await.expect("root");
+        let content = root
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("read collapsed content");
+        assert_eq!(
+            content, cumulative,
+            "collapsed content equals concatenation"
+        );
+        _ = tx.commit().await.expect("commit read");
     }
 }
