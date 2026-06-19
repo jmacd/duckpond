@@ -197,6 +197,11 @@ enum Commands {
         /// Also compact small parquet files into larger ones
         #[arg(long)]
         compact: bool,
+        /// Also collapse multi-version `data:series` files whose live version
+        /// count exceeds this threshold into a single merged version. Pass 0 to
+        /// disable (the default).
+        #[arg(long, default_value = "0")]
+        collapse_versions: usize,
     },
     /// Show pond contents
     Show {
@@ -497,7 +502,10 @@ async fn main() -> Result<()> {
             // Recover command works with potentially damaged pond, handle specially
             commands::recover_command(&ship_context).await
         }
-        Commands::Maintain { compact } => commands::maintain_command(&ship_context, compact).await,
+        Commands::Maintain {
+            compact,
+            collapse_versions,
+        } => commands::maintain_command(&ship_context, compact, collapse_versions).await,
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {

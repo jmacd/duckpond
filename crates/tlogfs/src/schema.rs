@@ -314,6 +314,15 @@ pub struct OplogEntry {
     /// new versions can verify the existing concatenated content matches
     /// the stored state before adding new data.
     pub bao_outboard: Option<Vec<u8>>,
+
+    /// Version-collapse sentinel for `FilePhysicalSeries`.
+    ///
+    /// When a multi-version series file is collapsed into a single merged
+    /// version `M`, that merged row stores `collapsed_through = Some(M - 1)`,
+    /// meaning every version `<= M - 1` has been superseded by this row and
+    /// must be skipped by series readers. `None` for all non-merged rows and
+    /// all non-series entry types.
+    pub collapsed_through: Option<i64>,
 }
 
 impl ForArrow for OplogEntry {
@@ -342,6 +351,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
             Arc::new(Field::new("pond_id", DataType::Utf8, false)), // Pond identity UUID (required, non-nullable)
             Arc::new(Field::new("bao_outboard", DataType::Binary, true)), // Bao-tree outboard for verified streaming
+            Arc::new(Field::new("collapsed_through", DataType::Int64, true)), // Highest series version superseded by this merged row
         ]
     }
 }
@@ -390,6 +400,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -431,6 +442,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -470,6 +482,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -527,6 +540,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -576,6 +590,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -701,6 +716,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 
@@ -896,6 +912,7 @@ impl OplogEntry {
             txn_seq,
             pond_id: String::new(),
             bao_outboard: None,
+            collapsed_through: None,
         }
     }
 }

@@ -393,110 +393,91 @@ so Delta optimize will merge the parquets but the row count stays the same.
 What's needed is a tlogfs-level operation that collapses N versions of one
 file into 1.
 
-### 6.2 The collapse operation
+### 6.2 The collapse operation (implemented: Option B sentinel)
 
-For a file with `N` non-empty versions `1..N`:
+The implementation collapses `data:series` / `FilePhysicalSeries` files only.
+`table:series` collapse is a follow-up.
 
-1. Open the file via the existing read path (table provider for table:series
-   types, or `async_file_reader_series` for data:series types).  The read
-   already merges all versions correctly.
-2. Stream the merged content into a new parquet (for table:series) or new
-   raw bytes (for data:series), via `ArrowWriter::write` / direct copy.  Do
-   not collect into a `Vec<RecordBatch>`.  Stream batch-by-batch.
-3. Allocate a new version `M = get_next_version_for_node(id)`
-   (`persistence.rs:1724`).  This preserves the append-only invariant
-   ("ALWAYS get next version - never reuse").
-4. Write the merged content as version `M` using the existing write path
-   (`create_file_path_streaming_with_type` for new content; or for series,
-   the same path `journal-ingest` uses).  Set temporal metadata via
-   `set_temporal_metadata` if the file is a series.
-5. In the same Delta commit, write `OplogEntry` rows for versions
-   `1..M-1` with `size = 0`.  These are *marker rows*: they tell future
-   reads (which use the existing `r.size.unwrap_or(0) > 0` filter at
-   `persistence.rs:2032`) to skip those versions.  No data is duplicated;
-   the marker rows are tiny.
-6. Single Delta commit means atomicity: if the commit fails, no marker rows
-   are written, the existing versions remain readable, and the new merged
-   version simply does not exist.  No special rollback logic.
+Instead of marking each superseded version with its own `size = 0` row, the
+merged version carries a single durable sentinel: a `collapsed_through:
+Option<i64>` column on `OplogEntry`. This was chosen because the series read
+path filters per-row on `size > 0` and never dedupes by version, so `size = 0`
+marker rows would not suppress the originals -- they would double the data.
+
+For a file with live versions `1..N`
+(`State::collapse_file_series`, `crates/tlogfs/src/persistence.rs`):
+
+1. Read the merged content via the existing `async_file_reader` series path.
+   It already concatenates the live versions oldest-first, so this is the
+   authoritative post-collapse content.
+2. Allocate a new version `M = get_next_version_for_node(id)`, preserving the
+   append-only invariant.
+3. Re-write the merged bytes through `HybridWriter` so the bao-tree cumulative
+   state covers exactly this content, then enqueue version `M` with
+   `collapsed_through = Some(M - 1)` and the union of temporal metadata.
+4. Verify the bytes read back equal the pre-collapse merged content, failing
+   the transaction on any mismatch.
+5. One Delta commit gives atomicity: on failure no merged row exists and the
+   original versions stay readable.
 
 ### 6.3 What "version M" looks like physically
 
-For `table:series` (`TablePhysicalSeries`): version M is a single parquet
-covering the union of all input versions, written via the same code path as
-`write_series_from_batch`.  Reads via the table provider see one large
-parquet instead of N small ones.
+Version `M` is a single byte stream containing the concatenation of all input
+version bytes, which is what `async_file_reader_series` produced on every read
+anyway. The read path computes `K = max(collapsed_through)` across the node's
+rows and additionally filters to `version > K`, so after collapse it yields a
+single-element `ChainedReader` -> O(1).
 
-For `data:series` (`FilePhysicalSeries`, the journal-ingest case): version
-M is a single byte stream containing the concatenation of all input version
-bytes (which is what `async_file_reader_series` was producing on every read
-anyway).  The read path then produces a single-element `ChainedReader` for
-version M.
+### 6.4 Old rows and compaction interactions
 
-### 6.4 Marker rows and compaction interactions
-
-The marker rows are `OplogEntry` rows with `size = 0` and the original
-`version` numbers `1..M-1`.  They exist only to make the existing read-time
-filter skip those versions cheaply.
-
-Cleanup of the original (pre-collapse) parquets follows the existing Delta
-flow: collapse writes new rows in a new parquet; the old parquets containing
-the original-version rows for this file may also contain rows for OTHER
-files in the same partition, so they are not freeable.  Delta-level optimize
-(section 4.4) eventually re-packs the partition into larger parquets;
-individual rows for collapsed versions become storage-overhead-only.
-
-If we want to also free the *space* the original rows occupy, we need a
-separate "delete the original-version rows" step.  Decision deferred --
-marker rows are tiny enough that "row count grows but byte count is bounded"
-is acceptable.  Re-evaluate after measurement.
+The pre-collapse rows are left in place; the read-skip filter ignores them
+cheaply. They share parquet files with rows for OTHER files in the same
+partition, so they are not individually freeable. Delta-level optimize
+(section 4.4) eventually re-packs the partition; the superseded rows become
+storage-overhead-only. Freeing that space is deferred -- one sentinel row plus
+bounded overhead is acceptable. Re-evaluate after measurement.
 
 ### 6.5 Triggering
 
-Three trigger options:
+- **Manual / periodic**: `pond maintain --collapse-versions N` collapses every
+  `FilePhysicalSeries` node with more than `N` live versions. `N = 0` (the
+  default) disables it. Because `pond maintain` already runs periodically per
+  pond, the version threshold self-gates which files collapse, so this is the
+  "run periodically after enough commits accumulate" path.
+- **Auto (not yet wired)**: a threshold-based auto-collapse gated by
+  `pond config get auto_collapse_versions` (default OFF), threshold 100.
 
-- **Manual**: `pond maintain --collapse-versions [path]`.  Operator runs
-  this on a known-noisy file.  Always available.
-- **Threshold-based auto**: at the end of auto-maintain on the data table,
-  for each `(file_id, version_count)` pair where `version_count >
-  collapse_version_threshold`, schedule a collapse.  Default threshold:
-  100 (one collapse per ~100 minutes of selfmon activity per file).
-- **Idle-based**: a separate timer that walks the pond looking for high-
-  version-count files and collapses them.  More complex, less timely.
-
-Pick threshold-based auto, gated by `pond config get auto_collapse_versions`
-(default OFF until the collapse code is well-tested in manual mode).
-
-Collapse runs as its own write transaction, separate from the user
-transaction that triggered it.  This keeps user ticks fast and lets a
-collapse failure not poison user data.
+`Ship::collapse_versions` discovers candidates in a read transaction first and
+opens a write transaction only when at least one file qualifies, so a sweep
+that finds nothing leaves no control-table record and consumes no sequence
+number. The collapse itself is a NORMAL `Write` transaction, so it replicates
+through push/pull like any other write.
 
 ### 6.6 Audit and pond log
 
-A collapse is a normal write transaction with `args = ["maintain",
-"--collapse-versions", path]` (or the auto-equivalent
-`["auto-collapse-versions", path]`).  It writes the same lifecycle records
-as any write txn.  `pond log` shows it.  No special audit story is needed;
-the lifecycle records already capture "what happened, when, by whom".
+A collapse is a normal write transaction with `args = ["pond", "maintain",
+"--collapse-versions"]`. It writes the same lifecycle records as any write
+txn, so `pond log` shows it. No special audit story is needed.
 
 ### 6.7 Coupling with push and remote
 
 Collapse creates a Delta commit (let's call it Delta version `V`).  This
 commit:
 
-- Adds the new merged parquet (for the merged content).
-- Adds the marker rows (small parquet).
+- Adds the new merged version row, with `collapsed_through = M - 1`.
 - (Eventually, after Delta optimize) removes the small parquets that held
   the original rows.
 
 `execute_push` (`crates/remote/src/factory.rs:1119`) backs up the new commit
 as a normal Delta version.  Restore replays it as a normal Delta version.
-The marker rows survive restore.  The original-version data is also still
-present in the backup (it was pushed when those original commits happened).
+The merged row and its sentinel survive restore.  The original-version data is
+also still present in the backup (it was pushed when those original commits
+happened).
 
 Cross-pond import (`execute_import`, `factory.rs:1469`) reads
 `list_transaction_numbers` from the remote and replays commits in order.
 After collapse, an import consumer that was already past version `V-1`
-sees a new commit `V` containing the merged content + marker rows;
+sees a new commit `V` containing the merged row + sentinel;
 behaviorally identical to the source pond reading after collapse.  A *fresh*
 import consumer starting at watermark 0 replays all commits including the
 pre-collapse ones, then sees the collapse commit.  Result: consistent.
@@ -509,10 +490,10 @@ preserved because collapse is a normal pond transaction.  Push's watermark
 
 `{POND}/cache/{scheme}_{node_id}/v{version}_{blake3}.parquet`
 (`crates/provider/src/format_cache.rs:55`) caches one parquet per source
-version.  After collapse, versions `1..M-1` exist as marker rows
-(size = 0), so `find_uncached_versions` (`format_cache.rs:75`) does not
-return them as needing a re-cache; but the OLD cache files for those
-versions still exist on disk.
+version.  After collapse, versions `1..M-1` are superseded by the merged
+version `M` via `collapsed_through`, so `find_uncached_versions`
+(`format_cache.rs:75`) no longer returns them as needing a re-cache; but the
+OLD cache files for those versions still exist on disk.
 
 Cache prune step (section 7) is the cleanup.  Functionally the cache is
 correct after collapse -- queries against the file see version `M` only --
