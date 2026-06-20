@@ -495,7 +495,76 @@ fn match_column_pattern(column: &str, pattern: &str) -> bool {
         && column.len() >= prefix_str.len() + suffix_str.len()
 }
 
-/// Generate SQL query for temporal aggregation
+/// Decomposable partial-aggregate kinds stored in the inner CTE.
+///
+/// Every supported output aggregation is reconstructed from one or more of
+/// these associative partials so that the same machinery can later merge
+/// partials across input versions and across cascaded resolutions. `Avg` is
+/// never stored directly; it is lowered to `Sum` and `Count` and reconstructed
+/// as `Sum / Count` in the final SELECT.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PartialKind {
+    Sum,
+    Count,
+    Min,
+    Max,
+    CountStar,
+}
+
+impl PartialKind {
+    fn tag(self) -> &'static str {
+        match self {
+            PartialKind::Sum => "sum",
+            PartialKind::Count => "count",
+            PartialKind::Min => "min",
+            PartialKind::Max => "max",
+            PartialKind::CountStar => "cstar",
+        }
+    }
+
+    /// SQL expression computing this partial over the named column inside the
+    /// grouped CTE.
+    fn inner_expr(self, column: &str, alias: &str) -> String {
+        match self {
+            PartialKind::Sum => format!("SUM(\"{column}\") AS \"{alias}\""),
+            PartialKind::Count => format!("COUNT(\"{column}\") AS \"{alias}\""),
+            PartialKind::Min => format!("MIN(\"{column}\") AS \"{alias}\""),
+            PartialKind::Max => format!("MAX(\"{column}\") AS \"{alias}\""),
+            PartialKind::CountStar => format!("COUNT(*) AS \"{alias}\""),
+        }
+    }
+}
+
+/// Register a decomposable partial for `(kind, column)`, deduplicating so that
+/// e.g. `Avg` and `Sum` on the same column share a single `SUM` partial. Returns
+/// the partial's (unquoted) column alias in the inner CTE.
+fn register_partial(
+    kind: PartialKind,
+    column: &str,
+    partial_aliases: &mut HashMap<(PartialKind, String), String>,
+    partial_exprs: &mut Vec<String>,
+) -> String {
+    let key = (kind, column.to_string());
+    if let Some(existing) = partial_aliases.get(&key) {
+        return existing.clone();
+    }
+    let alias = format!("__p_{}_{}", kind.tag(), partial_exprs.len());
+    partial_exprs.push(kind.inner_expr(column, &alias));
+    _ = partial_aliases.insert(key, alias.clone());
+    alias
+}
+
+/// Generate SQL query for temporal aggregation.
+///
+/// The query has two layers:
+/// - an inner CTE that groups the source by time bucket and computes the
+///   decomposable partials (`Sum`, `Count`, `Min`, `Max`, `COUNT(*)`);
+/// - a final SELECT that reconstructs the requested output columns from those
+///   partials, including `Avg = Sum / Count`.
+///
+/// Output column names, ordering, and values are identical to a direct
+/// `AVG/MIN/MAX/...` GROUP BY; the partials are an internal representation that
+/// later phases reuse to merge across cached input versions and resolutions.
 async fn generate_temporal_sql(
     config: &TemporalReduceConfig,
     interval: Duration,
@@ -505,42 +574,95 @@ async fn generate_temporal_sql(
 ) -> TinyFSResult<String> {
     let interval = duration_to_sql_interval(interval);
 
-    // Build aggregation expressions for the CTE and collect aliases for final SELECT
-    let mut agg_exprs = Vec::new();
-    let mut final_select_exprs = Vec::new();
+    // Deduplicated decomposable partials for the inner CTE.
+    let mut partial_aliases: HashMap<(PartialKind, String), String> = HashMap::new();
+    let mut partial_exprs: Vec<String> = Vec::new();
+    // Output column reconstructions, in the original aggregation/column order.
+    let mut final_select_exprs: Vec<String> = Vec::new();
 
     for agg in &config.aggregations {
-        match &agg.columns {
-            Some(columns) => {
-                // Specific columns provided
-                for column in columns {
-                    if column == "*" && matches!(agg.agg_type, AggregationType::Count) {
-                        // Special case: count(*) becomes "timestamp.count" (count of distinct timestamps)
-                        let alias = "timestamp.count";
-                        agg_exprs.push(format!("{}(*) AS \"{}\"", agg.agg_type.to_sql(), alias));
-                        final_select_exprs.push(format!("\"{}\"", alias));
-                    } else {
-                        // Generate alias in format: scope.parameter.unit.agg
-                        let alias = format!("{}.{}", column, agg.agg_type.to_sql().to_lowercase());
+        let columns = agg.columns.as_ref().ok_or_else(|| {
+            // This should never happen since
+            // TemporalReduceSqlFile.generate_sql_with_discovered_schema()
+            // fills in None columns before calling this function.
+            tinyfs::Error::Other(
+                "Internal error: generate_temporal_sql called with None columns".to_string(),
+            )
+        })?;
 
-                        // Insert quotes around column name and alias for SQL (DataFusion needs them for special chars)
-                        agg_exprs.push(format!(
-                            "{}(\"{}\") AS \"{}\"",
-                            agg.agg_type.to_sql(),
-                            column,
-                            alias
-                        ));
-                        final_select_exprs.push(format!("\"{}\"", alias));
-                    }
+        for column in columns {
+            if column == "*" && matches!(agg.agg_type, AggregationType::Count) {
+                // Special case: count(*) becomes "timestamp.count" (count of distinct timestamps)
+                let out_alias = "timestamp.count";
+                let p = register_partial(
+                    PartialKind::CountStar,
+                    "*",
+                    &mut partial_aliases,
+                    &mut partial_exprs,
+                );
+                final_select_exprs.push(format!("\"{p}\" AS \"{out_alias}\""));
+                continue;
+            }
+
+            // Generate alias in format: scope.parameter.unit.agg
+            let out_alias = format!("{}.{}", column, agg.agg_type.to_sql().to_lowercase());
+            let final_expr = match agg.agg_type {
+                AggregationType::Avg => {
+                    // Avg is not associative; store Sum and Count partials and
+                    // reconstruct Avg = Sum / Count. NULLIF guards the empty
+                    // bucket so the result is NULL, matching AVG semantics.
+                    let sum = register_partial(
+                        PartialKind::Sum,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    let count = register_partial(
+                        PartialKind::Count,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    format!("CAST(\"{sum}\" AS DOUBLE) / NULLIF(\"{count}\", 0) AS \"{out_alias}\"")
                 }
-            }
-            None => {
-                // This should never happen since TemporalReduceSqlFile.generate_sql_with_discovered_schema()
-                // fills in None columns before calling this function
-                return Err(tinyfs::Error::Other(
-                    "Internal error: generate_temporal_sql called with None columns".to_string(),
-                ));
-            }
+                AggregationType::Sum => {
+                    let p = register_partial(
+                        PartialKind::Sum,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    format!("\"{p}\" AS \"{out_alias}\"")
+                }
+                AggregationType::Count => {
+                    let p = register_partial(
+                        PartialKind::Count,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    format!("\"{p}\" AS \"{out_alias}\"")
+                }
+                AggregationType::Min => {
+                    let p = register_partial(
+                        PartialKind::Min,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    format!("\"{p}\" AS \"{out_alias}\"")
+                }
+                AggregationType::Max => {
+                    let p = register_partial(
+                        PartialKind::Max,
+                        column,
+                        &mut partial_aliases,
+                        &mut partial_exprs,
+                    );
+                    format!("\"{p}\" AS \"{out_alias}\"")
+                }
+            };
+            final_select_exprs.push(final_expr);
         }
     }
 
@@ -558,7 +680,7 @@ async fn generate_temporal_sql(
         WITH time_buckets AS (
           SELECT 
             date_bin({interval}, {ts}, TIMESTAMP '1970-01-01T00:00:00') AS time_bucket,
-            {agg_exprs}
+            {partial_exprs}
           FROM {table}
           WHERE {ts} IS NOT NULL
           GROUP BY date_bin({interval}, {ts}, TIMESTAMP '1970-01-01T00:00:00')
@@ -571,7 +693,7 @@ async fn generate_temporal_sql(
         "#,
         interval = interval,
         ts = config.time_column,
-        agg_exprs = agg_exprs.join(",\n            "),
+        partial_exprs = partial_exprs.join(",\n            "),
         table = pattern_name,
         select_exprs = final_select_exprs.join(",\n          ")
     ))
@@ -1057,7 +1179,105 @@ mod tests {
         create_parquet_file, create_test_environment, test_context,
     };
 
-    /// Comprehensive integration test for temporal-reduce factory
+    fn cfg_with_aggs(aggregations: Vec<AggregationConfig>) -> TemporalReduceConfig {
+        TemporalReduceConfig {
+            in_pattern: crate::Url::parse("series:///sources/*").unwrap(),
+            out_pattern: "$0".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations,
+            transforms: None,
+        }
+    }
+
+    fn agg(t: AggregationType, cols: &[&str]) -> AggregationConfig {
+        AggregationConfig {
+            agg_type: t,
+            columns: Some(cols.iter().map(|c| c.to_string()).collect()),
+        }
+    }
+
+    fn lowering_context() -> crate::FactoryContext {
+        // generate_temporal_sql does not read the context; any valid one works.
+        let provider_context = crate::factory::test_support::create_provider_context();
+        test_context(&provider_context, FileID::root())
+    }
+
+    /// Phase 1: Avg must be lowered to decomposable Sum/Count partials and
+    /// reconstructed as Sum/Count in the final SELECT. No bare AVG(...) is
+    /// emitted, and the output column alias is preserved.
+    #[tokio::test]
+    async fn test_avg_lowered_to_sum_over_count() {
+        let config = cfg_with_aggs(vec![agg(AggregationType::Avg, &["temperature"])]);
+        let ctx = lowering_context();
+        let sql = generate_temporal_sql(&config, Duration::from_secs(86400), "x", &ctx, "source_t")
+            .await
+            .unwrap();
+
+        assert!(
+            !sql.contains("AVG("),
+            "Avg must not be emitted directly: {sql}"
+        );
+        assert!(
+            sql.contains("SUM(\"temperature\")"),
+            "expected Sum partial: {sql}"
+        );
+        assert!(
+            sql.contains("COUNT(\"temperature\")"),
+            "expected Count partial: {sql}"
+        );
+        assert!(
+            sql.contains("AS \"temperature.avg\""),
+            "expected reconstructed avg alias: {sql}"
+        );
+        assert!(
+            sql.contains("NULLIF("),
+            "Avg reconstruction must guard empty buckets: {sql}"
+        );
+    }
+
+    /// Avg and Sum on the same column share a single SUM partial (dedup).
+    #[tokio::test]
+    async fn test_partials_deduplicated_across_aggregations() {
+        let config = cfg_with_aggs(vec![
+            agg(AggregationType::Avg, &["temperature"]),
+            agg(AggregationType::Sum, &["temperature"]),
+        ]);
+        let ctx = lowering_context();
+        let sql = generate_temporal_sql(&config, Duration::from_secs(86400), "x", &ctx, "source_t")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sql.matches("SUM(\"temperature\")").count(),
+            1,
+            "Sum partial must be computed once and reused: {sql}"
+        );
+        assert!(sql.contains("AS \"temperature.avg\""), "{sql}");
+        assert!(sql.contains("AS \"temperature.sum\""), "{sql}");
+    }
+
+    /// Min/Max/Count(*) map to their decomposable partials with preserved aliases.
+    #[tokio::test]
+    async fn test_min_max_count_partials() {
+        let config = cfg_with_aggs(vec![
+            agg(AggregationType::Min, &["temperature"]),
+            agg(AggregationType::Max, &["temperature"]),
+            agg(AggregationType::Count, &["*"]),
+        ]);
+        let ctx = lowering_context();
+        let sql = generate_temporal_sql(&config, Duration::from_secs(86400), "x", &ctx, "source_t")
+            .await
+            .unwrap();
+
+        assert!(sql.contains("MIN(\"temperature\")"), "{sql}");
+        assert!(sql.contains("MAX(\"temperature\")"), "{sql}");
+        assert!(sql.contains("COUNT(*)"), "{sql}");
+        assert!(sql.contains("AS \"temperature.min\""), "{sql}");
+        assert!(sql.contains("AS \"temperature.max\""), "{sql}");
+        assert!(sql.contains("AS \"timestamp.count\""), "{sql}");
+    }
+
     ///
     /// Creates multiple series files with different names (site1, site2, site3),
     /// each with 3 days of hourly data, then validates that temporal-reduce correctly:

@@ -1,6 +1,7 @@
 # Incremental temporal-reduce rollup: repair design and plan
 
-Status: design + implementation plan / not yet started.
+Status: design + implementation plan. Phase 1 (decomposable-aggregate
+lowering) landed; phases 2-4 not yet started.
 
 This document is the concrete, code-grounded repair plan for the dominant
 remaining build-time inefficiency in duckpond: `temporal-reduce` exports cost
@@ -212,6 +213,11 @@ Each phase is independently landable and presubmit-clean
 
 1. **Decomposable-aggregate lowering** (`Avg`->`Sum`/`Count`). Pure refactor, no
    behavior change, no cache. Safe to land alone; unblocks everything.
+   **DONE** -- `generate_temporal_sql` now computes `Sum`/`Count`/`Min`/`Max`/
+   `COUNT(*)` partials (deduplicated) in the inner CTE and reconstructs every
+   output column, including `Avg = Sum / Count`, in the final SELECT. Output
+   schema, column order, and values are unchanged. Unit tests cover the lowering
+   and partial deduplication.
 2. **Per-version partial cache** (section 4.1). Delivers `O(delta)` builds at the
    finest resolution. The biggest win.
 3. **Cascading rollups** (section 4.2). Makes coarse and all-time views nearly
