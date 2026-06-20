@@ -62,10 +62,26 @@ pub async fn export_command(
     temporal: &str,
     start_time_str: Option<String>,
     end_time_str: Option<String>,
+    rebuild: bool,
 ) -> Result<()> {
     // Phase 1: Validation and setup
     print_export_start(patterns, output_dir, temporal);
     validate_export_inputs(patterns, output_dir, temporal)?;
+
+    // --rebuild drops the throwaway rollup partial-aggregate cache so the next
+    // read recomputes every temporal-reduce partial from scratch. This is the
+    // recovery path for a sequentiality violation, where a non-sequential input
+    // version would otherwise be a hard error on the incremental path.
+    if rebuild {
+        let cache_dir = ship_context.resolve_pond_path()?.join("cache");
+        let dropped = provider::rollup_cache::drop_all(&cache_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to drop rollup cache: {}", e))?;
+        log::info!(
+            "[REBUILD] Dropped {} rollup cache namespace(s) under {}",
+            dropped,
+            cache_dir.display()
+        );
+    }
 
     let mut export_range = ExportRange::default();
 

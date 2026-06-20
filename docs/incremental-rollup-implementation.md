@@ -2,9 +2,10 @@
 
 Status: design + implementation plan. Phase 1 (decomposable-aggregate
 lowering), phase 2 (per-version partial-aggregate cache, wired through the
-temporal-reduce format-provider path), and phase 3 (cascading rollups: finest
-partials shared and re-binned across nesting resolutions) landed; phase 4 not
-yet started.
+temporal-reduce format-provider path), phase 3 (cascading rollups: finest
+partials shared and re-binned across nesting resolutions), and phase 4
+(sequentiality-violation detection plus the `--rebuild` recovery flag on
+`export`) have all landed.
 
 This document is the concrete, code-grounded repair plan for the dominant
 remaining build-time inefficiency in duckpond: `temporal-reduce` exports cost
@@ -226,6 +227,12 @@ Each phase is independently landable and presubmit-clean
 3. **Cascading rollups** (section 4.2). Makes coarse and all-time views nearly
    free.
 4. **Sequentiality-violation detection + `--rebuild` recovery path**.
+   **DONE** -- a per-source-node frontier sidecar (`{source}.frontier` in the
+   rollup glob dir) records the maximum sealed `time_bucket`. Uncached versions
+   are processed oldest-first; a version whose earliest bucket precedes the
+   persisted frontier is a hard error, never a silent merge. `export --rebuild`
+   drops every `rollup_*` namespace under `{POND}/cache/` via
+   `rollup_cache::drop_all` so the next read recomputes from scratch.
 
 ## 10. Rollout and gating
 

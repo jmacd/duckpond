@@ -447,8 +447,16 @@ impl TemporalReduceSqlFile {
                 .await
                 .map_other()?;
 
-            let uncached =
+            let mut uncached =
                 crate::rollup_cache::find_uncached_members(&glob_dir, &source_node_id, &versions);
+            // Process versions oldest-first so the sealed-bucket frontier only
+            // ever advances. A new version whose earliest bucket precedes the
+            // frontier is a sequentiality violation: its sealed buckets would
+            // need partials that are no longer recomputed, silently
+            // double-counting on merge. Per the no-fallback policy this is a
+            // hard error recovered with --rebuild, never a silent merge.
+            uncached.sort_by_key(|v| v.version);
+            let mut frontier = crate::rollup_cache::read_frontier(&glob_dir, &source_node_id);
             for version in &uncached {
                 let parquet_path = crate::format_cache::cache_version_path(
                     &cache_dir,
@@ -456,6 +464,22 @@ impl TemporalReduceSqlFile {
                     &source_node_id,
                     version,
                 );
+                let span = self
+                    .version_bucket_span(finest_interval, &parquet_path)
+                    .await?;
+                if let Some((lo, _hi)) = span
+                    && let Some(f) = frontier
+                    && lo < f
+                {
+                    return Err(tinyfs::Error::Other(format!(
+                        "temporal-reduce rollup: source node {} version {} backfills \
+                         already-sealed buckets (earliest bucket {} precedes frontier \
+                         {}); a non-sequential input breaks incremental partial \
+                         summation. Re-run the export with --rebuild to recompute the \
+                         rollup cache from scratch.",
+                        source_node_id, version.version, lo, f
+                    )));
+                }
                 self.write_version_partial(
                     &pieces,
                     finest_interval,
@@ -465,6 +489,18 @@ impl TemporalReduceSqlFile {
                     &parquet_path,
                 )
                 .await?;
+                // Advance and persist the frontier only after the partial is
+                // durably written, so a later violation in this loop cannot
+                // strand an unrecorded sealed bucket: on retry the persisted
+                // frontier still reflects every version already cached.
+                if let Some((_lo, hi)) = span {
+                    let advanced = frontier.map_or(hi, |f| f.max(hi));
+                    if frontier != Some(advanced) {
+                        frontier = Some(advanced);
+                        crate::rollup_cache::write_frontier(&glob_dir, &source_node_id, advanced)
+                            .map_other()?;
+                    }
+                }
             }
         }
 
@@ -501,6 +537,68 @@ impl TemporalReduceSqlFile {
         context.set_table_provider_cache(cache_key, table_provider.clone())?;
 
         Ok(Some(table_provider))
+    }
+
+    /// Compute the finest-interval `time_bucket` span [min, max] of one cached
+    /// source version, in the timestamp unit cast to `i64`. Returns `None` when
+    /// the version contributes no non-null timestamps, in which case it neither
+    /// advances nor is checked against the sequentiality frontier. The unit is
+    /// consistent across all versions of one source node, so comparing these
+    /// spans against a per-node frontier is well defined.
+    async fn version_bucket_span(
+        &self,
+        finest_interval: Duration,
+        parquet_path: &std::path::Path,
+    ) -> TinyFSResult<Option<(i64, i64)>> {
+        let ctx = datafusion::prelude::SessionContext::new();
+        let table = "__src_version";
+        ctx.register_parquet(
+            table,
+            parquet_path.to_string_lossy().as_ref(),
+            datafusion::prelude::ParquetReadOptions::default(),
+        )
+        .await
+        .map_other_context(format!(
+            "register cached parquet '{}'",
+            parquet_path.display()
+        ))?;
+
+        let interval = duration_to_sql_interval(finest_interval);
+        let bin = date_bin_expr(&interval, &self.config.time_column);
+        let ts = &self.config.time_column;
+        let span_sql = format!(
+            "SELECT CAST(MIN({bin}) AS BIGINT) AS lo, CAST(MAX({bin}) AS BIGINT) AS hi \
+             FROM {table} WHERE {ts} IS NOT NULL"
+        );
+        let batches = ctx
+            .sql(&span_sql)
+            .await
+            .map_other_context("rollup span SQL planning failed")?
+            .collect()
+            .await
+            .map_other_context("rollup span SQL execution failed")?;
+
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let lo = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>();
+            let hi = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>();
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                use arrow::array::Array;
+                if lo.is_null(0) || hi.is_null(0) {
+                    return Ok(None);
+                }
+                return Ok(Some((lo.value(0), hi.value(0))));
+            }
+        }
+        Ok(None)
     }
 
     /// Compute one immutable source version's partials at the finest resolution
@@ -2754,5 +2852,96 @@ mod tests {
         let ok = parse_nesting_resolutions(&["1d".to_string(), "1h".to_string(), "6h".to_string()])
             .unwrap();
         assert_eq!(ok.first().copied(), Some(Duration::from_secs(3600)));
+    }
+
+    /// Phase 4: a non-sequential source version, one that backfills buckets
+    /// already sealed by an earlier version, is a hard error on the incremental
+    /// path rather than a silent double-count. A single source file is written
+    /// twice: the first version holds only day 2, the second is a full rewrite
+    /// that prepends day 1, regressing the input min-ts below the frontier.
+    #[tokio::test]
+    async fn test_rollup_rejects_non_sequential_version() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+
+        async fn write_csv(root: &tinyfs::WD, path: &str, days: std::ops::Range<u32>) {
+            use tokio::io::AsyncWriteExt;
+            let mut csv_data = String::from("timestamp,temperature\n");
+            for day in days {
+                for hour in 0..24u32 {
+                    let ts = format!("1970-01-{:02}T{:02}:00:00", day, hour);
+                    let temp = 20.5 + hour as f64;
+                    csv_data.push_str(&format!("{},{}\n", ts, temp));
+                }
+            }
+            let mut w = root
+                .async_writer_path_with_type(path, EntryType::FilePhysicalVersion)
+                .await
+                .unwrap();
+            w.write_all(csv_data.as_bytes()).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+            // Version 1: day 2 only.
+            write_csv(&root, "/ingest/weather.csv", 2..3).await;
+            // Version 2: full rewrite that prepends day 1, backfilling a sealed
+            // bucket below the version-1 frontier.
+            write_csv(&root, "/ingest/weather.csv", 1..3).await;
+        }
+
+        let config = TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations: vec![agg(AggregationType::Avg, &["temperature"])],
+            transforms: None,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        let session = Arc::new(datafusion::prelude::SessionContext::new());
+        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+            .expect("register object store");
+        let provider_context = crate::ProviderContext::new(session, Arc::new(persistence.clone()))
+            .with_cache_dir(cache_dir.clone());
+
+        let context = test_context(&provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+
+        let result = queryable
+            .as_table_provider(file_id, &provider_context)
+            .await;
+
+        let err = result.expect_err("non-sequential version must be a hard error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("backfills") && msg.contains("--rebuild"),
+            "error must explain the violation and suggest --rebuild, got: {}",
+            msg
+        );
     }
 }

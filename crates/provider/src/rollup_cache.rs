@@ -303,6 +303,66 @@ pub fn drop_node_namespace(
     Ok(())
 }
 
+/// Drop every rollup-cache namespace under `cache_dir`, forcing all partials
+/// for all temporal-reduce nodes to be recomputed on next read.  This is the
+/// global `--rebuild` recovery primitive.  The format cache and any other cache
+/// content are left untouched.  Idempotent: a missing `cache_dir` is not an
+/// error.
+pub fn drop_all(cache_dir: &Path) -> Result<usize> {
+    if !cache_dir.exists() {
+        return Ok(0);
+    }
+    let mut dropped = 0;
+    for entry in std::fs::read_dir(cache_dir).map_err(crate::error::Error::Io)? {
+        let entry = entry.map_err(crate::error::Error::Io)?;
+        let path = entry.path();
+        let is_rollup = path.is_dir()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("rollup_"));
+        if is_rollup {
+            std::fs::remove_dir_all(&path).map_err(crate::error::Error::Io)?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
+/// Path of a source node's sequentiality-frontier sidecar within the glob dir:
+/// `{glob_dir}/{source_node}.frontier`.  The file holds the maximum sealed
+/// `time_bucket` value (in the finest-interval timestamp unit) observed across
+/// every cached version of that source node.
+#[must_use]
+pub fn frontier_path(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> PathBuf {
+    glob_dir.join(format!("{}.frontier", source_node_id))
+}
+
+/// Read a source node's persisted frontier, or `None` if no version has been
+/// cached yet.  A malformed sidecar is treated as absent rather than fatal
+/// because the cache is throwaway and will simply be recomputed.
+#[must_use]
+pub fn read_frontier(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> Option<i64> {
+    let path = frontier_path(glob_dir, source_node_id);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Persist a source node's frontier (atomic write via `.tmp` then rename).
+pub fn write_frontier(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    frontier: i64,
+) -> Result<()> {
+    std::fs::create_dir_all(glob_dir).map_err(crate::error::Error::Io)?;
+    let final_path = frontier_path(glob_dir, source_node_id);
+    let tmp_path = final_path.with_extension("frontier.tmp");
+    std::fs::write(&tmp_path, frontier.to_string()).map_err(crate::error::Error::Io)?;
+    std::fs::rename(&tmp_path, &final_path).map_err(crate::error::Error::Io)?;
+    Ok(())
+}
+
 /// Read the Arrow schema from every `.parquet` file under `dir` and merge them
 /// via `Schema::try_merge`, giving UNION-ALL-BY-NAME semantics across versions.
 async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {

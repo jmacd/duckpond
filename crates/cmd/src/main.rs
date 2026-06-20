@@ -415,6 +415,10 @@ enum Commands {
         /// Time range end (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
         #[arg(long)]
         end_time: Option<String>,
+        /// Drop the temporal-reduce rollup cache before exporting, forcing a
+        /// full recompute. Recovery path for a sequentiality violation.
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Emergency operations (destructive, use with care)
     #[command(subcommand)]
@@ -687,6 +691,7 @@ async fn main() -> Result<()> {
             temporal,
             start_time,
             end_time,
+            rebuild,
         } => {
             commands::export_command(
                 &ship_context,
@@ -695,6 +700,7 @@ async fn main() -> Result<()> {
                 &temporal,
                 start_time,
                 end_time,
+                rebuild,
             )
             .await
         }
