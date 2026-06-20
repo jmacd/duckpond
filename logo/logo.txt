@@ -1,0 +1,193 @@
+DUCKPOND LOGO - EXACTING RECONSTRUCTION SPEC
+============================================
+
+ORIGIN / INTENT
+---------------
+The duckpond logo is a clipart interpretation of caspar_duckpond.jpg (repo root),
+a small circular pond seen at an angle with a far treeline, an ocean horizon
+behind it, a duck on the water, reeds at the near shore.
+
+Brand color is #00325a, taken from the Caspar Water Company logo
+(../caspar.water/site/img/logo.svg, fill #00325a). The wordmark font matches the
+Caspar Water title: Montserrat Bold (weight 700).
+
+This document is detailed enough to recreate both assets by hand if the SVGs are
+lost. All coordinates are SVG user units. Colors are hex. Paths are reproduced
+verbatim from the rendered SVGs.
+
+FILES
+-----
+  logo/duckpond-scene-badge.svg  Square rounded badge, viewBox 0 0 256 256.
+  logo/duckpond-banner.svg       Wide banner: badge (left) + "Duckpond" wordmark.
+  logo/PALETTE.md                Color reference.
+
+==================================================================
+PART 1 - THE BADGE  (logo/duckpond-scene-badge.svg)
+==================================================================
+Canvas: <svg viewBox="0 0 256 256" width="256" height="256">
+A 256x256 square. All scene art is clipped to a rounded square; a brand-blue
+rounded border is stroked on top (NOT clipped).
+
+DEFS
+----
+clipPath id="badge":
+  <rect x="8" y="8" width="240" height="240" rx="48" ry="48"/>
+
+linearGradient id="water" (userSpaceOnUse, x1=0 y1=118 x2=0 y2=248):
+  stop 0    #1f6699
+  stop 0.5  #1f6699
+  stop 1    #0d4571
+
+linearGradient id="sky" (userSpaceOnUse, x1=0 y1=8 x2=0 y2=82):
+  stop 0  #aec4d6
+  stop 1  #dce8f1
+
+linearGradient id="ocean" (userSpaceOnUse, x1=0 y1=82 x2=0 y2=112):
+  stop 0  #bcccd9
+  stop 1  #7e9bb2
+
+SCENE (all inside <g clip-path="url(#badge)">), painted back-to-front
+--------------------------------------------------------------------
+1. Sky:    <rect x=8 y=8 w=240 h=240 fill=url(#sky)>   (fills whole badge)
+2. Ocean:  <rect x=8 y=82 w=240 h=30  fill=url(#ocean)> (background sea band)
+3. Horizon haze line:
+           <rect x=8 y=82 w=240 h=1.6 fill=#eef4f9 opacity=0.6>
+4. Pond water: <rect x=8 y=118 w=240 h=130 fill=url(#water)>
+   (Horizon at y=82 passes through the taller trees; pond water starts y=118.)
+
+5. Far bank / shrub band under the treeline (fill #5a8f3c), wavy waterline:
+   M8 104 L248 104 L248 128
+   C 226 132, 206 126, 188 130
+   C 168 135, 150 124, 130 128
+   C 112 132, 96 122, 80 127
+   C 66 131, 48 124, 36 127
+   C 26 129, 16 126, 8 128 Z
+
+6. Distant treeline along the horizon (fill #3c6c28), taller on the left,
+   drawn with transform="translate(0 6)":
+   M8 104
+   C 14 70, 26 66, 36 86
+   C 44 70, 54 72, 60 90
+   C 70 60, 80 62, 86 92
+   C 98 78, 110 80, 118 96
+   C 130 82, 142 84, 150 98
+   C 162 86, 176 88, 184 100
+   C 198 90, 214 92, 224 102
+   C 232 96, 242 98, 248 104 Z
+
+7. Foreground grassy peninsula jutting from the lower-left, two tones.
+   Darker (fill #5a8f3c):
+   M8 150
+   C 36 150, 66 158, 96 168
+   C 120 176, 130 188, 120 200
+   C 108 212, 78 214, 52 224
+   C 36 230, 20 240, 8 248 Z
+   Lighter overlay (fill #6fa84a):
+   M8 168
+   C 30 168, 58 176, 86 186
+   C 104 192, 110 200, 100 208
+   C 86 216, 58 218, 36 228
+   C 26 232, 16 240, 8 248 Z
+
+8. DUCK CLUSTER. Drawn at native scale then shrunk in place with:
+   <g transform="translate(176 157) scale(0.67) translate(-176 -157)"> ... </g>
+   so the cluster centers near (176,157) at 0.67 scale.
+
+   8a. Duck body (fill #00325a), inside an inner
+       <g transform="translate(176 158) scale(1.0)"> using local coords
+       (faces LEFT, origin at body center):
+       M16.5 -10 C14.5 -9 12.5 -7.7 9 -7.5 C4 -7.3 0 -7 -3 -6.2
+       C-4.6 -5.8 -5.3 -6.3 -6 -7.6 C-6.8 -9.1 -7 -10.8 -8.6 -11.6
+       C-10 -12.3 -11.8 -12 -12.7 -10.7 C-13.5 -9.6 -13.4 -8.4 -12.6 -7.6
+       C-14.3 -7.5 -16.4 -7.2 -16.2 -6.1 C-16 -5.1 -14 -5.4 -12.4 -5.7
+       C-11.2 -5.9 -10.6 -4.9 -10.1 -3.7 C-9.4 -1.9 -7.6 -0.2 -4.5 1
+       C0 2.6 6 2.6 10 1.2 C12.6 0.3 14.4 -0.8 15 -2.6
+       C15.7 -4.8 16.8 -7.8 16.5 -10 Z
+   8b. Waterline mask submerging the duck's lower body (fill #1f6699 = pond top):
+       M152 157.6 Q176 156 200 157.6 L200 172 L152 172 Z
+   8c. Meniscus highlight where body meets water
+       (stroke #6ba6d0 width 1.4 round, no fill, opacity 0.85):
+       M163 157.2 Q176 159 189 157.2
+   8d. Two concentric ripples around the duck (stroke #4a8cbd, round, no fill):
+       M150 161 q26 6 52 0   (width 1.6 opacity 0.9)
+       M144 165 q32 7 64 0   (width 1.4 opacity 0.65)
+   NOTE: the ripple meniscus bows AWAY from the duck (downward q control), by
+   design - do not invert it.
+
+9. Open-water ripples (stroke #4a8cbd width 3.5 round, no fill, opacity 0.9):
+   M150 188 q24 -8 48 0 t48 0
+   M168 210 q22 -8 44 0 t44 0
+
+10. Tall reeds/grass at the near shore (lower-left), two tones.
+    Darker (stroke #3c6c28 width 2.5 round, no fill):
+      M22 248 q-4 -26 4 -46
+      M32 248 q2 -28 10 -48
+      M44 248 q-3 -24 6 -44
+      M56 248 q3 -22 12 -40
+    Lighter (stroke #9bbf4a width 2 round, no fill):
+      M27 248 q0 -24 8 -42
+      M40 248 q-2 -22 8 -40
+      M52 248 q2 -20 10 -36
+
+BADGE BORDER (outside the clip group, drawn last, on top):
+  <rect x=8 y=8 w=240 h=240 rx=48 ry=48 fill=none stroke=#00325a stroke-width=6>
+
+==================================================================
+PART 2 - THE BANNER  (logo/duckpond-banner.svg)
+==================================================================
+Canvas: <svg viewBox="0 0 1557 300" width="1557" height="300">
+White background, the badge on the left, the "Duckpond" wordmark to its right.
+Layout: badge ~30..273 high (vertically centered, center y=150); the wordmark's
+cap height is centered on the same y=150 so badge and "D" share a center line.
+
+DEFS (same gradients as the badge, plus one extra):
+  clipPath id="badge"   : rect x=8 y=8 w=240 h=240 rx=48 ry=48
+  linearGradient water  : as badge
+  linearGradient sky    : as badge
+  linearGradient ocean  : as badge
+  linearGradient letterfill (userSpaceOnUse x1=0 y1=70 x2=0 y2=245):
+       stop 0 #5f6a72, stop 1 #a2acb3
+  NOTE: "letterfill" is VESTIGIAL/UNUSED. The final wordmark is solid #00325a.
+  It can be deleted; it remains only from an earlier gradient-letter iteration.
+
+BACKGROUND:
+  <rect x=0 y=0 width=1557 height=300 fill=#ffffff>
+
+BADGE (left):
+  <g transform="translate(20 22)"> ... </g>
+  The group content is IDENTICAL to PART 1 (the clipped scene + the border
+  rect), reproduced unchanged. The translate(20,22) places the badge with a
+  20px left margin and 22px top margin, so it occupies x 28..268, y 30..270
+  (border stroke extends ~3px beyond).
+
+WORDMARK ("Duckpond" in small caps):
+  Style: Montserrat Bold (700), SMALL CAPS - a full-height cap "D" followed by
+  smaller caps "UCKPOND". Solid fill #00325a, NO stroke/outline.
+
+  How it was generated (so it can be regenerated for edits):
+    Font   : Montserrat Bold 700 (e.g. @fontsource/montserrat woff), unitsPerEm
+             and capHeight read from the font via fontkit.
+    D      : cap height 180 user units.
+    UCKPOND: cap height 132 user units (small caps ~= 0.733 of the D).
+    Baseline: y = 240 (so the D spans y 60..240, center 150 = badge center).
+    Pen start x0 = 298 (first glyph left side bearing puts the D's visual left
+             edge near x=319; this sets the gap after the badge).
+    Letters laid left-to-right, each glyph scaled by (its cap height / font
+    capHeight) and advanced by glyph.advanceWidth * scale. The result is a
+    single filled path. Canvas width = (rightmost glyph x) + 24 margin -> 1557.
+
+  EXACT WORDMARK PATH (fill #00325a, no stroke), already baked to these
+  parameters - paste verbatim inside <g> ... </g> if regeneration is not
+  possible:
+
+<path d="M319.34 240L319.34 60L401.11 60Q430.43 60 452.8 71.19Q475.17 82.37 487.77 102.43Q500.37 122.49 500.37 150Q500.37 177.26 487.77 197.44Q475.17 217.63 452.8 228.81Q430.43 240 401.11 240ZM361 205.8L399.06 205.8Q417.06 205.8 430.3 198.99Q443.54 192.17 450.87 179.57Q458.2 166.97 458.2 150Q458.2 132.77 450.87 120.3Q443.54 107.83 430.3 101.01Q417.06 94.2 399.06 94.2L361 94.2Z M584.7 242.26Q556.6 242.26 540.76 226.61Q524.92 210.96 524.92 181.92L524.92 108L555.47 108L555.47 180.79Q555.47 199.65 563.2 207.94Q570.93 216.24 584.89 216.24Q598.84 216.24 606.57 207.94Q614.3 199.65 614.3 180.79L614.3 108L644.47 108L644.47 181.92Q644.47 210.96 628.63 226.61Q612.79 242.26 584.7 242.26Z M737.82 242.26Q722.54 242.26 709.44 237.27Q696.33 232.27 686.71 223.03Q677.1 213.79 671.72 201.34Q666.35 188.9 666.35 174Q666.35 159.1 671.72 146.66Q677.1 134.21 686.81 124.97Q696.52 115.73 709.53 110.73Q722.54 105.74 738.01 105.74Q755.17 105.74 769.03 111.68Q782.89 117.62 792.31 129.12L772.7 147.22Q765.91 139.49 757.62 135.63Q749.32 131.76 739.51 131.76Q730.27 131.76 722.54 134.78Q714.81 137.79 709.15 143.45Q703.5 149.11 700.39 156.84Q697.27 164.57 697.27 174Q697.27 183.43 700.39 191.16Q703.5 198.89 709.15 204.55Q714.81 210.21 722.54 213.22Q730.27 216.24 739.51 216.24Q749.32 216.24 757.62 212.37Q765.91 208.51 772.7 200.59L792.31 218.69Q782.89 230.19 769.03 236.23Q755.17 242.26 737.82 242.26Z M811.17 240L811.17 108L841.53 108L841.53 169.66L899.99 108L933.93 108L879.25 166.83L937.14 240L901.5 240L859.26 188.14L841.53 206.62L841.53 240Z M950.71 240L950.71 108L1007.85 108Q1025.58 108 1038.4 113.75Q1051.22 119.5 1058.2 130.25Q1065.18 141 1065.18 155.9Q1065.18 170.61 1058.2 181.35Q1051.22 192.1 1038.4 197.85Q1025.58 203.61 1007.85 203.61L981.26 203.61L981.26 240ZM981.26 178.71L1006.15 178.71Q1020.3 178.71 1027.27 172.68Q1034.25 166.65 1034.25 155.9Q1034.25 144.96 1027.27 138.93Q1020.3 132.89 1006.15 132.89L981.26 132.89Z M1152.86 242.26Q1137.21 242.26 1123.92 237.17Q1110.62 232.08 1100.91 222.84Q1091.2 213.6 1085.83 201.15Q1080.45 188.71 1080.45 174Q1080.45 159.29 1085.83 146.85Q1091.2 134.4 1101.01 125.16Q1110.81 115.92 1124.01 110.83Q1137.21 105.74 1152.67 105.74Q1168.33 105.74 1181.43 110.83Q1194.54 115.92 1204.25 125.16Q1213.96 134.4 1219.43 146.75Q1224.9 159.1 1224.9 174Q1224.9 188.71 1219.43 201.25Q1213.96 213.79 1204.25 222.93Q1194.54 232.08 1181.43 237.17Q1168.33 242.26 1152.86 242.26ZM1152.67 216.24Q1161.54 216.24 1168.99 213.22Q1176.43 210.21 1182.09 204.55Q1187.75 198.89 1190.86 191.16Q1193.97 183.43 1193.97 174Q1193.97 164.57 1190.86 156.84Q1187.75 149.11 1182.19 143.45Q1176.62 137.79 1169.08 134.78Q1161.54 131.76 1152.67 131.76Q1143.81 131.76 1136.36 134.78Q1128.91 137.79 1123.26 143.45Q1117.6 149.11 1114.49 156.84Q1111.38 164.57 1111.38 174Q1111.38 183.24 1114.49 191.07Q1117.6 198.89 1123.16 204.55Q1128.73 210.21 1136.27 213.22Q1143.81 216.24 1152.67 216.24Z M1247.9 240L1247.9 108L1273.17 108L1338.79 188.14L1338.79 108L1368.97 108L1368.97 240L1343.89 240L1278.07 159.86L1278.07 240Z M1400.27 240L1400.27 108L1460.23 108Q1481.73 108 1498.14 116.2Q1514.54 124.41 1523.78 139.11Q1533.02 153.82 1533.02 174Q1533.02 193.99 1523.78 208.79Q1514.54 223.59 1498.14 231.8Q1481.73 240 1460.23 240ZM1430.82 214.92L1458.73 214.92Q1471.93 214.92 1481.64 209.92Q1491.35 204.93 1496.72 195.69Q1502.1 186.45 1502.1 174Q1502.1 161.37 1496.72 152.22Q1491.35 143.07 1481.64 138.08Q1471.93 133.08 1458.73 133.08L1430.82 133.08Z" fill="#00325a"/>
+
+  To change the badge<->D gap: decrease/increase x0 (smaller x0 = tighter).
+  To change small-cap ratio: change the 132 cap height for U,C,K,P,O,N,D.
+  After any change, recompute canvas width = rightmost glyph maxX + 24.
+
+RENDERING / VERIFICATION
+------------------------
+macOS qlmanage is unreliable (scales ~1.57x, clips square, ignores text-anchor).
+Render with librsvg via sharp instead:
+  node -e "require('sharp')('logo/duckpond-banner.svg',{density:150}).png().toFile('out.png')"

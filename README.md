@@ -1,4 +1,4 @@
-# Duckpond
+<img src="logo/duckpond-banner.svg" alt="Duckpond" width="640">
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jmacd/duckpond/badge)](https://scorecard.dev/viewer/?uri=github.com/jmacd/duckpond)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
