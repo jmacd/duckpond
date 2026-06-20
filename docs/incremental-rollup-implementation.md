@@ -1,8 +1,10 @@
 # Incremental temporal-reduce rollup: repair design and plan
 
 Status: design + implementation plan. Phase 1 (decomposable-aggregate
-lowering) and phase 2 (per-version partial-aggregate cache, wired through the
-temporal-reduce format-provider path) landed; phases 3-4 not yet started.
+lowering), phase 2 (per-version partial-aggregate cache, wired through the
+temporal-reduce format-provider path), and phase 3 (cascading rollups: finest
+partials shared and re-binned across nesting resolutions) landed; phase 4 not
+yet started.
 
 This document is the concrete, code-grounded repair plan for the dominant
 remaining build-time inefficiency in duckpond: `temporal-reduce` exports cost

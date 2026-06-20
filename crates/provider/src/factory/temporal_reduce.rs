@@ -408,12 +408,28 @@ impl TemporalReduceSqlFile {
             return Ok(None);
         }
 
+        // Partials are stored once at the finest resolution and re-binned to
+        // this file's resolution at merge time, so coarser resolutions never
+        // rescan raw history. The finest-partial namespace is therefore shared
+        // across all resolutions of the same site.
+        let resolution_durations = parse_nesting_resolutions(&self.config.resolutions)?;
+        let Some(finest_interval) = resolution_durations.first().copied() else {
+            return Ok(None);
+        };
+
         let filled = self.filled_config().await?;
         let pieces = AggSqlPieces::build(&filled)?;
-        let cfg_hash = crate::rollup_cache::cfg_hash(&rollup_cfg_canonical(&filled, self.duration));
+        let cfg_hash = crate::rollup_cache::cfg_hash(&rollup_cfg_canonical(
+            &filled,
+            finest_interval,
+            &self.pattern_url,
+        ));
 
-        let tr_node_id = id.node_id();
-        let glob_dir = crate::rollup_cache::glob_dir(&cache_dir, &cfg_hash, &tr_node_id);
+        // Key the partials directory by the parent site partition, which is
+        // shared by every resolution file of this site, so all resolutions read
+        // and write the same finest-resolution partials.
+        let site_node_id = id.part_id().to_node_id();
+        let glob_dir = crate::rollup_cache::glob_dir(&cache_dir, &cfg_hash, &site_node_id);
 
         let fs = self.context.context.filesystem();
         let mut provider_api =
@@ -442,6 +458,7 @@ impl TemporalReduceSqlFile {
                 );
                 self.write_version_partial(
                     &pieces,
+                    finest_interval,
                     &glob_dir,
                     &source_node_id,
                     version,
@@ -452,12 +469,12 @@ impl TemporalReduceSqlFile {
         }
 
         let ctx = &context.datafusion_session;
-        let sanitized_id: String = tr_node_id
+        let sanitized_id: String = site_node_id
             .to_string()
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        let partials_table = format!("__rollup_partials_{}", sanitized_id);
+        let partials_table = format!("__rollup_partials_{}_{}", cfg_hash, sanitized_id);
         if !ctx.table_exist(partials_table.as_str()).unwrap_or(false) {
             let provider = crate::rollup_cache::listing_table_from_dir(&glob_dir, ctx)
                 .await
@@ -467,7 +484,7 @@ impl TemporalReduceSqlFile {
                 .map_other()?;
         }
 
-        let merge_sql = pieces.merge_sql(&filled.time_column, &partials_table);
+        let merge_sql = pieces.merge_sql(self.duration, &filled.time_column, &partials_table);
         let logical_plan = ctx
             .sql(&merge_sql)
             .await
@@ -486,12 +503,14 @@ impl TemporalReduceSqlFile {
         Ok(Some(table_provider))
     }
 
-    /// Compute one immutable source version's partials and write them to the
-    /// node's rollup glob directory. The partials carry no reconstruction so
-    /// they stay mergeable across versions and resolutions.
+    /// Compute one immutable source version's partials at the finest resolution
+    /// and write them to the site's rollup glob directory. The partials carry
+    /// no reconstruction so they stay mergeable across versions and re-bin into
+    /// any coarser nesting resolution.
     async fn write_version_partial(
         &self,
         pieces: &AggSqlPieces,
+        finest_interval: Duration,
         glob_dir: &std::path::Path,
         source_node_id: &tinyfs::NodeID,
         version: &tinyfs::FileVersionInfo,
@@ -510,7 +529,7 @@ impl TemporalReduceSqlFile {
             parquet_path.display()
         ))?;
 
-        let partial_sql = pieces.partial_sql(self.duration, &self.config.time_column, table);
+        let partial_sql = pieces.partial_sql(finest_interval, &self.config.time_column, table);
         let stream = ctx
             .sql(&partial_sql)
             .await
@@ -684,12 +703,27 @@ fn node_file_url(scheme: &str, node_path: &tinyfs::NodePath) -> String {
 }
 
 /// Canonical string over the parts of a temporal-reduce config that change the
-/// meaning of the cached partials: the per-file resolution, the time column,
-/// and the schema-filled aggregation set. Feeds [`crate::rollup_cache::cfg_hash`].
-fn rollup_cfg_canonical(filled: &TemporalReduceConfig, duration: Duration) -> String {
+/// meaning of the cached partials: the source pattern, the finest resolution at
+/// which partials are stored, the time column, and the schema-filled
+/// aggregation set. Feeds [`crate::rollup_cache::cfg_hash`].
+///
+/// The output resolution is deliberately excluded: partials are stored once at
+/// the finest resolution and shared across every coarser resolution of the same
+/// site, which re-bin them at merge time.
+fn rollup_cfg_canonical(
+    filled: &TemporalReduceConfig,
+    finest_interval: Duration,
+    pattern_url: &str,
+) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    let _ = write!(s, "dur={}s;ts={};", duration.as_secs(), filled.time_column);
+    let _ = write!(
+        s,
+        "src={};finest={}s;ts={};",
+        pattern_url,
+        finest_interval.as_secs(),
+        filled.time_column
+    );
     for agg in &filled.aggregations {
         let _ = write!(s, "agg={}:", agg.agg_type.to_sql());
         if let Some(cols) = &agg.columns {
@@ -700,6 +734,42 @@ fn rollup_cfg_canonical(filled: &TemporalReduceConfig, duration: Duration) -> St
         s.push(';');
     }
     s
+}
+
+/// Parse the resolution list and validate that it nests: sorted ascending, each
+/// coarser interval is an exact integer multiple of the next-finer one. Returns
+/// the durations sorted finest-first.
+///
+/// Nesting guarantees a finer bucket never splits across a coarser boundary, so
+/// every coarser resolution can be derived by re-binning the finest partials
+/// rather than rescanning raw history.
+fn parse_nesting_resolutions(resolutions: &[String]) -> TinyFSResult<Vec<Duration>> {
+    let mut durations = Vec::with_capacity(resolutions.len());
+    for res_str in resolutions {
+        let d = humantime::parse_duration(res_str)
+            .map_other_context(format!("Invalid resolution '{}'", res_str))?;
+        if d.as_nanos() == 0 {
+            return Err(tinyfs::Error::Other(format!(
+                "Invalid resolution '{}': must be non-zero",
+                res_str
+            )));
+        }
+        durations.push(d);
+    }
+    durations.sort();
+    for win in durations.windows(2) {
+        let finer = win[0].as_nanos();
+        let coarser = win[1].as_nanos();
+        if coarser % finer != 0 {
+            return Err(tinyfs::Error::Other(format!(
+                "Non-nesting resolutions: {:?} is not an integer multiple of {:?}; \
+                 each coarser resolution must be an integer multiple of the next finer one \
+                 so cascaded rollups stay exact",
+                win[1], win[0]
+            )));
+        }
+    }
+    Ok(durations)
 }
 
 fn duration_to_sql_interval(duration: Duration) -> String {
@@ -1044,18 +1114,27 @@ impl AggSqlPieces {
     }
 
     /// Cross-version merge query: merge cached per-version partials by
-    /// `time_bucket`, then reconstruct the output columns. The reconstruction
-    /// is identical to the single-pass form, so a straddling boundary bucket
-    /// present in two versions is recombined exactly.
-    fn merge_sql(&self, ts: &str, partials_table: &str) -> String {
+    /// `time_bucket`, re-binning to `output_interval`, then reconstruct the
+    /// output columns. The reconstruction is identical to the single-pass form,
+    /// so a straddling boundary bucket present in two versions is recombined
+    /// exactly.
+    ///
+    /// Partials are stored at the finest resolution; `output_interval` may be a
+    /// coarser nesting multiple, in which case `date_bin` re-buckets the finer
+    /// partials into the coarser bucket. When `output_interval` equals the
+    /// partial interval the re-bin is an identity because the partial
+    /// `time_bucket` values are already aligned to that interval.
+    fn merge_sql(&self, output_interval: Duration, ts: &str, partials_table: &str) -> String {
+        let interval = duration_to_sql_interval(output_interval);
+        let bin = date_bin_expr(&interval, "time_bucket");
         format!(
             r#"
         WITH merged AS (
           SELECT 
-            time_bucket,
+            {bin} AS time_bucket,
             {merge_exprs}
           FROM {partials_table}
-          GROUP BY time_bucket
+          GROUP BY {bin}
         )
         SELECT 
           COALESCE(CAST(time_bucket AS TIMESTAMP), CAST(0 AS TIMESTAMP)) AS {ts},
@@ -1078,7 +1157,9 @@ pub struct TemporalReduceDirectory {
 
 impl TemporalReduceDirectory {
     pub fn new(config: TemporalReduceConfig, context: crate::FactoryContext) -> TinyFSResult<Self> {
-        // Parse all resolutions upfront
+        // Parse all resolutions upfront, validating that they nest so cascaded
+        // rollups stay exact.
+        _ = parse_nesting_resolutions(&config.resolutions)?;
         let mut parsed_resolutions = Vec::new();
 
         for res_str in &config.resolutions {
@@ -1518,11 +1599,10 @@ fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
         TemporalReduceConfig,
     >(config, "Invalid temporal-reduce config")?;
 
-    // Additional validation: check that resolutions can be parsed
-    for res_str in &temporal_config.resolutions {
-        _ = humantime::parse_duration(res_str)
-            .map_other_context(format!("Invalid resolution '{}'", res_str))?;
-    }
+    // Additional validation: resolutions must parse and nest (each coarser
+    // interval an integer multiple of the next finer) so cascaded rollups stay
+    // exact.
+    _ = parse_nesting_resolutions(&temporal_config.resolutions)?;
 
     Ok(config_value)
 }
@@ -1716,7 +1796,7 @@ mod tests {
         _ = ctx
             .register_table("partials", Arc::new(partials_table))
             .unwrap();
-        let merge_sql = pieces.merge_sql("timestamp", "partials");
+        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials");
         let merged = ctx.sql(&merge_sql).await.unwrap().collect().await.unwrap();
 
         let full = arrow::compute::concat_batches(&full[0].schema(), &full).unwrap();
@@ -2476,5 +2556,203 @@ mod tests {
             partials_after_first,
             "second read must not recompute any partials"
         );
+    }
+
+    /// Phase 3: cascading rollups. Multiple nesting resolutions of one site
+    /// share a single set of finest-resolution partials; each resolution
+    /// re-bins those partials and matches its single-pass output, and raw is
+    /// scanned only once regardless of how many resolutions are read.
+    #[tokio::test]
+    async fn test_rollup_cascading_resolutions_share_finest_partials() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+            for day in 0..2u32 {
+                let mut csv_data = String::from("timestamp,temperature\n");
+                for hour in 0..24u32 {
+                    let d = day + 1;
+                    let ts = format!("1970-01-{:02}T{:02}:00:00", d, hour);
+                    let temp = 20.5 + hour as f64 + day as f64 * 100.0;
+                    csv_data.push_str(&format!("{},{}\n", ts, temp));
+                }
+                use tokio::io::AsyncWriteExt;
+                let path = format!("/ingest/weather-{}.csv", day + 1);
+                let mut w = root
+                    .async_writer_path_with_type(&path, EntryType::FilePhysicalVersion)
+                    .await
+                    .unwrap();
+                w.write_all(csv_data.as_bytes()).await.unwrap();
+                w.flush().await.unwrap();
+                w.shutdown().await.unwrap();
+            }
+        }
+
+        let config = || TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather-*.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1h".to_string(), "6h".to_string(), "1d".to_string()],
+            aggregations: vec![
+                agg(AggregationType::Avg, &["temperature"]),
+                agg(AggregationType::Min, &["temperature"]),
+                agg(AggregationType::Max, &["temperature"]),
+            ],
+            transforms: None,
+        };
+
+        let make_ctx = |cache: Option<std::path::PathBuf>| {
+            let session = Arc::new(datafusion::prelude::SessionContext::new());
+            let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+                .expect("register object store");
+            let ctx = crate::ProviderContext::new(session, Arc::new(persistence.clone()));
+            match cache {
+                Some(dir) => ctx.with_cache_dir(dir),
+                None => ctx,
+            }
+        };
+
+        async fn collect_resolution(
+            provider_context: &crate::ProviderContext,
+            config: TemporalReduceConfig,
+            res_file: &str,
+            table: &str,
+        ) -> Vec<(f64, f64, f64)> {
+            let context = test_context(provider_context, FileID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+
+            let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+            let weather_dir = match &weather_node.node_type {
+                NodeType::Directory(dir) => dir,
+                _ => panic!("expected directory"),
+            };
+            let node = weather_dir.get(res_file).await.unwrap().unwrap();
+            let file_id = node.id;
+            let NodeType::File(file_handle) = &node.node_type else {
+                panic!("expected file node");
+            };
+            let file_arc = file_handle.get_file().await;
+            let file_guard = file_arc.lock().await;
+            let queryable = file_guard.as_queryable().expect("queryable");
+            let table_provider = queryable
+                .as_table_provider(file_id, provider_context)
+                .await
+                .expect("table provider");
+
+            let ctx = &provider_context.datafusion_session;
+            _ = ctx.register_table(table, table_provider).unwrap();
+            let batches = ctx
+                .sql(&format!(
+                    "SELECT \"temperature.avg\", \"temperature.min\", \"temperature.max\" FROM {} ORDER BY timestamp",
+                    table
+                ))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+
+            let mut rows = Vec::new();
+            for b in &batches {
+                let col = |name: &str| {
+                    b.column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .clone()
+                };
+                let avg = col("temperature.avg");
+                let min = col("temperature.min");
+                let max = col("temperature.max");
+                for i in 0..b.num_rows() {
+                    rows.push((avg.value(i), min.value(i), max.value(i)));
+                }
+            }
+            rows
+        }
+
+        fn count_rollup_partials(cache_dir: &std::path::Path) -> usize {
+            let mut count = 0;
+            let mut stack = vec![cache_dir.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|e| e == "parquet")
+                        && path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("rollup_"))
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+        let cache_ctx = make_ctx(Some(cache_dir.clone()));
+
+        // Read all three resolutions from the cascading rollup path.
+        let hourly = collect_resolution(&cache_ctx, config(), "res=1h.series", "r_1h").await;
+        let partials_after_first_res = count_rollup_partials(&cache_dir);
+        let six_hourly = collect_resolution(&cache_ctx, config(), "res=6h.series", "r_6h").await;
+        let daily = collect_resolution(&cache_ctx, config(), "res=1d.series", "r_1d").await;
+
+        // Raw is scanned only once: the finest partials (one per source file)
+        // are shared, so reading coarser resolutions adds no new partials.
+        assert_eq!(
+            partials_after_first_res, 2,
+            "one finest partial per source file"
+        );
+        assert_eq!(
+            count_rollup_partials(&cache_dir),
+            2,
+            "coarser resolutions must reuse the shared finest partials"
+        );
+
+        // Each cascaded resolution matches its single-pass output.
+        let single_1h =
+            collect_resolution(&make_ctx(None), config(), "res=1h.series", "s_1h").await;
+        let single_6h =
+            collect_resolution(&make_ctx(None), config(), "res=6h.series", "s_6h").await;
+        let single_1d =
+            collect_resolution(&make_ctx(None), config(), "res=1d.series", "s_1d").await;
+
+        assert_eq!(hourly.len(), 48, "48 hourly buckets");
+        assert_eq!(six_hourly.len(), 8, "8 six-hourly buckets");
+        assert_eq!(daily.len(), 2, "2 daily buckets");
+        assert_eq!(hourly, single_1h, "1h cascade == single-pass");
+        assert_eq!(six_hourly, single_6h, "6h cascade == single-pass");
+        assert_eq!(daily, single_1d, "1d cascade == single-pass");
+    }
+
+    /// Phase 3: non-nesting resolution sets are rejected so cascaded rollups can
+    /// never silently miscompute a straddling bucket.
+    #[test]
+    fn test_non_nesting_resolutions_rejected() {
+        // 90m is not an integer multiple of 60m, and 60m does not divide 90m.
+        let err = parse_nesting_resolutions(&["1h".to_string(), "90m".to_string()]);
+        assert!(err.is_err(), "non-nesting resolutions must be rejected");
+
+        // Nesting sets are accepted and returned finest-first.
+        let ok = parse_nesting_resolutions(&["1d".to_string(), "1h".to_string(), "6h".to_string()])
+            .unwrap();
+        assert_eq!(ok.first().copied(), Some(Duration::from_secs(3600)));
     }
 }
