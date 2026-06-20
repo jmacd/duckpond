@@ -179,16 +179,24 @@ pub async fn listing_table_from_cache(
     cache_dir: &Path,
     cfg_hash: &str,
     node_id: &tinyfs::NodeID,
+    ctx: &SessionContext,
+) -> Result<Arc<dyn TableProvider>> {
+    listing_table_from_dir(&cache_node_dir(cache_dir, cfg_hash, node_id), ctx).await
+}
+
+/// Build a `ListingTable` over every `.parquet` partials file directly under
+/// `dir`, merging their schemas (UNION-ALL-BY-NAME across versions/sources).
+pub async fn listing_table_from_dir(
+    dir: &Path,
     _ctx: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    let dir = cache_node_dir(cache_dir, cfg_hash, node_id);
     let dir_url = format!("file://{}/", dir.display());
 
     let table_url = ListingTableUrl::parse(&dir_url)?;
     let listing_options =
         ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
 
-    let merged_schema = merge_parquet_schemas_in_dir(&dir).await?;
+    let merged_schema = merge_parquet_schemas_in_dir(dir).await?;
 
     let config = ListingTableConfig::new(table_url)
         .with_listing_options(listing_options)
@@ -196,6 +204,88 @@ pub async fn listing_table_from_cache(
 
     let table = ListingTable::try_new(config)?;
     Ok(Arc::new(table))
+}
+
+// --- Glob variant: one rollup dir per temporal-reduce node, holding one
+// partial file per (source node, input version). The source pattern can match
+// many rotated input files, each its own node with its own versions; keying the
+// partial filename by the source node id keeps them collision-free while all
+// partials still merge in a single `ListingTable`.
+
+/// Directory holding all per-source-version partials for one temporal-reduce
+/// node and config namespace: `{cache_dir}/rollup_{cfg_hash}_{tr_node_id}/`.
+#[must_use]
+pub fn glob_dir(cache_dir: &Path, cfg_hash: &str, tr_node_id: &tinyfs::NodeID) -> PathBuf {
+    cache_node_dir(cache_dir, cfg_hash, tr_node_id)
+}
+
+/// Path for one source node's input version partial within the glob dir:
+/// `{glob_dir}/{source_node}_v{version}_{key}.parquet`.
+#[must_use]
+pub fn glob_member_path(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+) -> PathBuf {
+    let key = version_key(source_node_id, version);
+    glob_dir.join(format!(
+        "{}_v{}_{}.parquet",
+        source_node_id, version.version, key
+    ))
+}
+
+/// Return the subset of a source node's versions whose partials are not yet
+/// present in the glob dir.
+#[must_use]
+pub fn find_uncached_members(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    versions: &[FileVersionInfo],
+) -> Vec<FileVersionInfo> {
+    versions
+        .iter()
+        .filter(|v| !glob_member_path(glob_dir, source_node_id, v).exists())
+        .cloned()
+        .collect()
+}
+
+/// Write one source-version partials stream into the glob dir (atomic).
+pub async fn write_glob_member(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+    schema: SchemaRef,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
+) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(glob_dir).await?;
+    let final_path = glob_member_path(glob_dir, source_node_id, version);
+    let tmp_path = final_path.with_extension("parquet.tmp");
+
+    let file = tokio::fs::File::create(&tmp_path).await?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+        .build();
+    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    let mut stream = stream;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        writer
+            .write(&batch)
+            .await
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    }
+    let _metadata = writer
+        .close()
+        .await
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    tokio::fs::rename(&tmp_path, &final_path).await?;
+    log::debug!("[SAVE] Rollup cache: wrote {}", final_path.display());
+    Ok(final_path)
 }
 
 /// Drop a node's entire rollup-cache namespace for one config, forcing all
