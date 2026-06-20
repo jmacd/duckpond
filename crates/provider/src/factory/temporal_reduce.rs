@@ -650,10 +650,19 @@ impl TemporalReduceSqlFile {
         Ok(())
     }
 
-    /// Resolve the source `in_pattern` glob to concrete source file NodePaths,
-    /// deduplicated by node id. Directories and non-file nodes are skipped.
+    /// Resolve this partition's `pattern_url` to concrete source file
+    /// NodePaths, deduplicated by node id. Directories and non-file nodes are
+    /// skipped.
     async fn resolve_source_files(&self) -> TinyFSResult<Vec<tinyfs::NodePath>> {
-        let url = &self.config.in_pattern;
+        // Resolve the partition-scoped pattern_url, not the original in_pattern
+        // glob. pattern_url is the concrete file for a 1:1 source->output
+        // mapping and the original glob only when several files share one
+        // output, exactly matching the non-rollup SqlDerived source in
+        // ensure_inner. Using in_pattern here would pull in sibling files from
+        // other output partitions whose schemas differ, so the per-version
+        // partial SQL would reference columns absent from those siblings.
+        let url = crate::Url::parse(&self.pattern_url)
+            .map_other_context(format!("Invalid pattern URL '{}'", self.pattern_url))?;
         let tinyfs_path = percent_encoding::percent_decode_str(url.path())
             .decode_utf8()
             .map_other_context(format!("Invalid UTF-8 in URL path '{}'", url.path()))?
