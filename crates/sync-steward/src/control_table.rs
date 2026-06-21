@@ -411,6 +411,39 @@ impl ControlTable {
         Ok(())
     }
 
+    /// Delete the append-only lifecycle history for `pond_id` at or below
+    /// `horizon_seq`, leaving `Setting` records (watermarks, store_id,
+    /// mount, mode) intact.  This is the only way to actually SHRINK the
+    /// control table: checkpoint/vacuum/compact merge or re-list files but
+    /// never remove logical rows, so the log otherwise grows without bound.
+    ///
+    /// Callers are responsible for choosing a SAFE `horizon_seq`: every
+    /// transaction at or below it must already be replicated to all push
+    /// remotes, its checksums durably serialized into bundles, and be
+    /// old enough that no retained-history reader needs it.  The deleted
+    /// rows leave tombstoned parquet files behind until a subsequent
+    /// vacuum reclaims them.  Returns the number of rows deleted.
+    pub async fn prune_below(&mut self, pond_id: Uuid, horizon_seq: i64) -> Result<usize> {
+        let predicate = format!(
+            "{pid} = '{p}' AND {rk} != '{setting}' AND {ts} <= {h}",
+            pid = COL_POND_ID,
+            p = pond_id,
+            rk = COL_RECORD_KIND,
+            setting = RecordKind::Setting.as_str(),
+            ts = COL_TXN_SEQ,
+            h = horizon_seq,
+        );
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .delete()
+            .with_predicate(predicate)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.num_deleted_rows)
+    }
+
     /// Append a single record to the control table.
     pub async fn write_record(&mut self, record: ControlRecord) -> Result<()> {
         self.write_records(vec![record]).await

@@ -48,6 +48,27 @@ enum ControlCommand {
         /// Configuration value
         value: String,
     },
+    /// Shrink the control table by deleting replicated lifecycle history.
+    ///
+    /// Setting rows (watermarks, store_id, mount, mode) are always kept.
+    /// The prune horizon is the lesser of the minimum push-remote
+    /// `last_pushed_seq` and `last_committed - keep-txns`, so only
+    /// fully-replicated, beyond-retention transactions are removed.  A
+    /// checkpoint + vacuum runs afterwards to reclaim disk space.
+    Prune {
+        /// Number of most-recent transactions to always retain for
+        /// `pond log` / recovery, even if already replicated.
+        #[arg(long, default_value = "1000")]
+        keep_txns: i64,
+        /// Compute and report the horizon without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Permit pruning when no push-mode remote is attached.  Pruned
+        /// history is then unrecoverable and a future remote must
+        /// bootstrap via restart-from-compact.
+        #[arg(long)]
+        allow_no_remote: bool,
+    },
 }
 
 /// Config subcommands
@@ -619,6 +640,15 @@ async fn main() -> Result<()> {
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }
                 }
+                ControlCommand::Prune {
+                    keep_txns,
+                    dry_run,
+                    allow_no_remote,
+                } => commands::control::ControlMode::Prune {
+                    keep_txns,
+                    dry_run,
+                    allow_no_remote,
+                },
             };
             commands::control_command(&ship_context, control_mode).await
         }

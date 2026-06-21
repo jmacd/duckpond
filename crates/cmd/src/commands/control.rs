@@ -77,29 +77,43 @@ pub enum ControlMode {
     ShowConfig,
     /// Set a configuration value (key=value)
     SetConfig { key: String, value: String },
+    /// Shrink the control table by deleting replicated lifecycle history
+    /// at or below a safe horizon, then checkpoint + vacuum to reclaim
+    /// space.
+    Prune {
+        keep_txns: i64,
+        dry_run: bool,
+        allow_no_remote: bool,
+    },
 }
 
 /// Show control table information
 pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> Result<()> {
     // Use the Ship's control table (already open and updated with all commits)
     let mut ship = ship_context.open_pond().await?;
-    let control_table = ship.control_table_mut();
 
     match mode {
         ControlMode::Recent { limit } => {
-            show_recent_transactions(control_table, limit).await?;
+            show_recent_transactions(ship.control_table_mut(), limit).await?;
         }
         ControlMode::Detail { txn_seq } => {
-            show_transaction_detail(control_table, txn_seq).await?;
+            show_transaction_detail(ship.control_table_mut(), txn_seq).await?;
         }
         ControlMode::Incomplete => {
-            show_incomplete_operations(control_table).await?;
+            show_incomplete_operations(ship.control_table_mut()).await?;
         }
         ControlMode::ShowConfig => {
-            show_pond_config(control_table).await?;
+            show_pond_config(ship.control_table_mut()).await?;
         }
         ControlMode::SetConfig { key, value } => {
-            set_pond_config(control_table, &key, &value).await?;
+            set_pond_config(ship.control_table_mut(), &key, &value).await?;
+        }
+        ControlMode::Prune {
+            keep_txns,
+            dry_run,
+            allow_no_remote,
+        } => {
+            prune_control_table(&mut ship, keep_txns, dry_run, allow_no_remote).await?;
         }
     }
 
@@ -640,6 +654,161 @@ async fn set_pond_config(
         .map_err(|e| anyhow!("Failed to set setting: {}", e))?;
 
     println!("[OK] Set '{}' = '{}'", key, value);
+    Ok(())
+}
+
+/// Single-column COUNT(*) result row.
+#[derive(Debug, Deserialize)]
+struct CountRow {
+    n: i64,
+}
+
+/// Shrink the control table by deleting replicated lifecycle history.
+///
+/// The prune horizon H is the lesser of:
+///   * the replication horizon — the minimum `last_pushed_seq` across all
+///     push-mode remotes (transactions at or below it are durably bundled
+///     on every remote, so their local lifecycle/checksum rows are
+///     redundant), and
+///   * the retention horizon `last_committed - keep_txns`, which always
+///     preserves the most recent `keep_txns` transactions for `pond log`.
+///
+/// `Setting` rows (watermarks, store_id, mount, mode) are never deleted.
+/// After deletion a forced checkpoint + vacuum reclaims the disk space.
+async fn prune_control_table(
+    ship: &mut steward::Steward,
+    keep_txns: i64,
+    dry_run: bool,
+    allow_no_remote: bool,
+) -> Result<()> {
+    use crate::commands::remote::{list_remote_names, load_remote_attachment};
+    use steward::{REMOTE_MODE_PREFIX, RemoteMode};
+
+    if keep_txns < 0 {
+        return Err(anyhow!("--keep-txns must be >= 0"));
+    }
+
+    let last_committed = ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
+        .map_err(|e| anyhow!("Failed to read last committed seq: {}", e))?;
+
+    // Enumerate push-mode remotes and gather their replication watermarks.
+    let names = list_remote_names(ship).await?;
+    let mut push_remotes: Vec<(String, String)> = Vec::new();
+    for name in names {
+        let mode = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}{name}"))
+            .await
+            .unwrap_or_default()
+            .unwrap_or_else(|| "push".to_string());
+        let pushes = RemoteMode::parse(&mode).map(|m| m.pushes()).unwrap_or(true);
+        if !pushes {
+            continue;
+        }
+        let attachment = load_remote_attachment(ship, &name).await?;
+        push_remotes.push((name, attachment.url));
+    }
+
+    let replication_horizon = if push_remotes.is_empty() {
+        if !allow_no_remote {
+            return Err(anyhow!(
+                "no push-mode remote attached; refusing to prune unreplicated history. \
+                 Re-run with --allow-no-remote to prune by retention only. Pruned history \
+                 is then unrecoverable and any future remote must bootstrap via \
+                 restart-from-compact."
+            ));
+        }
+        None
+    } else {
+        let mut min_seq: Option<i64> = None;
+        for (name, url) in &push_remotes {
+            let watermark = ship
+                .control_table()
+                .raw_config_get(&format!("last_pushed_seq:{}", url))
+                .await
+                .unwrap_or_default()
+                .and_then(|s| s.parse::<i64>().ok());
+            let seq = watermark.ok_or_else(|| {
+                anyhow!(
+                    "push remote '{}' ({}) has no last_pushed_seq watermark; nothing has \
+                     been replicated to it, refusing to prune.",
+                    name,
+                    url
+                )
+            })?;
+            min_seq = Some(min_seq.map_or(seq, |m| m.min(seq)));
+        }
+        min_seq
+    };
+
+    let retention_horizon = last_committed - keep_txns;
+    let horizon = match replication_horizon {
+        Some(r) => r.min(retention_horizon),
+        None => retention_horizon,
+    };
+
+    println!("Control-table prune:");
+    println!("  last committed seq : {}", last_committed);
+    println!("  keep-txns          : {}", keep_txns);
+    println!("  retention horizon  : {}", retention_horizon);
+    match replication_horizon {
+        Some(r) => println!("  replication horizon: {} (min push last_pushed_seq)", r),
+        None => println!("  replication horizon: (no push remote)"),
+    }
+    println!("  effective horizon  : {}", horizon);
+
+    if horizon < 1 {
+        println!("Nothing to prune (horizon < 1).");
+        return Ok(());
+    }
+
+    if dry_run {
+        let pond_id = ship.control_table().pond_id_uuid();
+        let ctx = ship.control_table().session_context();
+        let count_sql = format!(
+            "SELECT COUNT(*) AS n FROM control \
+             WHERE pond_id = '{pid}' AND record_kind != 'setting' AND txn_seq <= {h}",
+            pid = pond_id,
+            h = horizon,
+        );
+        let batches = ctx
+            .sql(&count_sql)
+            .await
+            .map_err(|e| anyhow!("count query failed: {}", e))?
+            .collect()
+            .await
+            .map_err(|e| anyhow!("count collect failed: {}", e))?;
+        let mut candidate_rows = 0i64;
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let rows: Vec<CountRow> = serde_arrow::from_record_batch(batch)
+                .map_err(|e| anyhow!("count decode failed: {}", e))?;
+            if let Some(r) = rows.first() {
+                candidate_rows = r.n;
+            }
+        }
+        println!(
+            "  would delete       : {} rows (txn_seq <= {})  [dry-run]",
+            candidate_rows, horizon
+        );
+        return Ok(());
+    }
+
+    let deleted = ship
+        .control_table_mut()
+        .prune_below(horizon)
+        .await
+        .map_err(|e| anyhow!("prune failed: {}", e))?;
+    println!("  deleted            : {} rows", deleted);
+
+    println!("  reclaiming space (checkpoint + vacuum) ...");
+    let _report = ship.maintain(true, false).await;
+    println!("[OK] Control table pruned at horizon {}.", horizon);
     Ok(())
 }
 

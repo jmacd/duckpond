@@ -1528,3 +1528,141 @@ async fn get_transaction_cli_args(
 
     Ok(records)
 }
+
+/// Count control-table rows matching a SQL `WHERE` predicate fragment.
+async fn count_control_rows(ship_context: &ShipContext, where_clause: &str) -> Result<i64> {
+    use arrow::array::{Array, Int64Array};
+
+    let ship = ship_context.open_pond().await?;
+    let ctx = ship.control_table().session_context();
+    let sql = format!("SELECT COUNT(*) AS n FROM control WHERE {}", where_clause);
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    let mut n = 0i64;
+    for batch in &batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        if !arr.is_null(0) {
+            n = arr.value(0);
+        }
+    }
+    Ok(n)
+}
+
+/// `pond control prune` deletes replicated lifecycle history at or below
+/// the horizon while preserving `Setting` rows and the newest `keep_txns`
+/// transactions.  Uses the no-remote retention path (`allow_no_remote`).
+#[tokio::test]
+async fn test_control_prune_shrinks_history_preserving_settings() {
+    let setup = TestSetup::new().await.expect("setup");
+
+    // Generate several committed write transactions.
+    for i in 0..6 {
+        setup
+            .execute_write_transaction(&format!("prune_write_{}", i))
+            .await
+            .expect("write txn");
+    }
+
+    // Record a Setting row that must survive the prune.
+    {
+        let mut ship = setup.ship_context.open_pond().await.expect("open");
+        ship.control_table_mut()
+            .set_setting("prune_marker", "keepme")
+            .await
+            .expect("set setting");
+    }
+
+    let last_committed = setup.get_last_txn_seq().await.expect("last seq");
+    let keep_txns = 2i64;
+    let horizon = last_committed - keep_txns;
+    assert!(horizon >= 1, "need history below horizon for the test");
+
+    let below_before = count_control_rows(
+        &setup.ship_context,
+        &format!("record_kind != 'setting' AND txn_seq <= {}", horizon),
+    )
+    .await
+    .expect("count below");
+    assert!(below_before > 0, "expected prunable rows below horizon");
+
+    let settings_before = count_control_rows(&setup.ship_context, "record_kind = 'setting'")
+        .await
+        .expect("count settings");
+    assert!(settings_before > 0, "expected at least one setting row");
+
+    // Prune (no remote attached -> retention-only path).
+    control_command(
+        &setup.ship_context,
+        ControlMode::Prune {
+            keep_txns,
+            dry_run: false,
+            allow_no_remote: true,
+        },
+    )
+    .await
+    .expect("prune");
+
+    // All non-setting rows at/below the horizon are gone.
+    let below_after = count_control_rows(
+        &setup.ship_context,
+        &format!("record_kind != 'setting' AND txn_seq <= {}", horizon),
+    )
+    .await
+    .expect("count below after");
+    assert_eq!(below_after, 0, "history at/below horizon should be deleted");
+
+    // Setting rows are untouched.
+    let settings_after = count_control_rows(&setup.ship_context, "record_kind = 'setting'")
+        .await
+        .expect("count settings after");
+    assert_eq!(
+        settings_after, settings_before,
+        "setting rows must be preserved"
+    );
+
+    // The newest transactions survive, so MAX(txn_seq) is unchanged.
+    let last_after = setup.get_last_txn_seq().await.expect("last seq after");
+    assert_eq!(
+        last_after, last_committed,
+        "newest committed seq must be preserved"
+    );
+
+    // Rows above the horizon survive.
+    let above_after = count_control_rows(
+        &setup.ship_context,
+        &format!("record_kind != 'setting' AND txn_seq > {}", horizon),
+    )
+    .await
+    .expect("count above after");
+    assert!(above_after > 0, "rows above horizon must survive");
+}
+
+/// Without a push remote and without `--allow-no-remote`, prune refuses.
+#[tokio::test]
+async fn test_control_prune_refuses_without_remote() {
+    let setup = TestSetup::new().await.expect("setup");
+    setup
+        .execute_write_transaction("prune_norem")
+        .await
+        .expect("write txn");
+
+    let result = control_command(
+        &setup.ship_context,
+        ControlMode::Prune {
+            keep_txns: 0,
+            dry_run: false,
+            allow_no_remote: false,
+        },
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "prune should refuse without a push remote unless --allow-no-remote"
+    );
+}

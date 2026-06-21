@@ -727,6 +727,19 @@ impl ControlTable {
 
     // -------- Queries --------
 
+    /// Prune local-pond lifecycle history at or below `horizon_seq`,
+    /// leaving `Setting` rows intact.  Thin wrapper over
+    /// [`sync_steward::ControlTable::prune_below`] scoped to the local
+    /// pond_id.  Returns the number of rows deleted.  The caller must
+    /// run a checkpoint + vacuum afterwards to reclaim disk space.
+    pub async fn prune_below(&mut self, horizon_seq: i64) -> Result<usize, StewardError> {
+        let pond_id = self.pond_id_uuid();
+        self.inner
+            .prune_below(pond_id, horizon_seq)
+            .await
+            .map_err(map_err)
+    }
+
     /// Highest committed write sequence number, or 0 if none.  Replaces
     /// the pre-D2 implementation that scanned `transaction_type='write'`
     /// rows directly.
