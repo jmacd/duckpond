@@ -1666,3 +1666,60 @@ async fn test_control_prune_refuses_without_remote() {
         "prune should refuse without a push remote unless --allow-no-remote"
     );
 }
+
+/// `pond maintain --prune` deletes replicated history in the SAME pass as
+/// checkpoint/vacuum (no separate ship open), preserving Setting rows and
+/// the newest `keep_txns` transactions.
+#[tokio::test]
+async fn test_maintain_prune_shrinks_in_one_pass() {
+    use cmd::commands::maintain_command;
+
+    let setup = TestSetup::new().await.expect("setup");
+    for i in 0..6 {
+        setup
+            .execute_write_transaction(&format!("mprune_{}", i))
+            .await
+            .expect("write txn");
+    }
+    {
+        let mut ship = setup.ship_context.open_pond().await.expect("open");
+        ship.control_table_mut()
+            .set_setting("mprune_marker", "keepme")
+            .await
+            .expect("set setting");
+    }
+
+    let last_committed = setup.get_last_txn_seq().await.expect("last seq");
+    let keep_txns = 2i64;
+    let horizon = last_committed - keep_txns;
+    assert!(horizon >= 1);
+
+    let below_before = count_control_rows(
+        &setup.ship_context,
+        &format!("record_kind != 'setting' AND txn_seq <= {}", horizon),
+    )
+    .await
+    .expect("count below");
+    assert!(below_before > 0);
+
+    // compact=false, collapse=0, prune=true, keep_txns, allow_no_remote=true.
+    maintain_command(&setup.ship_context, false, 0, true, keep_txns, true)
+        .await
+        .expect("maintain --prune");
+
+    let below_after = count_control_rows(
+        &setup.ship_context,
+        &format!("record_kind != 'setting' AND txn_seq <= {}", horizon),
+    )
+    .await
+    .expect("count below after");
+    assert_eq!(below_after, 0, "history at/below horizon should be deleted");
+
+    let settings_after = count_control_rows(&setup.ship_context, "record_kind = 'setting'")
+        .await
+        .expect("count settings after");
+    assert!(settings_after > 0, "setting rows must be preserved");
+
+    let last_after = setup.get_last_txn_seq().await.expect("last seq after");
+    assert_eq!(last_after, last_committed, "newest committed seq preserved");
+}

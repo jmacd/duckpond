@@ -223,6 +223,17 @@ enum Commands {
         /// disable (the default).
         #[arg(long, default_value = "0")]
         collapse_versions: usize,
+        /// Also prune replicated control-table lifecycle history at or below a
+        /// safe horizon, reclaimed by this same checkpoint + vacuum pass.
+        #[arg(long)]
+        prune: bool,
+        /// With --prune: number of most-recent transactions to always retain.
+        #[arg(long, default_value = "1000")]
+        keep_txns: i64,
+        /// With --prune: permit pruning when no push-mode remote is attached
+        /// (retention-only; pruned history is then unrecoverable).
+        #[arg(long)]
+        allow_no_remote: bool,
     },
     /// Show pond contents
     Show {
@@ -530,7 +541,20 @@ async fn main() -> Result<()> {
         Commands::Maintain {
             compact,
             collapse_versions,
-        } => commands::maintain_command(&ship_context, compact, collapse_versions).await,
+            prune,
+            keep_txns,
+            allow_no_remote,
+        } => {
+            commands::maintain_command(
+                &ship_context,
+                compact,
+                collapse_versions,
+                prune,
+                keep_txns,
+                allow_no_remote,
+            )
+            .await
+        }
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {

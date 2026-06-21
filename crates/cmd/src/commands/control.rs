@@ -663,29 +663,34 @@ struct CountRow {
     n: i64,
 }
 
-/// Shrink the control table by deleting replicated lifecycle history.
+/// Outcome of computing the safe control-table prune horizon.
+pub struct PruneHorizon {
+    /// Highest sequence number whose lifecycle rows may be deleted.
+    pub horizon: i64,
+    /// `MAX(txn_seq)` with a `data_committed` record.
+    pub last_committed: i64,
+    /// `last_committed - keep_txns`.
+    pub retention_horizon: i64,
+    /// Minimum `last_pushed_seq` across push remotes, or `None` when no
+    /// push remote is attached.
+    pub replication_horizon: Option<i64>,
+}
+
+/// Compute the safe prune horizon: the lesser of the minimum push-remote
+/// `last_pushed_seq` and `last_committed - keep_txns`.  Read-only.
 ///
-/// The prune horizon H is the lesser of:
-///   * the replication horizon — the minimum `last_pushed_seq` across all
-///     push-mode remotes (transactions at or below it are durably bundled
-///     on every remote, so their local lifecycle/checksum rows are
-///     redundant), and
-///   * the retention horizon `last_committed - keep_txns`, which always
-///     preserves the most recent `keep_txns` transactions for `pond log`.
-///
-/// `Setting` rows (watermarks, store_id, mount, mode) are never deleted.
-/// After deletion a forced checkpoint + vacuum reclaims the disk space.
-async fn prune_control_table(
+/// Returns an error when no push remote is attached unless
+/// `allow_no_remote` is set, or when a push remote has no watermark yet.
+pub async fn compute_prune_horizon(
     ship: &mut steward::Steward,
     keep_txns: i64,
-    dry_run: bool,
     allow_no_remote: bool,
-) -> Result<()> {
+) -> Result<PruneHorizon> {
     use crate::commands::remote::{list_remote_names, load_remote_attachment};
     use steward::{REMOTE_MODE_PREFIX, RemoteMode};
 
     if keep_txns < 0 {
-        return Err(anyhow!("--keep-txns must be >= 0"));
+        return Err(anyhow!("keep-txns must be >= 0"));
     }
 
     let last_committed = ship
@@ -750,17 +755,57 @@ async fn prune_control_table(
         None => retention_horizon,
     };
 
+    Ok(PruneHorizon {
+        horizon,
+        last_committed,
+        retention_horizon,
+        replication_horizon,
+    })
+}
+
+/// Print the computed horizon breakdown.
+fn print_prune_horizon(h: &PruneHorizon, keep_txns: i64) {
     println!("Control-table prune:");
-    println!("  last committed seq : {}", last_committed);
+    println!("  last committed seq : {}", h.last_committed);
     println!("  keep-txns          : {}", keep_txns);
-    println!("  retention horizon  : {}", retention_horizon);
-    match replication_horizon {
+    println!("  retention horizon  : {}", h.retention_horizon);
+    match h.replication_horizon {
         Some(r) => println!("  replication horizon: {} (min push last_pushed_seq)", r),
         None => println!("  replication horizon: (no push remote)"),
     }
-    println!("  effective horizon  : {}", horizon);
+    println!("  effective horizon  : {}", h.horizon);
+}
 
+/// Delete local-pond lifecycle history at or below `horizon` and report
+/// the row count.  Does NOT checkpoint/vacuum; the caller is expected to
+/// run `Ship::maintain` afterwards so the deletion is reclaimed in the
+/// same maintenance pass.  Returns the number of rows deleted (0 when the
+/// horizon is below 1).
+pub async fn prune_history_at_horizon(ship: &mut steward::Steward, horizon: i64) -> Result<usize> {
     if horizon < 1 {
+        return Ok(0);
+    }
+    let deleted = ship
+        .control_table_mut()
+        .prune_below(horizon)
+        .await
+        .map_err(|e| anyhow!("prune failed: {}", e))?;
+    Ok(deleted)
+}
+
+/// `pond control prune`: compute the horizon, then either report
+/// (`dry_run`) or delete and reclaim space via a standalone checkpoint +
+/// vacuum.
+async fn prune_control_table(
+    ship: &mut steward::Steward,
+    keep_txns: i64,
+    dry_run: bool,
+    allow_no_remote: bool,
+) -> Result<()> {
+    let h = compute_prune_horizon(ship, keep_txns, allow_no_remote).await?;
+    print_prune_horizon(&h, keep_txns);
+
+    if h.horizon < 1 {
         println!("Nothing to prune (horizon < 1).");
         return Ok(());
     }
@@ -772,7 +817,7 @@ async fn prune_control_table(
             "SELECT COUNT(*) AS n FROM control \
              WHERE pond_id = '{pid}' AND record_kind != 'setting' AND txn_seq <= {h}",
             pid = pond_id,
-            h = horizon,
+            h = h.horizon,
         );
         let batches = ctx
             .sql(&count_sql)
@@ -794,21 +839,17 @@ async fn prune_control_table(
         }
         println!(
             "  would delete       : {} rows (txn_seq <= {})  [dry-run]",
-            candidate_rows, horizon
+            candidate_rows, h.horizon
         );
         return Ok(());
     }
 
-    let deleted = ship
-        .control_table_mut()
-        .prune_below(horizon)
-        .await
-        .map_err(|e| anyhow!("prune failed: {}", e))?;
+    let deleted = prune_history_at_horizon(ship, h.horizon).await?;
     println!("  deleted            : {} rows", deleted);
 
     println!("  reclaiming space (checkpoint + vacuum) ...");
     let _report = ship.maintain(true, false).await;
-    println!("[OK] Control table pruned at horizon {}.", horizon);
+    println!("[OK] Control table pruned at horizon {}.", h.horizon);
     Ok(())
 }
 
