@@ -48,6 +48,27 @@ enum ControlCommand {
         /// Configuration value
         value: String,
     },
+    /// Shrink the control table by deleting replicated lifecycle history.
+    ///
+    /// Setting rows (watermarks, store_id, mount, mode) are always kept.
+    /// The prune horizon is the lesser of the minimum push-remote
+    /// `last_pushed_seq` and `last_committed - keep-txns`, so only
+    /// fully-replicated, beyond-retention transactions are removed.  A
+    /// checkpoint + vacuum runs afterwards to reclaim disk space.
+    Prune {
+        /// Number of most-recent transactions to always retain for
+        /// `pond log` / recovery, even if already replicated.
+        #[arg(long, default_value = "1000")]
+        keep_txns: i64,
+        /// Compute and report the horizon without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Permit pruning when no push-mode remote is attached.  Pruned
+        /// history is then unrecoverable and a future remote must
+        /// bootstrap via restart-from-compact.
+        #[arg(long)]
+        allow_no_remote: bool,
+    },
 }
 
 /// Config subcommands
@@ -202,6 +223,17 @@ enum Commands {
         /// disable (the default).
         #[arg(long, default_value = "0")]
         collapse_versions: usize,
+        /// Also prune replicated control-table lifecycle history at or below a
+        /// safe horizon, reclaimed by this same checkpoint + vacuum pass.
+        #[arg(long)]
+        prune: bool,
+        /// With --prune: number of most-recent transactions to always retain.
+        #[arg(long, default_value = "1000")]
+        keep_txns: i64,
+        /// With --prune: permit pruning when no push-mode remote is attached
+        /// (retention-only; pruned history is then unrecoverable).
+        #[arg(long)]
+        allow_no_remote: bool,
     },
     /// Show pond contents
     Show {
@@ -415,6 +447,10 @@ enum Commands {
         /// Time range end (human-readable, e.g., "2024-12-31 23:59:59", "2024-12-31T23:59:59Z")
         #[arg(long)]
         end_time: Option<String>,
+        /// Drop the temporal-reduce rollup cache before exporting, forcing a
+        /// full recompute. Recovery path for a sequentiality violation.
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Emergency operations (destructive, use with care)
     #[command(subcommand)]
@@ -505,7 +541,20 @@ async fn main() -> Result<()> {
         Commands::Maintain {
             compact,
             collapse_versions,
-        } => commands::maintain_command(&ship_context, compact, collapse_versions).await,
+            prune,
+            keep_txns,
+            allow_no_remote,
+        } => {
+            commands::maintain_command(
+                &ship_context,
+                compact,
+                collapse_versions,
+                prune,
+                keep_txns,
+                allow_no_remote,
+            )
+            .await
+        }
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
@@ -615,6 +664,15 @@ async fn main() -> Result<()> {
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }
                 }
+                ControlCommand::Prune {
+                    keep_txns,
+                    dry_run,
+                    allow_no_remote,
+                } => commands::control::ControlMode::Prune {
+                    keep_txns,
+                    dry_run,
+                    allow_no_remote,
+                },
             };
             commands::control_command(&ship_context, control_mode).await
         }
@@ -687,6 +745,7 @@ async fn main() -> Result<()> {
             temporal,
             start_time,
             end_time,
+            rebuild,
         } => {
             commands::export_command(
                 &ship_context,
@@ -695,6 +754,7 @@ async fn main() -> Result<()> {
                 &temporal,
                 start_time,
                 end_time,
+                rebuild,
             )
             .await
         }

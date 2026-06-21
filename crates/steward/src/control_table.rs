@@ -349,6 +349,27 @@ impl ControlTable {
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
     ) -> Result<(), StewardError> {
+        let record = self.data_committed_record(
+            txn_meta,
+            commit_kind,
+            data_fs_version,
+            duration_ms,
+            partition_checksums,
+        );
+        self.inner.write_record(record).await.map_err(map_err)
+    }
+
+    /// Build (without writing) a `DataCommitted` record.  Shared by the
+    /// singular [`Self::record_committed_inner`] and the batched
+    /// post-commit-factory terminal path so both serialize identical rows.
+    fn data_committed_record(
+        &self,
+        txn_meta: &PondTxnMetadata,
+        commit_kind: CommitKind,
+        data_fs_version: i64,
+        duration_ms: i64,
+        partition_checksums: PartitionChecksums,
+    ) -> ControlRecord {
         let metadata = DataCommittedMetadata {
             partition_checksums: partition_checksums
                 .iter()
@@ -361,7 +382,7 @@ impl ControlTable {
         record.commit_kind = Some(commit_kind);
         record.duration_ms = Some(duration_ms);
         record.metadata_json = metadata_json;
-        self.inner.write_record(record).await.map_err(map_err)
+        record
     }
 
     /// Record transaction failure.
@@ -442,108 +463,154 @@ impl ControlTable {
 
     // -------- Post-commit records --------
 
-    /// Record that a post-commit factory task has been queued.
-    pub async fn record_post_commit_pending(
-        &mut self,
-        txn_meta: &PondTxnMetadata,
-        execution_seq: i64,
-        factory_name: String,
-        config_path: String,
-    ) -> Result<(), StewardError> {
-        let metadata = PostCommitMetadata {
-            execution_seq: Some(execution_seq),
-            factory_name: Some(factory_name),
-            config_path: Some(config_path),
-            error_message: None,
-        };
-        self.write_post_commit(RecordKind::PostPushPending, txn_meta, &metadata, None)
-            .await
-    }
-
-    /// Record that a post-commit factory task has started executing.
-    pub async fn record_post_commit_started(
-        &mut self,
-        txn_meta: &PondTxnMetadata,
-        execution_seq: i64,
-    ) -> Result<(), StewardError> {
-        let metadata = PostCommitMetadata {
-            execution_seq: Some(execution_seq),
-            factory_name: None,
-            config_path: None,
-            error_message: None,
-        };
-        self.write_post_commit(RecordKind::PostPushStarted, txn_meta, &metadata, None)
-            .await
-    }
-
-    /// Record successful post-commit factory completion.
-    pub async fn record_post_commit_completed(
-        &mut self,
-        txn_meta: &PondTxnMetadata,
-        execution_seq: i64,
-        duration_ms: i64,
-    ) -> Result<(), StewardError> {
-        let metadata = PostCommitMetadata {
-            execution_seq: Some(execution_seq),
-            factory_name: None,
-            config_path: None,
-            error_message: None,
-        };
-        self.write_post_commit(
-            RecordKind::PostPushCompleted,
-            txn_meta,
-            &metadata,
-            Some(duration_ms),
-        )
-        .await
-    }
-
-    /// Record failed post-commit factory execution.
-    pub async fn record_post_commit_failed(
-        &mut self,
-        txn_meta: &PondTxnMetadata,
-        execution_seq: i64,
-        error_message: String,
-        duration_ms: i64,
-    ) -> Result<(), StewardError> {
-        let metadata = PostCommitMetadata {
-            execution_seq: Some(execution_seq),
-            factory_name: None,
-            config_path: None,
-            error_message: Some(error_message),
-        };
-        self.write_post_commit(
-            RecordKind::PostPushFailed,
-            txn_meta,
-            &metadata,
-            Some(duration_ms),
-        )
-        .await
-    }
-
-    async fn write_post_commit(
-        &mut self,
+    /// Build (without writing) a `PostPush*` lifecycle record for the
+    /// parent transaction.  Each gets its own UUID so that multiple
+    /// factories sharing one parent transaction do not collide on
+    /// `(pond_id, txn_seq, txn_id)` when read back.
+    fn post_commit_record(
+        &self,
         kind: RecordKind,
         txn_meta: &PondTxnMetadata,
         metadata: &PostCommitMetadata,
         duration_ms: Option<i64>,
-    ) -> Result<(), StewardError> {
+    ) -> ControlRecord {
         let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "{}".into());
-        let record = ControlRecord {
+        ControlRecord {
             pond_id: pond_id_to_std(&self.pond_metadata.pond_id),
             record_kind: kind,
             txn_seq: txn_meta.txn_seq,
-            // Each post-commit record gets its own UUID so that multiple
-            // factories sharing one parent transaction do not collide on
-            // (pond_id, txn_seq, txn_id) when read back.
             txn_id: new_txn_id(),
             commit_kind: None,
             parent_seq: Some(txn_meta.txn_seq),
             duration_ms,
             ts_micros: Utc::now().timestamp_micros(),
             metadata_json,
+        }
+    }
+
+    /// Record the full queue of post-commit factory tasks in a SINGLE
+    /// control-table commit.  Replaces a per-factory `PostPushPending`
+    /// write loop; the rows are identical, just batched into one Delta
+    /// commit (and one add-file).  Each entry is `(execution_seq,
+    /// factory_name, config_path)`.  An empty slice is a no-op.
+    pub async fn record_post_commit_pending_batch(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        entries: &[(i64, String, String)],
+    ) -> Result<(), StewardError> {
+        let records: Vec<ControlRecord> = entries
+            .iter()
+            .map(|(execution_seq, factory_name, config_path)| {
+                let metadata = PostCommitMetadata {
+                    execution_seq: Some(*execution_seq),
+                    factory_name: Some(factory_name.clone()),
+                    config_path: Some(config_path.clone()),
+                    error_message: None,
+                };
+                self.post_commit_record(RecordKind::PostPushPending, txn_meta, &metadata, None)
+            })
+            .collect();
+        self.inner.write_records(records).await.map_err(map_err)
+    }
+
+    /// Record the terminal lifecycle of a post-commit factory execution in
+    /// ONE control-table commit: the factory transaction's `DataCommitted`
+    /// (omitted when `data_fs_version` is `None`, i.e. a write no-op) and
+    /// `Completed`, plus the parent's `PostPushCompleted` (when `outcome`
+    /// is `Ok`) or `PostPushFailed` (when `outcome` is `Err(reason)`).
+    ///
+    /// The factory transaction's own `Begin` is written separately, before
+    /// the data commit, because replication keys its push bundle on that
+    /// row landing first; only the post-commit rows are batched here.
+    pub async fn record_factory_terminal_batch(
+        &mut self,
+        factory_meta: &PondTxnMetadata,
+        parent_meta: &PondTxnMetadata,
+        execution_seq: i64,
+        data_fs_version: Option<i64>,
+        duration_ms: i64,
+        partition_checksums: PartitionChecksums,
+        outcome: Result<(), String>,
+    ) -> Result<(), StewardError> {
+        let mut records = Vec::with_capacity(3);
+        if let Some(version) = data_fs_version {
+            records.push(self.data_committed_record(
+                factory_meta,
+                CommitKind::Write,
+                version,
+                duration_ms,
+                partition_checksums,
+            ));
+        }
+        let mut completed = self.base_record(RecordKind::Completed, factory_meta);
+        completed.duration_ms = Some(duration_ms);
+        records.push(completed);
+
+        let post = match outcome {
+            Ok(()) => {
+                let metadata = PostCommitMetadata {
+                    execution_seq: Some(execution_seq),
+                    factory_name: None,
+                    config_path: None,
+                    error_message: None,
+                };
+                self.post_commit_record(
+                    RecordKind::PostPushCompleted,
+                    parent_meta,
+                    &metadata,
+                    Some(duration_ms),
+                )
+            }
+            Err(error_message) => {
+                let metadata = PostCommitMetadata {
+                    execution_seq: Some(execution_seq),
+                    factory_name: None,
+                    config_path: None,
+                    error_message: Some(error_message),
+                };
+                self.post_commit_record(
+                    RecordKind::PostPushFailed,
+                    parent_meta,
+                    &metadata,
+                    Some(duration_ms),
+                )
+            }
         };
-        self.inner.write_record(record).await.map_err(map_err)
+        records.push(post);
+        self.inner.write_records(records).await.map_err(map_err)
+    }
+
+    /// Record a post-commit factory whose data commit itself failed, in ONE
+    /// control-table commit: the factory transaction's `Failed` plus the
+    /// parent's `PostPushFailed`.
+    pub async fn record_factory_aborted_batch(
+        &mut self,
+        factory_meta: &PondTxnMetadata,
+        parent_meta: &PondTxnMetadata,
+        execution_seq: i64,
+        error_message: String,
+        duration_ms: i64,
+    ) -> Result<(), StewardError> {
+        let mut failed = self.base_record(RecordKind::Failed, factory_meta);
+        failed.duration_ms = Some(duration_ms);
+        failed.metadata_json = reason_json(&error_message);
+
+        let metadata = PostCommitMetadata {
+            execution_seq: Some(execution_seq),
+            factory_name: None,
+            config_path: None,
+            error_message: Some(error_message),
+        };
+        let post = self.post_commit_record(
+            RecordKind::PostPushFailed,
+            parent_meta,
+            &metadata,
+            Some(duration_ms),
+        );
+        self.inner
+            .write_records(vec![failed, post])
+            .await
+            .map_err(map_err)
     }
 
     // -------- Sync-remote integration surface --------
@@ -659,6 +726,19 @@ impl ControlTable {
     }
 
     // -------- Queries --------
+
+    /// Prune local-pond lifecycle history at or below `horizon_seq`,
+    /// leaving `Setting` rows intact.  Thin wrapper over
+    /// [`sync_steward::ControlTable::prune_below`] scoped to the local
+    /// pond_id.  Returns the number of rows deleted.  The caller must
+    /// run a checkpoint + vacuum afterwards to reclaim disk space.
+    pub async fn prune_below(&mut self, horizon_seq: i64) -> Result<usize, StewardError> {
+        let pond_id = self.pond_id_uuid();
+        self.inner
+            .prune_below(pond_id, horizon_seq)
+            .await
+            .map_err(map_err)
+    }
 
     /// Highest committed write sequence number, or 0 if none.  Replaces
     /// the pre-D2 implementation that scanned `transaction_type='write'`

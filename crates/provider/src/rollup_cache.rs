@@ -1,0 +1,612 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! Rollup partial-aggregate cache -- per-version Parquet cache of decomposable
+//! temporal-reduce partials.
+//!
+//! `temporal-reduce` downsamples a source series into per-resolution
+//! aggregations.  Without caching, every read recomputes a full
+//! `GROUP BY date_bin` over the entire source history, so per-build cost grows
+//! without bound as the pond ages.
+//!
+//! This module caches the decomposable partials (`Sum`, `Count`, `Min`, `Max`,
+//! ...) for each individual input version as a Parquet file on disk under
+//! `{POND}/cache/`.  At read time a `ListingTable` is built over the cached
+//! partials and a cheap cross-version merge (`GROUP BY time_bucket`)
+//! reconstructs the final aggregation.
+//!
+//! This is the aggregation-tier analogue of [`crate::format_cache`], which
+//! caches the *parsed leaves*.  Together they make both the parse and the
+//! aggregation incremental.
+//!
+//! Key properties (identical discipline to the format cache):
+//! - Per-version caching: each input version is independently immutable
+//!   (blake3 hash), so there is nothing to invalidate.  One new ingest version
+//!   produces exactly one new partial.
+//! - Incremental: only uncached versions are computed; cached versions are free.
+//! - Throwaway: `rm -rf {POND}/cache/` is always safe.
+//! - Config-namespaced: a different aggregation set / time column / resolution
+//!   list yields a fresh `cfg_hash` namespace rather than mixing semantics.
+
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use datafusion::catalog::TableProvider;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
+use datafusion::execution::context::SessionContext;
+use datafusion::parquet::basic::Compression;
+use datafusion::parquet::file::properties::WriterProperties;
+use futures::StreamExt;
+use futures::stream::Stream;
+use parquet::arrow::AsyncArrowWriter;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use tinyfs::FileVersionInfo;
+
+/// Result type for rollup cache operations.
+type Result<T> = std::result::Result<T, crate::error::Error>;
+
+/// Compute a stable namespace hash over the parts of a temporal-reduce config
+/// that change the *meaning* of the cached partials: the aggregation set, the
+/// time column, and the resolution list.
+///
+/// A config change yields a fresh namespace rather than mixing incompatible
+/// partials into one directory.  Changing config invalidates semantics, not
+/// content, so a new namespace is the correct response; the old one is reaped
+/// by normal cache pruning.
+///
+/// The caller passes a canonical string built from those config fields.  The
+/// hash uses the same `DefaultHasher` convention as
+/// [`crate::format_cache::pattern_hash`]; stability across binaries is not
+/// required because the cache is throwaway.
+#[must_use]
+pub fn cfg_hash(canonical: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Directory holding a node's cached rollup partials for one config namespace.
+///
+/// Returns `{cache_dir}/rollup_{cfg_hash}_{node_id}/`.
+#[must_use]
+pub fn cache_node_dir(cache_dir: &Path, cfg_hash: &str, node_id: &tinyfs::NodeID) -> PathBuf {
+    cache_dir.join(format!("rollup_{}_{}", cfg_hash, node_id))
+}
+
+/// Cache key for an input version: its blake3 content hash, or -- for dynamic
+/// inputs that carry no blake3 -- the node's short id (already content derived).
+///
+/// Mirrors [`crate::format_cache::cache_version_path`] keying exactly.
+fn version_key(node_id: &tinyfs::NodeID, version: &FileVersionInfo) -> String {
+    match version.blake3.as_deref() {
+        Some(hash) => hash.to_string(),
+        None => node_id.to_short_string(),
+    }
+}
+
+/// Path for a single input version's cached partials Parquet file.
+///
+/// Returns `{cache_dir}/rollup_{cfg_hash}_{node_id}/v{version}_{key}.parquet`.
+#[must_use]
+pub fn cache_version_path(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+) -> PathBuf {
+    let key = version_key(node_id, version);
+    cache_node_dir(cache_dir, cfg_hash, node_id)
+        .join(format!("v{}_{}.parquet", version.version, key))
+}
+
+/// Return the subset of versions whose cached partials do not yet exist on disk.
+#[must_use]
+pub fn find_uncached_versions(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+    versions: &[FileVersionInfo],
+) -> Vec<FileVersionInfo> {
+    versions
+        .iter()
+        .filter(|v| !cache_version_path(cache_dir, cfg_hash, node_id, v).exists())
+        .cloned()
+        .collect()
+}
+
+/// Write a single input version's partials to cache as Parquet.
+///
+/// Streams partial batches through `AsyncArrowWriter` to disk without
+/// collecting into memory.  Uses an atomic write (`.tmp` then rename) so a
+/// crash never leaves a partial file behind that would be mistaken for a
+/// complete cached version.
+pub async fn cache_write_version(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+    schema: SchemaRef,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
+) -> Result<PathBuf> {
+    let dir = cache_node_dir(cache_dir, cfg_hash, node_id);
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let final_path = cache_version_path(cache_dir, cfg_hash, node_id, version);
+    let tmp_path = final_path.with_extension("parquet.tmp");
+
+    let file = tokio::fs::File::create(&tmp_path).await?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+        .build();
+    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    let mut stream = stream;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        writer
+            .write(&batch)
+            .await
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    }
+    let _metadata = writer
+        .close()
+        .await
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    tokio::fs::rename(&tmp_path, &final_path).await?;
+    log::debug!("[SAVE] Rollup cache: wrote {}", final_path.display());
+
+    Ok(final_path)
+}
+
+/// Build a `ListingTable` over all cached per-version partials for a node.
+///
+/// Assumes every version is already cached (call [`cache_write_version`] for
+/// any uncached versions first).  Schemas are merged across versions so columns
+/// that appear only in newer versions are present and back-filled with NULLs
+/// for older ones.
+pub async fn listing_table_from_cache(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+    ctx: &SessionContext,
+) -> Result<Arc<dyn TableProvider>> {
+    listing_table_from_dir(&cache_node_dir(cache_dir, cfg_hash, node_id), ctx).await
+}
+
+/// Build a `ListingTable` over every `.parquet` partials file directly under
+/// `dir`, merging their schemas (UNION-ALL-BY-NAME across versions/sources).
+pub async fn listing_table_from_dir(
+    dir: &Path,
+    _ctx: &SessionContext,
+) -> Result<Arc<dyn TableProvider>> {
+    let dir_url = format!("file://{}/", dir.display());
+
+    let table_url = ListingTableUrl::parse(&dir_url)?;
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
+
+    let merged_schema = merge_parquet_schemas_in_dir(dir).await?;
+
+    let config = ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .with_schema(merged_schema);
+
+    let table = ListingTable::try_new(config)?;
+    Ok(Arc::new(table))
+}
+
+// --- Glob variant: one rollup dir per temporal-reduce node, holding one
+// partial file per (source node, input version). The source pattern can match
+// many rotated input files, each its own node with its own versions; keying the
+// partial filename by the source node id keeps them collision-free while all
+// partials still merge in a single `ListingTable`.
+
+/// Directory holding all per-source-version partials for one temporal-reduce
+/// node and config namespace: `{cache_dir}/rollup_{cfg_hash}_{tr_node_id}/`.
+#[must_use]
+pub fn glob_dir(cache_dir: &Path, cfg_hash: &str, tr_node_id: &tinyfs::NodeID) -> PathBuf {
+    cache_node_dir(cache_dir, cfg_hash, tr_node_id)
+}
+
+/// Path for one source node's input version partial within the glob dir:
+/// `{glob_dir}/{source_node}_v{version}_{key}.parquet`.
+#[must_use]
+pub fn glob_member_path(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+) -> PathBuf {
+    let key = version_key(source_node_id, version);
+    glob_dir.join(format!(
+        "{}_v{}_{}.parquet",
+        source_node_id, version.version, key
+    ))
+}
+
+/// Return the subset of a source node's versions whose partials are not yet
+/// present in the glob dir.
+#[must_use]
+pub fn find_uncached_members(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    versions: &[FileVersionInfo],
+) -> Vec<FileVersionInfo> {
+    versions
+        .iter()
+        .filter(|v| !glob_member_path(glob_dir, source_node_id, v).exists())
+        .cloned()
+        .collect()
+}
+
+/// Write one source-version partials stream into the glob dir (atomic).
+pub async fn write_glob_member(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    version: &FileVersionInfo,
+    schema: SchemaRef,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
+) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(glob_dir).await?;
+    let final_path = glob_member_path(glob_dir, source_node_id, version);
+    let tmp_path = final_path.with_extension("parquet.tmp");
+
+    let file = tokio::fs::File::create(&tmp_path).await?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+        .build();
+    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    let mut stream = stream;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        writer
+            .write(&batch)
+            .await
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    }
+    let _metadata = writer
+        .close()
+        .await
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    tokio::fs::rename(&tmp_path, &final_path).await?;
+    log::debug!("[SAVE] Rollup cache: wrote {}", final_path.display());
+    Ok(final_path)
+}
+
+/// Drop a node's entire rollup-cache namespace for one config, forcing all
+/// partials to be recomputed on next read.  Used by the `--rebuild` recovery
+/// path.  Idempotent: a missing directory is not an error.
+pub fn drop_node_namespace(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+) -> Result<()> {
+    let dir = cache_node_dir(cache_dir, cfg_hash, node_id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(crate::error::Error::Io)?;
+    }
+    Ok(())
+}
+
+/// Drop every rollup-cache namespace under `cache_dir`, forcing all partials
+/// for all temporal-reduce nodes to be recomputed on next read.  This is the
+/// global `--rebuild` recovery primitive.  The format cache and any other cache
+/// content are left untouched.  Idempotent: a missing `cache_dir` is not an
+/// error.
+pub fn drop_all(cache_dir: &Path) -> Result<usize> {
+    if !cache_dir.exists() {
+        return Ok(0);
+    }
+    let mut dropped = 0;
+    for entry in std::fs::read_dir(cache_dir).map_err(crate::error::Error::Io)? {
+        let entry = entry.map_err(crate::error::Error::Io)?;
+        let path = entry.path();
+        let is_rollup = path.is_dir()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("rollup_"));
+        if is_rollup {
+            std::fs::remove_dir_all(&path).map_err(crate::error::Error::Io)?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
+/// Path of a source node's sequentiality-frontier sidecar within the glob dir:
+/// `{glob_dir}/{source_node}.frontier`.  The file holds the maximum sealed
+/// `time_bucket` value (in the finest-interval timestamp unit) observed across
+/// every cached version of that source node.
+#[must_use]
+pub fn frontier_path(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> PathBuf {
+    glob_dir.join(format!("{}.frontier", source_node_id))
+}
+
+/// Read a source node's persisted frontier, or `None` if no version has been
+/// cached yet.  A malformed sidecar is treated as absent rather than fatal
+/// because the cache is throwaway and will simply be recomputed.
+#[must_use]
+pub fn read_frontier(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> Option<i64> {
+    let path = frontier_path(glob_dir, source_node_id);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Persist a source node's frontier (atomic write via `.tmp` then rename).
+pub fn write_frontier(
+    glob_dir: &Path,
+    source_node_id: &tinyfs::NodeID,
+    frontier: i64,
+) -> Result<()> {
+    std::fs::create_dir_all(glob_dir).map_err(crate::error::Error::Io)?;
+    let final_path = frontier_path(glob_dir, source_node_id);
+    let tmp_path = final_path.with_extension("frontier.tmp");
+    std::fs::write(&tmp_path, frontier.to_string()).map_err(crate::error::Error::Io)?;
+    std::fs::rename(&tmp_path, &final_path).map_err(crate::error::Error::Io)?;
+    Ok(())
+}
+
+/// Read the Arrow schema from every `.parquet` file under `dir` and merge them
+/// via `Schema::try_merge`, giving UNION-ALL-BY-NAME semantics across versions.
+async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {
+    use arrow::datatypes::Schema;
+
+    let mut schemas = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") {
+            let file = tokio::fs::File::open(&path).await?;
+            let reader = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(file)
+                .await
+                .map_err(|e| {
+                    crate::error::Error::Arrow(format!(
+                        "Failed to read parquet metadata from '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            schemas.push(reader.schema().as_ref().clone());
+        }
+    }
+
+    if schemas.is_empty() {
+        return Err(crate::error::Error::Arrow(format!(
+            "No parquet files found in rollup cache dir '{}'",
+            dir.display()
+        )));
+    }
+
+    let merged = Schema::try_merge(schemas).map_err(|e| {
+        crate::error::Error::Arrow(format!("Failed to merge rollup partial schemas: {}", e))
+    })?;
+
+    Ok(Arc::new(merged))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Float64Array, Int64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn partials_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("time_bucket", DataType::Int64, false),
+            Field::new("__p_sum_0", DataType::Float64, true),
+            Field::new("__p_count_1", DataType::Int64, true),
+        ]))
+    }
+
+    fn partials_batch(
+        schema: &SchemaRef,
+        buckets: &[i64],
+        sums: &[f64],
+        counts: &[i64],
+    ) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(buckets.to_vec())),
+                Arc::new(Float64Array::from(sums.to_vec())),
+                Arc::new(Int64Array::from(counts.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn test_version(version: u64, blake3: Option<&str>) -> FileVersionInfo {
+        FileVersionInfo {
+            version,
+            timestamp: 0,
+            size: 100,
+            blake3: blake3.map(str::to_string),
+            entry_type: tinyfs::EntryType::FilePhysicalVersion,
+            extended_metadata: None,
+        }
+    }
+
+    fn test_node_id() -> tinyfs::NodeID {
+        tinyfs::NodeID::new(uuid7::uuid7().to_string())
+    }
+
+    #[test]
+    fn test_cfg_hash_stable_and_distinct() {
+        let a = cfg_hash("avg|timestamp|1h,1d");
+        let b = cfg_hash("avg|timestamp|1h,1d");
+        let c = cfg_hash("avg|timestamp|1h,2d");
+        assert_eq!(a, b, "same config must hash identically");
+        assert_ne!(a, c, "different resolution list must change the namespace");
+        assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn test_cache_node_dir_layout() {
+        let cache_dir = Path::new("/tmp/pond/cache");
+        let node_id = test_node_id();
+        let dir = cache_node_dir(cache_dir, "deadbeef", &node_id);
+        let dir_str = dir.to_str().unwrap();
+        assert!(dir_str.starts_with("/tmp/pond/cache/rollup_deadbeef_"));
+        assert!(dir_str.contains(&node_id.to_string()));
+    }
+
+    #[test]
+    fn test_cache_version_path_keys_by_blake3() {
+        let cache_dir = Path::new("/tmp/pond/cache");
+        let node_id = test_node_id();
+        let version = test_version(3, Some("abc123"));
+        let path = cache_version_path(cache_dir, "cfg", &node_id, &version);
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "v3_abc123.parquet");
+    }
+
+    #[test]
+    fn test_cache_version_path_dynamic_uses_node_id() {
+        let cache_dir = Path::new("/tmp/pond/cache");
+        let node_id = test_node_id();
+        let version = test_version(1, None);
+        let path = cache_version_path(cache_dir, "cfg", &node_id, &version);
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.starts_with("v1_"));
+        assert!(filename.contains(&node_id.to_short_string()));
+    }
+
+    #[test]
+    fn test_find_uncached_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let node_id = test_node_id();
+        let versions = vec![test_version(1, Some("aaa")), test_version(2, Some("bbb"))];
+
+        // Nothing cached yet.
+        assert_eq!(
+            find_uncached_versions(cache_dir, "cfg", &node_id, &versions).len(),
+            2
+        );
+
+        // Pre-create v1's partial file.
+        let v1 = cache_version_path(cache_dir, "cfg", &node_id, &versions[0]);
+        std::fs::create_dir_all(v1.parent().unwrap()).unwrap();
+        std::fs::write(&v1, b"fake").unwrap();
+
+        let uncached = find_uncached_versions(cache_dir, "cfg", &node_id, &versions);
+        assert_eq!(uncached.len(), 1);
+        assert_eq!(uncached[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_write_and_list_partials_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let node_id = test_node_id();
+        let schema = partials_schema();
+
+        // Version 1: bucket 0 sum=10 count=2 ; bucket 1 sum=5 count=1
+        let v1 = test_version(1, Some("v1hash"));
+        let b1 = partials_batch(&schema, &[0, 1], &[10.0, 5.0], &[2, 1]);
+        let s1: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::iter(vec![Ok(b1)]));
+        _ = cache_write_version(cache_dir, "cfg", &node_id, &v1, schema.clone(), s1)
+            .await
+            .unwrap();
+
+        // Version 2: bucket 1 (boundary straddle) sum=7 count=1 ; bucket 2 sum=4 count=1
+        let v2 = test_version(2, Some("v2hash"));
+        let b2 = partials_batch(&schema, &[1, 2], &[7.0, 4.0], &[1, 1]);
+        let s2: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::iter(vec![Ok(b2)]));
+        _ = cache_write_version(cache_dir, "cfg", &node_id, &v2, schema.clone(), s2)
+            .await
+            .unwrap();
+
+        // Incrementality: both versions now cached.
+        assert_eq!(
+            find_uncached_versions(cache_dir, "cfg", &node_id, &[v1.clone(), v2.clone()]).len(),
+            0
+        );
+
+        // Merge the partials and verify the boundary bucket reconstructs exactly.
+        let ctx = SessionContext::new();
+        let table = listing_table_from_cache(cache_dir, "cfg", &node_id, &ctx)
+            .await
+            .unwrap();
+        _ = ctx.register_table("partials", table).unwrap();
+        let df = ctx
+            .sql(
+                "SELECT time_bucket, SUM(\"__p_sum_0\") AS s, SUM(\"__p_count_1\") AS c \
+                 FROM partials GROUP BY time_bucket ORDER BY time_bucket",
+            )
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let merged = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+
+        let bucket = merged
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let s = merged
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let c = merged
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
+        assert_eq!(bucket.values(), &[0, 1, 2]);
+        // Bucket 1 straddles both versions: sum 5+7=12, count 1+1=2.
+        assert_eq!(s.value(0), 10.0);
+        assert_eq!(s.value(1), 12.0);
+        assert_eq!(s.value(2), 4.0);
+        assert_eq!(c.value(0), 2);
+        assert_eq!(c.value(1), 2);
+        assert_eq!(c.value(2), 1);
+    }
+
+    #[tokio::test]
+    async fn test_drop_node_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let node_id = test_node_id();
+        let schema = partials_schema();
+        let v1 = test_version(1, Some("v1hash"));
+        let b1 = partials_batch(&schema, &[0], &[1.0], &[1]);
+        let s1: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::iter(vec![Ok(b1)]));
+        _ = cache_write_version(cache_dir, "cfg", &node_id, &v1, schema.clone(), s1)
+            .await
+            .unwrap();
+
+        assert!(cache_node_dir(cache_dir, "cfg", &node_id).exists());
+        drop_node_namespace(cache_dir, "cfg", &node_id).unwrap();
+        assert!(!cache_node_dir(cache_dir, "cfg", &node_id).exists());
+        // Idempotent.
+        drop_node_namespace(cache_dir, "cfg", &node_id).unwrap();
+    }
+}

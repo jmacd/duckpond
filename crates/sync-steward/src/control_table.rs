@@ -411,30 +411,91 @@ impl ControlTable {
         Ok(())
     }
 
+    /// Delete the append-only lifecycle history for `pond_id` at or below
+    /// `horizon_seq`, leaving `Setting` records (watermarks, store_id,
+    /// mount, mode) intact.  This is the only way to actually SHRINK the
+    /// control table: checkpoint/vacuum/compact merge or re-list files but
+    /// never remove logical rows, so the log otherwise grows without bound.
+    ///
+    /// Callers are responsible for choosing a SAFE `horizon_seq`: every
+    /// transaction at or below it must already be replicated to all push
+    /// remotes, its checksums durably serialized into bundles, and be
+    /// old enough that no retained-history reader needs it.  The deleted
+    /// rows leave tombstoned parquet files behind until a subsequent
+    /// vacuum reclaims them.  Returns the number of rows deleted.
+    pub async fn prune_below(&mut self, pond_id: Uuid, horizon_seq: i64) -> Result<usize> {
+        let predicate = format!(
+            "{pid} = '{p}' AND {rk} != '{setting}' AND {ts} <= {h}",
+            pid = COL_POND_ID,
+            p = pond_id,
+            rk = COL_RECORD_KIND,
+            setting = RecordKind::Setting.as_str(),
+            ts = COL_TXN_SEQ,
+            h = horizon_seq,
+        );
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .delete()
+            .with_predicate(predicate)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.num_deleted_rows)
+    }
+
     /// Append a single record to the control table.
     pub async fn write_record(&mut self, record: ControlRecord) -> Result<()> {
+        self.write_records(vec![record]).await
+    }
+
+    /// Append multiple records to the control table in a SINGLE Delta commit.
+    ///
+    /// All records become one parquet add-file and one table version, rather
+    /// than one commit (and one tiny add-file) per record.  This is the
+    /// append-only audit log's batching path: callers that emit several
+    /// records back-to-back with no intervening data work (for example a
+    /// transaction's terminal `DataCommitted` + `Completed`, or the fan-out
+    /// of `PostPushPending` rows) should use this to avoid amplifying the
+    /// control table's add-file count.  An empty slice is a no-op.
+    pub async fn write_records(&mut self, records: Vec<ControlRecord>) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
         let schema = arrow_schema();
-        let n = 1;
 
-        let pond_ids = vec![record.pond_id.to_string()];
-        let record_kinds = vec![record.record_kind.as_str().to_string()];
-        let txn_seqs = vec![record.txn_seq];
-        let txn_ids = vec![record.txn_id.clone()];
-        let commit_kinds = vec![
-            record
-                .commit_kind
-                .map(|k| k.as_str().to_string())
-                .unwrap_or_default(),
-        ];
-        let has_commit = vec![record.commit_kind.is_some()];
-        let parent_seqs = vec![record.parent_seq.unwrap_or(0)];
-        let has_parent = vec![record.parent_seq.is_some()];
-        let durations = vec![record.duration_ms.unwrap_or(0)];
-        let has_duration = vec![record.duration_ms.is_some()];
-        let timestamps = vec![record.ts_micros];
-        let metadatas = vec![record.metadata_json.clone()];
+        let mut pond_ids = Vec::with_capacity(records.len());
+        let mut record_kinds = Vec::with_capacity(records.len());
+        let mut txn_seqs = Vec::with_capacity(records.len());
+        let mut txn_ids = Vec::with_capacity(records.len());
+        let mut commit_kinds = Vec::with_capacity(records.len());
+        let mut has_commit = Vec::with_capacity(records.len());
+        let mut parent_seqs = Vec::with_capacity(records.len());
+        let mut has_parent = Vec::with_capacity(records.len());
+        let mut durations = Vec::with_capacity(records.len());
+        let mut has_duration = Vec::with_capacity(records.len());
+        let mut timestamps = Vec::with_capacity(records.len());
+        let mut metadatas = Vec::with_capacity(records.len());
 
-        let _ = n;
+        for record in &records {
+            pond_ids.push(record.pond_id.to_string());
+            record_kinds.push(record.record_kind.as_str().to_string());
+            txn_seqs.push(record.txn_seq);
+            txn_ids.push(record.txn_id.clone());
+            commit_kinds.push(
+                record
+                    .commit_kind
+                    .map(|k| k.as_str().to_string())
+                    .unwrap_or_default(),
+            );
+            has_commit.push(record.commit_kind.is_some());
+            parent_seqs.push(record.parent_seq.unwrap_or(0));
+            has_parent.push(record.parent_seq.is_some());
+            durations.push(record.duration_ms.unwrap_or(0));
+            has_duration.push(record.duration_ms.is_some());
+            timestamps.push(record.ts_micros);
+            metadatas.push(record.metadata_json.clone());
+        }
 
         let batch = RecordBatch::try_new(
             schema,
