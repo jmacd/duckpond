@@ -495,33 +495,35 @@ impl<'a> StewardTransactionGuard<'a> {
             }
         );
 
-        // Record pending status for all factories to run
-        for (execution_seq, config) in factories_to_run.iter().enumerate() {
-            let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
-            if let Err(e) = self
-                .control_table
-                .record_post_commit_pending(
-                    &self.txn_meta,
-                    execution_seq,
+        // Record the full queue of pending tasks in a SINGLE control-table
+        // commit rather than one per factory.
+        let pending_entries: Vec<(i64, String, String)> = factories_to_run
+            .iter()
+            .enumerate()
+            .map(|(i, config)| {
+                (
+                    (i + 1) as i64,
                     config.factory_name.clone(),
                     config.config_path.clone(),
                 )
-                .await
-            {
-                log::error!(
-                    "Failed to record post-commit pending for {}: {}",
-                    config.config_path,
-                    e
-                );
-                // Continue despite tracking failure
-            }
+            })
+            .collect();
+        if let Err(e) = self
+            .control_table
+            .record_post_commit_pending_batch(&self.txn_meta, &pending_entries)
+            .await
+        {
+            log::error!("Failed to record post-commit pending batch: {}", e);
+            // Continue despite tracking failure
         }
 
         let total_factories = factories_to_run.len();
 
-        // Execute each factory independently
+        // Execute each factory independently.  Each execution records its
+        // own terminal lifecycle (DataCommitted/Completed + PostPush*) in a
+        // single batched control-table commit; the caller only logs.
         for (execution_seq, config) in factories_to_run.into_iter().enumerate() {
-            let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
+            let execution_seq = (execution_seq + 1) as i64; // 1-indexed
             debug!(
                 "Executing post-commit factory {}/{}: {} from {} (mode: {})",
                 execution_seq,
@@ -531,25 +533,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 config.factory_mode
             );
 
-            // Record started status
-            if let Err(e) = self
-                .control_table
-                .record_post_commit_started(&self.txn_meta, execution_seq)
-                .await
-            {
-                log::error!(
-                    "Failed to record post-commit started for {}: {}",
-                    config.config_path,
-                    e
-                );
-                // Continue despite tracking failure
-            }
-
-            let start_time = std::time::Instant::now();
-
             // Execute the factory
             match self
                 .execute_post_commit_factory(
+                    execution_seq,
                     &config.factory_name,
                     &config.config_path,
                     &config.config_bytes,
@@ -559,52 +546,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 .await
             {
                 Ok(()) => {
-                    let duration_ms = start_time.elapsed().as_millis() as i64;
-                    info!(
-                        "Post-commit factory succeeded: {} ({}ms)",
-                        config.config_path, duration_ms
-                    );
-
-                    // Record completion
-                    if let Err(e) = self
-                        .control_table
-                        .record_post_commit_completed(&self.txn_meta, execution_seq, duration_ms)
-                        .await
-                    {
-                        log::error!(
-                            "Failed to record post-commit completion for {}: {}",
-                            config.config_path,
-                            e
-                        );
-                    }
+                    info!("Post-commit factory succeeded: {}", config.config_path);
                 }
                 Err(e) => {
-                    let duration_ms = start_time.elapsed().as_millis() as i64;
-                    let error_message = format!("{}", e);
-                    log::error!(
-                        "Post-commit factory failed: {} - {}",
-                        config.config_path,
-                        error_message
-                    );
-
-                    // Record failure
-                    if let Err(e) = self
-                        .control_table
-                        .record_post_commit_failed(
-                            &self.txn_meta,
-                            execution_seq,
-                            error_message,
-                            duration_ms,
-                        )
-                        .await
-                    {
-                        log::error!(
-                            "Failed to record post-commit failure for {}: {}",
-                            config.config_path,
-                            e
-                        );
-                    }
-
+                    log::error!("Post-commit factory failed: {} - {}", config.config_path, e);
                     // Continue to next factory despite failure
                 }
             }
@@ -791,6 +736,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Execute a single post-commit factory
     async fn execute_post_commit_factory(
         &mut self,
+        execution_seq: i64,
         factory_name: &str,
         config_path: &str,
         config_bytes: &[u8],
@@ -907,6 +853,12 @@ impl<'a> StewardTransactionGuard<'a> {
         let commit_result = factory_tx.commit().await;
         let duration_ms = factory_start.elapsed().as_millis() as i64;
 
+        // The PostPush outcome reflects the FACTORY's execution result, not
+        // the data commit: a factory that errored may still have committed
+        // partial data, in which case we record DataCommitted/Completed for
+        // the factory transaction but PostPushFailed for the parent.
+        let outcome: Result<(), String> = result.as_ref().map(|_| ()).map_err(|e| format!("{}", e));
+
         match commit_result {
             Ok((Some(new_version), persistence)) => {
                 // Snapshot partition checksums for the local pond_id so
@@ -928,27 +880,22 @@ impl<'a> StewardTransactionGuard<'a> {
                     ))
                 })?;
 
+                // DataCommitted + Completed (factory txn) + PostPush* (parent)
+                // in a single batched control-table commit.
                 self.control_table
-                    .record_data_committed(
+                    .record_factory_terminal_batch(
                         &metadata,
-                        TransactionType::Write,
-                        new_version,
+                        &self.txn_meta,
+                        execution_seq,
+                        Some(new_version),
                         duration_ms,
                         partition_checksums,
+                        outcome,
                     )
                     .await
                     .map_err(|e| {
                         StewardError::ControlTable(format!(
-                            "Failed to record post-commit factory data_committed: {}",
-                            e
-                        ))
-                    })?;
-                self.control_table
-                    .record_completed(&metadata, TransactionType::Write, duration_ms)
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!(
-                            "Failed to record post-commit factory completion: {}",
+                            "Failed to record post-commit factory terminal batch: {}",
                             e
                         ))
                     })?;
@@ -959,13 +906,22 @@ impl<'a> StewardTransactionGuard<'a> {
             }
             Ok((None, _persistence)) => {
                 // Factory write was a no-op (no records produced).  Record
-                // `Completed` so the audit trail terminates the `Begin`.
+                // `Completed` + PostPush* so the audit trail terminates the
+                // `Begin`; no DataCommitted since nothing was written.
                 self.control_table
-                    .record_completed(&metadata, TransactionType::Write, duration_ms)
+                    .record_factory_terminal_batch(
+                        &metadata,
+                        &self.txn_meta,
+                        execution_seq,
+                        None,
+                        duration_ms,
+                        Default::default(),
+                        outcome,
+                    )
                     .await
                     .map_err(|e| {
                         StewardError::ControlTable(format!(
-                            "Failed to record post-commit factory no-op completion: {}",
+                            "Failed to record post-commit factory no-op terminal batch: {}",
                             e
                         ))
                     })?;
@@ -975,14 +931,15 @@ impl<'a> StewardTransactionGuard<'a> {
                 );
             }
             Err(commit_err) => {
-                // Commit failed - record Failed so the Begin row is
-                // terminated and the audit log isn't left dangling.
+                // Commit failed - record Failed + PostPushFailed so the Begin
+                // row is terminated and the audit log isn't left dangling.
                 let err_msg = format!("{}", commit_err);
                 if let Err(record_err) = self
                     .control_table
-                    .record_failed(
+                    .record_factory_aborted_batch(
                         &metadata,
-                        TransactionType::Write,
+                        &self.txn_meta,
+                        execution_seq,
                         err_msg.clone(),
                         duration_ms,
                     )

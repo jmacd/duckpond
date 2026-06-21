@@ -340,10 +340,6 @@ repeat_count: 1
         "Should have post_commit_pending record"
     );
     assert!(
-        record_types.contains(&"post_commit_started".to_string()),
-        "Should have post_commit_started record"
-    );
-    assert!(
         record_types.contains(&"post_commit_completed".to_string()),
         "Should have post_commit_completed record"
     );
@@ -438,14 +434,11 @@ repeat_count: 1
         .await
         .expect("Failed to query records");
 
-    // Should have 3 pending, 3 started, 3 completed
+    // Should have 3 pending, 3 completed (started records were removed; the
+    // factory's own Begin row marks execution start).
     let pending_count = records
         .iter()
         .filter(|r| r.record_type == "post_commit_pending")
-        .count();
-    let started_count = records
-        .iter()
-        .filter(|r| r.record_type == "post_commit_started")
         .count();
     let completed_count = records
         .iter()
@@ -453,7 +446,6 @@ repeat_count: 1
         .count();
 
     assert_eq!(pending_count, 3, "Should have 3 pending records");
-    assert_eq!(started_count, 3, "Should have 3 started records");
     assert_eq!(completed_count, 3, "Should have 3 completed records");
 
     // Verify execution order (execution_seq should be 1, 2, 3)
@@ -625,10 +617,6 @@ repeat_count: 1
         .iter()
         .filter(|r| r.record_type == "post_commit_pending")
         .count();
-    let started_count = records
-        .iter()
-        .filter(|r| r.record_type == "post_commit_started")
-        .count();
     let completed_count = records
         .iter()
         .filter(|r| r.record_type == "post_commit_completed")
@@ -643,10 +631,6 @@ repeat_count: 1
         "Should have exactly 3 pending records (one per factory)"
     );
     assert_eq!(
-        started_count, 3,
-        "Should have exactly 3 started records (all factories began execution)"
-    );
-    assert_eq!(
         completed_count, 2,
         "Should have exactly 2 completed records (factories 1 and 3 succeeded)"
     );
@@ -656,8 +640,8 @@ repeat_count: 1
     );
 
     println!(
-        "[OK] Record counts: {} pending, {} started, {} completed, {} failed",
-        pending_count, started_count, completed_count, failed_count
+        "[OK] Record counts: {} pending, {} completed, {} failed",
+        pending_count, completed_count, failed_count
     );
 
     // ========================================================================
@@ -1010,19 +994,17 @@ repeat_count: 1
             .filter(|r| r.execution_seq == Some(exec_seq))
             .collect();
 
-        // Should have pending, started, completed for each execution_seq
+        // Should have pending and a completion for each execution_seq.
+        // Started records were removed; the factory's own Begin row marks
+        // execution start.
         let has_pending = task_records
             .iter()
             .any(|r| r.record_type == "post_commit_pending");
-        let has_started = task_records
-            .iter()
-            .any(|r| r.record_type == "post_commit_started");
         let has_completion = task_records.iter().any(|r| {
             r.record_type == "post_commit_completed" || r.record_type == "post_commit_failed"
         });
 
         assert!(has_pending, "Task {} should have pending record", exec_seq);
-        assert!(has_started, "Task {} should have started record", exec_seq);
         assert!(
             has_completion,
             "Task {} should have completion record",
