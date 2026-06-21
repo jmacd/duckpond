@@ -627,7 +627,18 @@ impl TemporalReduceSqlFile {
             parquet_path.display()
         ))?;
 
-        let partial_sql = pieces.partial_sql(finest_interval, &self.config.time_column, table);
+        let available: std::collections::HashSet<String> = ctx
+            .table(table)
+            .await
+            .map_other_context("read cached version schema")?
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+
+        let partial_sql =
+            pieces.partial_sql(finest_interval, &self.config.time_column, table, &available);
         let stream = ctx
             .sql(&partial_sql)
             .await
@@ -991,6 +1002,30 @@ impl PartialKind {
         }
     }
 
+    /// Like [`raw_expr`], but emits a typed placeholder when the source column
+    /// is absent from this input version. An oteljson source builds a per-file
+    /// wide schema from the metric names present in that file, so a metric that
+    /// appears or is renamed over history is missing from older versions. The
+    /// single-pass query never sees this because it reads the unioned glob where
+    /// the absent column reads as NULL, but a per-version partial query plans
+    /// against one version's schema and would fail on `SUM("missing")`. The
+    /// placeholder keeps the partial output schema identical across versions,
+    /// which the cross-version merge listing table requires, and contributes
+    /// nothing on merge: NULL sums/mins/maxes are ignored and a zero count adds
+    /// nothing.
+    fn raw_expr_or_absent(self, column: &str, alias: &str, present: bool) -> String {
+        if present || matches!(self, PartialKind::CountStar) {
+            return self.raw_expr(column, alias);
+        }
+        match self {
+            PartialKind::Sum | PartialKind::Min | PartialKind::Max => {
+                format!("CAST(NULL AS DOUBLE) AS \"{alias}\"")
+            }
+            PartialKind::Count => format!("CAST(0 AS BIGINT) AS \"{alias}\""),
+            PartialKind::CountStar => format!("COUNT(*) AS \"{alias}\""),
+        }
+    }
+
     /// SQL expression merging an already-computed partial across partitions
     /// (input versions, cascaded levels), grouped by `time_bucket`. The merge
     /// is associative: sums and counts add, mins/maxes extend. The result keeps
@@ -1135,6 +1170,18 @@ impl AggSqlPieces {
             .collect()
     }
 
+    /// Partial expressions for one input version, substituting typed
+    /// placeholders for source columns absent from that version's schema.
+    fn raw_partial_exprs_for(&self, available: &std::collections::HashSet<String>) -> Vec<String> {
+        self.partials
+            .iter()
+            .map(|p| {
+                let present = p.column == "*" || available.contains(&p.column);
+                p.kind.raw_expr_or_absent(&p.column, &p.alias, present)
+            })
+            .collect()
+    }
+
     /// Partial expressions merging cached partials across partitions.
     fn merge_partial_exprs(&self) -> Vec<String> {
         self.partials
@@ -1204,7 +1251,13 @@ impl AggSqlPieces {
     /// buckets and emit `time_bucket` plus the partial columns. The output is
     /// cached once per version; it carries no reconstruction so the partials
     /// stay mergeable across versions.
-    fn partial_sql(&self, interval: Duration, ts: &str, version_table: &str) -> String {
+    fn partial_sql(
+        &self,
+        interval: Duration,
+        ts: &str,
+        version_table: &str,
+        available: &std::collections::HashSet<String>,
+    ) -> String {
         let interval = duration_to_sql_interval(interval);
         let bin = date_bin_expr(&interval, ts);
         format!(
@@ -1216,7 +1269,7 @@ impl AggSqlPieces {
         WHERE {ts} IS NOT NULL
         GROUP BY {bin}
         "#,
-            partial_exprs = self.raw_partial_exprs().join(",\n          "),
+            partial_exprs = self.raw_partial_exprs_for(available).join(",\n          "),
         )
     }
 
@@ -1890,7 +1943,11 @@ mod tests {
         let full = ctx.sql(&full_sql).await.unwrap().collect().await.unwrap();
 
         // Per-version partials -> register -> merge.
-        let partial_sql = pieces.partial_sql(interval, "timestamp", "src");
+        let available: std::collections::HashSet<String> =
+            ["temperature".to_string(), "salinity".to_string()]
+                .into_iter()
+                .collect();
+        let partial_sql = pieces.partial_sql(interval, "timestamp", "src", &available);
         let partials = ctx
             .sql(&partial_sql)
             .await
@@ -1926,8 +1983,129 @@ mod tests {
         }
     }
 
-    ///
-    /// Creates multiple series files with different names (site1, site2, site3),
+    /// A source column that is absent from an older input version must not break
+    /// the per-version partial query: an oteljson source builds a per-file wide
+    /// schema from the metric names present in that file, so a metric that is
+    /// added or renamed over history is missing from earlier versions. The
+    /// partial query for such a version emits typed placeholders for the absent
+    /// column, keeping the partial schema identical across versions so the merge
+    /// can union them, and the merged output matches a single-pass query over
+    /// the union of both versions.
+    #[tokio::test]
+    async fn test_partial_tolerates_column_absent_in_older_version() {
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use datafusion::datasource::MemTable;
+        use datafusion::prelude::SessionContext;
+
+        let day = 86_400_000i64;
+
+        // Older version: only "temperature" exists; "salinity" had not yet
+        // appeared in the source.
+        let v0_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("temperature", DataType::Float64, true),
+        ]));
+        let v0 = RecordBatch::try_new(
+            v0_schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, day / 4])),
+                Arc::new(Float64Array::from(vec![20.0, 22.0])),
+            ],
+        )
+        .unwrap();
+
+        // Newer version: both columns present.
+        let v1_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("temperature", DataType::Float64, true),
+            Field::new("salinity", DataType::Float64, true),
+        ]));
+        let v1 = RecordBatch::try_new(
+            v1_schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![day, day + day / 4])),
+                Arc::new(Float64Array::from(vec![25.0, 24.0])),
+                Arc::new(Float64Array::from(vec![33.0, 34.0])),
+            ],
+        )
+        .unwrap();
+
+        let config = cfg_with_aggs(vec![
+            agg(AggregationType::Avg, &["temperature"]),
+            agg(AggregationType::Sum, &["salinity"]),
+            agg(AggregationType::Min, &["salinity"]),
+            agg(AggregationType::Max, &["salinity"]),
+            agg(AggregationType::Count, &["*"]),
+        ]);
+        let pieces = AggSqlPieces::build(&config).unwrap();
+        let interval = Duration::from_secs(86_400);
+        let ctx = SessionContext::new();
+
+        // Per-version partials, each planned against that version's own schema.
+        let mut all_partials = Vec::new();
+        for (i, (batch, schema)) in [(v0, v0_schema), (v1, v1_schema)].into_iter().enumerate() {
+            let table = format!("v{i}");
+            let available: std::collections::HashSet<String> =
+                schema.fields().iter().map(|f| f.name().clone()).collect();
+            let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+            _ = ctx.register_table(table.as_str(), Arc::new(mem)).unwrap();
+            let partial_sql = pieces.partial_sql(interval, "timestamp", &table, &available);
+            let mut part = ctx
+                .sql(&partial_sql)
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            all_partials.append(&mut part);
+        }
+
+        // All partial batches must share one schema so the merge can union them.
+        let partials_schema = all_partials[0].schema();
+        for p in &all_partials {
+            assert_eq!(
+                p.schema(),
+                partials_schema,
+                "per-version partial schemas must be identical across versions"
+            );
+        }
+        let partials_table = MemTable::try_new(partials_schema, vec![all_partials]).unwrap();
+        _ = ctx
+            .register_table("partials", Arc::new(partials_table))
+            .unwrap();
+        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials");
+        let merged = ctx.sql(&merge_sql).await.unwrap().collect().await.unwrap();
+        let merged = arrow::compute::concat_batches(&merged[0].schema(), &merged).unwrap();
+
+        // Two daily buckets: day 0 (temperature only) and day 1 (both columns).
+        assert_eq!(merged.num_rows(), 2);
+
+        let merged_schema = merged.schema();
+        let names: Vec<&str> = merged_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        let sal_sum_idx = names.iter().position(|n| *n == "salinity.sum").unwrap();
+        let sal_sum = merged
+            .column(sal_sum_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        use arrow::array::Array;
+        // Day 0 had no salinity column at all -> NULL; day 1 -> 33 + 34 = 67.
+        assert!(sal_sum.is_null(0), "day-0 salinity sum must be NULL");
+        assert_eq!(sal_sum.value(1), 67.0);
+    }
+
     /// each with 3 days of hourly data, then validates that temporal-reduce correctly:
     /// - Discovers all source files matching the pattern
     /// - Creates site subdirectories for each matched file
