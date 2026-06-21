@@ -637,3 +637,7 @@ pub async fn maintain_table(
 window of churn while staying clear of in-flight concurrent readers. This is
 independent of, and complementary to, `--prune --keep-txns` which trims control
 *rows* rather than delta-log metadata.
+
+The retention is currently a code constant. Making it an operator-tunable
+default managed via `pond config set` is described in
+`configurable-settings.md`.
