@@ -2179,9 +2179,7 @@ mod tests {
         std::fs::read_dir(log_dir)
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.path().extension().and_then(|s| s.to_str()) == Some(ext)
-                    })
+                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some(ext))
                     .count()
             })
             .unwrap_or(0)
@@ -2196,9 +2194,7 @@ mod tests {
     async fn test_control_log_cleanup_bounds_delta_log() {
         let temp_dir = tempdir().expect("temp dir");
         let pond_path = temp_dir.path().join("test_pond");
-        let mut ship = Ship::create_pond(&pond_path)
-            .await
-            .expect("create pond");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
 
         // Drive enough write transactions to accumulate control commit JSONs
         // well past a checkpoint boundary.
