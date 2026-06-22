@@ -451,7 +451,6 @@ impl HydroVuCollector {
         device_id: i64,
         device_name: &str,
     ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-        let _ = device_name; // Reserved for future diagnostic use
         let device_dir_path = format!("{}/devices/{}", hydrovu_path, device_id);
 
         let root_wd = fs
@@ -523,18 +522,35 @@ impl HydroVuCollector {
         }
 
         // Writeable directory empty: fall back to the read-only seed archives.
-        if let Some(archive_path) = archive_path
-            && let Some(archive_micros) =
+        if let Some(archive_path) = archive_path {
+            if let Some(archive_micros) =
                 Self::find_archive_youngest_micros(fs, archive_path, device_id).await?
-        {
-            let next_timestamp = archive_micros + 1_000_000;
-            debug!(
-                "Device {device_id}: no writeable data; resuming from archive youngest {archive_micros}, will continue from {next_timestamp}"
-            );
-            return Ok(next_timestamp);
+            {
+                let next_timestamp = archive_micros + 1_000_000;
+                debug!(
+                    "Device {device_id}: no writeable data; resuming from archive youngest {archive_micros}, will continue from {next_timestamp}"
+                );
+                return Ok(next_timestamp);
+            }
+
+            // An archive_path is configured precisely so a freshly reset pond
+            // resumes from the seed archives produced by the hydrovu factory.
+            // A missing resume point means this device's seed archive is absent
+            // or unreadable.  Crawling HydroVu from epoch issues an unbounded
+            // query that times out the server, so fail hard and surface the
+            // misconfiguration instead of silently degrading.
+            return Err(steward::StewardError::Dyn(
+                format!(
+                    "Device {device_id} ({device_name}): no writeable data and no resume point in seed archive '{archive_path}/devices/{device_id}'; refusing to crawl HydroVu from epoch"
+                )
+                .into(),
+            )
+            .into());
         }
 
-        debug!("Device {device_id}: no writeable data and no archive, starting from epoch");
+        debug!(
+            "Device {device_id}: no writeable data and no archive_path configured, starting from epoch"
+        );
         Ok(0)
     }
 
@@ -1188,6 +1204,64 @@ mod tests {
             "Version deduplication changed count - indicates duplicate versions exist!"
         );
 
+        Ok(())
+    }
+
+    /// A configured `archive_path` is the resume contract for a freshly reset
+    /// pond: when neither writeable data nor a seed archive yields a resume
+    /// point, `find_youngest_timestamp` must fail hard rather than return epoch
+    /// and trigger an unbounded HydroVu crawl.  With no `archive_path`, epoch is
+    /// the legitimate first-collection start.
+    #[tokio::test]
+    async fn test_find_youngest_timestamp_no_archive_hard_fails() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store_path = temp_dir.path().join("test_pond");
+
+        let mut persistence = tlogfs::OpLogPersistence::create(
+            store_path.to_str().unwrap(),
+            uuid7::uuid7().to_string(),
+            tlogfs::PondUserMetadata::new(vec!["test_init".to_string()]),
+        )
+        .await?;
+
+        let txn_meta = tlogfs::PondTxnMetadata::new(
+            2,
+            tlogfs::PondUserMetadata::new(vec!["test_find_youngest".to_string()]),
+        );
+        let tx = persistence.begin_write(&txn_meta).await?;
+
+        let device_id = 1234567890i64;
+
+        // archive_path configured but no writeable data and no seed archive
+        // present: must hard-fail instead of crawling from epoch.
+        let err = HydroVuCollector::find_youngest_timestamp(
+            &tx,
+            "/hydrovu",
+            Some("/hydrovu-archive"),
+            device_id,
+            "TestDevice",
+        )
+        .await
+        .expect_err("expected hard failure when archive resume point is missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to crawl HydroVu from epoch"),
+            "unexpected error message: {msg}"
+        );
+
+        // No archive_path configured: epoch is the legitimate first start.
+        let start = HydroVuCollector::find_youngest_timestamp(
+            &tx,
+            "/hydrovu",
+            None,
+            device_id,
+            "TestDevice",
+        )
+        .await
+        .expect("epoch start should succeed when no archive_path is set");
+        assert_eq!(start, 0, "expected epoch start when no archive_path is set");
+
+        let _ = tx.commit().await?;
         Ok(())
     }
 
