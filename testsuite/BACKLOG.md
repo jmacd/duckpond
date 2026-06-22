@@ -245,7 +245,7 @@
   flat-vs-`/data/**` `source_path` filter — that surface no longer
   exists in D5.7b (cross-pond mounts the whole foreign pond root).
   Rewrote as a 3-deep A→B→C chain instead, per
-  `docs/d5.8-resume.md` step 7 / § 291.
+  `docs/archive/d5.8-resume.md` step 7 / § 291.
 - **Test shape (shell, 14 checks)**: Three ponds against two MinIO
   buckets.  A writes `/data/a.txt`, pushes to bucket-A.  B mounts A
   at `/imports/A`, pulls, writes own `/data/b.txt`, pushes to
@@ -392,7 +392,7 @@
 - **Type**: REVIVAL (both scripts)
 - **Description**: Replaced the `DISABLED-D4` stubs (which mknod'd the
   long-removed `remote` factory with `import:` YAML blocks) with shell
-  CLI versions of the two cross-pond invariants from `docs/d5.8-resume.md`
+  CLI versions of the two cross-pond invariants from `docs/archive/d5.8-resume.md`
   § 3 that already had Rust integration coverage in
   `crates/cmd/tests/test_remote_cli.rs`.
 - **532 (invariant 1: foreign mount is strictly read-only)**: 15 checks.
