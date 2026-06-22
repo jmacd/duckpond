@@ -599,3 +599,45 @@ SELECT COUNT(*) as active FROM (
 8. **Separate Delta Txn app_ids per table** -- `pond-maint-data`,
    `pond-maint-control`, `pond-maint-remote` are independent. Maintaining the
    data table doesn't block maintaining the control table.
+
+## Implementation Status: Control-Table Log Retention
+
+A live watershop `selfmon` pond (~50 control commits/min) exposed that running
+log cleanup is necessary but not sufficient. `checkpoints::cleanup_metadata`
+deletes commit files older than the table's `logRetentionDuration`, which
+defaults to **30 days**. The control table sets no such property, so on a
+freshly reset pond every commit JSON is younger than 30 days and cleanup deletes
+nothing -- the `_delta_log` grew to thousands of files (commit JSONs plus
+superseded checkpoints) within an hour even though data-parquet compaction kept
+the table's row data tiny.
+
+The fix gives `maintenance::maintain_table` an explicit `log_retention` argument:
+
+```rust
+pub async fn maintain_table(
+    table: DeltaTable,
+    table_name: &str,
+    force: bool,
+    do_compact: bool,
+    log_retention: Option<Duration>,
+) -> (DeltaTable, MaintenanceResult)
+```
+
+- `None` -- replicated tables (the data table) keep the table-default 30-day
+  `cleanup_metadata` behaviour; their commit log may still be needed for remote
+  version diffing.
+- `Some(retention)` -- the never-replicated control table calls
+  `checkpoints::cleanup_expired_logs_for` with `cutoff = now - retention`. This
+  is checkpoint-aligned: it never deletes below the most recent checkpoint, so
+  the current version always reconstructs. The control table's transaction
+  history lives in parquet rows, not the delta log, so `pond log` is unaffected.
+
+`Ship::maintain` passes `Some(Duration::minutes(CONTROL_LOG_RETENTION_MINUTES))`
+(5 minutes) for the control table, bounding its `_delta_log` to roughly one
+window of churn while staying clear of in-flight concurrent readers. This is
+independent of, and complementary to, `--prune --keep-txns` which trims control
+*rows* rather than delta-log metadata.
+
+The retention is currently a code constant. Making it an operator-tunable
+default managed via `pond config set` is described in
+`configurable-settings.md`.

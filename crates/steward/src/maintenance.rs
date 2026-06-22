@@ -15,14 +15,16 @@
 //! - **Checkpoint** -- collapse the JSON delta log into a single parquet
 //!   checkpoint file.  Created every `CHECKPOINT_INTERVAL` versions (default 10).
 //! - **Log cleanup** -- remove expired JSON log files older than the
-//!   retention period (only after a checkpoint exists).
+//!   retention period (only after a checkpoint exists). The replicated data
+//!   table uses its 30-day table default; the never-replicated control table
+//!   uses a short retention so its high-churn log does not grow without bound.
 //! - **Vacuum** -- delete parquet data files no longer referenced by the
 //!   current table version. Runs every `VACUUM_INTERVAL` versions (default 10)
 //!   to avoid unnecessary scans on every commit.
 //! - **Compact** -- merge many small parquet files into fewer large ones
 //!   (only on explicit request via `pond maintain --compact`).
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use deltalake::DeltaTable;
 use deltalake::checkpoints;
 use deltalake::kernel::schema::partitions::{PartitionFilter, PartitionValue};
@@ -44,6 +46,16 @@ const VACUUM_RETENTION_HOURS: u64 = 0;
 /// How often to run vacuum when no Remove actions are present (every N versions).
 /// This provides a safety net in case the Remove-action detection misses something.
 const VACUUM_INTERVAL: u64 = 10;
+
+/// Log retention for the control table's aggressive `_delta_log` cleanup.
+///
+/// The control table is never replicated to a remote and its transaction
+/// history is stored as parquet rows, not as delta-log commit JSONs, so old
+/// commit and superseded-checkpoint files become pure overhead once a newer
+/// checkpoint exists. A short retention bounds the `_delta_log` to roughly this
+/// window of churn while staying clear of any in-flight concurrent reader, which
+/// only ever needs files from the most recent checkpoint onward.
+pub const CONTROL_LOG_RETENTION_MINUTES: i64 = 5;
 
 /// Default target size for compaction (128 MB).
 const COMPACT_TARGET_SIZE: u64 = 128 * 1024 * 1024;
@@ -129,6 +141,14 @@ impl std::fmt::Display for MaintenanceReport {
 /// When `force` is false, checkpoint is only created at interval boundaries
 /// (for automatic post-commit maintenance).
 ///
+/// `log_retention` controls how `_delta_log` cleanup runs after a checkpoint:
+/// - `None` -- use the table's own `logRetentionDuration` property (Delta default
+///   30 days) via [`checkpoints::cleanup_metadata`]. Appropriate for replicated
+///   tables whose commit log may still be needed for remote version diffing.
+/// - `Some(retention)` -- delete commit JSONs and superseded checkpoints older
+///   than `now - retention` (checkpoint-aligned, never below the most recent
+///   checkpoint). Used for the control table, which is never replicated.
+///
 /// This is best-effort: errors are logged as warnings and do not propagate.
 /// The table reference is consumed and a new (possibly updated) table is
 /// returned, since vacuum/optimize operations produce a new DeltaTable.
@@ -137,6 +157,7 @@ pub async fn maintain_table(
     table_name: &str,
     force: bool,
     do_compact: bool,
+    log_retention: Option<Duration>,
 ) -> (DeltaTable, MaintenanceResult) {
     let mut result = MaintenanceResult {
         table_name: table_name.to_string(),
@@ -174,7 +195,27 @@ pub async fn maintain_table(
 
     // 2. Clean up expired log files (only meaningful after a checkpoint exists)
     if result.checkpoint_created {
-        match checkpoints::cleanup_metadata(&table, None).await {
+        let cleanup = match log_retention {
+            Some(retention) => {
+                let cutoff = Utc::now().timestamp_millis() - retention.num_milliseconds();
+                match table.snapshot() {
+                    Ok(snapshot) => {
+                        let keep_version = snapshot.version();
+                        let log_store = table.log_store();
+                        checkpoints::cleanup_expired_logs_for(
+                            keep_version,
+                            log_store.as_ref(),
+                            cutoff,
+                            None,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            None => checkpoints::cleanup_metadata(&table, None).await,
+        };
+        match cleanup {
             Ok(cleaned) => {
                 if cleaned > 0 {
                     info!(

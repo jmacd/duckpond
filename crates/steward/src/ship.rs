@@ -762,7 +762,7 @@ impl Ship {
         // Maintain data table (checkpoint + vacuum only; compaction handled above)
         let data_table = self.data_persistence.table().clone();
         let (new_data_table, mut data_result) =
-            maintenance::maintain_table(data_table, "data", force, false).await;
+            maintenance::maintain_table(data_table, "data", force, false, None).await;
         self.data_persistence.set_table(new_data_table);
         if let Some(oc) = compact_outcome {
             data_result.compacted = oc.had_data;
@@ -771,10 +771,20 @@ impl Ship {
         }
         report.data = Some(data_result);
 
-        // Maintain control table (best-effort optimize allowed; never pushed)
+        // Maintain control table (best-effort optimize allowed; never pushed).
+        // It is never replicated, so its delta log is cleaned aggressively to a
+        // short retention rather than the 30-day table default.
         let control_table = self.control_table.table().clone();
-        let (new_control_table, control_result) =
-            maintenance::maintain_table(control_table, "control", force, compact).await;
+        let (new_control_table, control_result) = maintenance::maintain_table(
+            control_table,
+            "control",
+            force,
+            compact,
+            Some(chrono::Duration::minutes(
+                maintenance::CONTROL_LOG_RETENTION_MINUTES,
+            )),
+        )
+        .await;
         self.control_table.set_table(new_control_table);
         report.control = Some(control_result);
 
@@ -2163,5 +2173,89 @@ mod tests {
         // A second sweep is a clean no-op now that nothing qualifies.
         let again = ship.collapse_versions(1).await.expect("second sweep");
         assert_eq!(again.files_collapsed, 0, "nothing left to collapse");
+    }
+
+    fn count_log_files(log_dir: &Path, ext: &str) -> usize {
+        std::fs::read_dir(log_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some(ext))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// The control table is never replicated, so its `_delta_log` must be
+    /// cleaned aggressively rather than kept for the 30-day Delta default.
+    /// Many small write transactions accumulate commit JSONs; a forced maintain
+    /// with a short retention must collapse them to the latest checkpoint while
+    /// leaving the pond fully readable.
+    #[tokio::test]
+    async fn test_control_log_cleanup_bounds_delta_log() {
+        let temp_dir = tempdir().expect("temp dir");
+        let pond_path = temp_dir.path().join("test_pond");
+        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+
+        // Drive enough write transactions to accumulate control commit JSONs
+        // well past a checkpoint boundary.
+        for i in 0..16 {
+            let meta = PondUserMetadata::new(vec![format!("commit-{i}")]);
+            ship.write_transaction(&meta, async move |fs| {
+                let root = fs.root().await?;
+                _ = tinyfs::async_helpers::convenience::create_file_path(
+                    &root,
+                    &format!("/file-{i}.txt"),
+                    format!("content-{i}").as_bytes(),
+                )
+                .await?;
+                Ok(())
+            })
+            .await
+            .expect("write transaction");
+        }
+
+        let control_log_dir = get_control_path(&pond_path).join("_delta_log");
+        let json_before = count_log_files(&control_log_dir, "json");
+        assert!(
+            json_before > 10,
+            "expected many control commit JSONs, got {json_before}"
+        );
+
+        // Let existing log files age past the tiny retention used below so the
+        // checkpoint-aligned cleanup considers them expired.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let control_table = ship.control_table.table().clone();
+        let pre_version = control_table.version().unwrap_or(-1);
+        let (cleaned_table, result) = maintenance::maintain_table(
+            control_table,
+            "control",
+            true,
+            false,
+            Some(chrono::Duration::milliseconds(10)),
+        )
+        .await;
+
+        assert!(result.checkpoint_created, "forced maintain must checkpoint");
+        assert!(
+            result.logs_cleaned > 0,
+            "expected expired control logs to be cleaned"
+        );
+        assert_eq!(
+            cleaned_table.version().unwrap_or(-1),
+            pre_version,
+            "cleanup must not change the table version"
+        );
+
+        let json_after = count_log_files(&control_log_dir, "json");
+        assert!(
+            json_after < json_before,
+            "control commit JSONs should shrink: before={json_before} after={json_after}"
+        );
+
+        // The pond must still open and replay cleanly after log cleanup.
+        drop(ship);
+        let reopened = Ship::open_pond(&pond_path).await.expect("reopen pond");
+        drop(reopened);
     }
 }
