@@ -21,7 +21,7 @@ echo "=== Test: Rotation Where New File Grew Past Old Size ==="
 echo ""
 
 export POND=/pond
-pond init
+pond init --birthplace test-host
 
 #############################
 # SETUP

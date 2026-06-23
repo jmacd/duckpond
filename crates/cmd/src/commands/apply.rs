@@ -388,10 +388,7 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
     };
 
     let tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "apply".to_string(),
-            format!("{} resource(s)", specs.len()),
-        ]))
+        .begin_write(&ship_context.command_metadata())
         .await
         .map_err(|e| anyhow!("apply: failed to begin transaction: {}", e))?;
 
@@ -930,7 +927,7 @@ mod tests {
 
             let init_args = vec!["pond".to_string(), "init".to_string()];
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
-            init_command(&ship_context).await?;
+            init_command(&ship_context, "test-host").await?;
 
             Ok(Self {
                 temp_dir,

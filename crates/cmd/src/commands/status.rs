@@ -40,15 +40,22 @@ pub async fn status_command(ship_context: &ShipContext) -> Result<()> {
     println!("===========");
     println!();
     println!("Identity");
-    println!("  Pond ID:   {}", metadata.pond_id);
+    println!("  Pond ID:    {}", metadata.pond_id);
     println!(
-        "  Created:   {} by {}@{}",
+        "  Created:    {} by {}",
         format_timestamp(metadata.birth_timestamp),
         metadata.birth_username,
-        metadata.birth_hostname
+    );
+    println!(
+        "  Birthplace: {}",
+        if metadata.birthplace.is_empty() {
+            "(unspecified)"
+        } else {
+            &metadata.birthplace
+        }
     );
     if let Ok(path) = ship_context.resolve_pond_path() {
-        println!("  Location:  {}", path.display());
+        println!("  Location:   {}", path.display());
     }
     println!();
 

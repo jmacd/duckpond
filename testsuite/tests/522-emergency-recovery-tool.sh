@@ -150,7 +150,7 @@ echo "=== Phase 1: Pond1 setup + push ==="
 
 export POND=/pond1
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 
 pond backup add origin "${BUCKET_URL}" \
     --region us-east-1 \

@@ -10,7 +10,7 @@ set -e
 echo "=== Experiment: OtelJSON URL Scheme ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # CREATE SAMPLE OTELJSON DATA

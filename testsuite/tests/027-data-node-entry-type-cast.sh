@@ -16,7 +16,7 @@ source check.sh
 
 echo "=== Experiment: data-file -> series/table entry-type cast ==="
 
-pond init
+pond init --birthplace test-host
 
 # ---- Setup: produce a real Parquet file (no external tooling) ----
 # A synthetic-timeseries node is queryable; copy it OUT to the host to obtain

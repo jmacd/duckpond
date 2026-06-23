@@ -268,6 +268,12 @@ $ pond log --txn-seq 42    # full lifecycle detail for one transaction
 $ pond log --incomplete    # transactions that need `pond recover`
 ```
 
+`pond log` reconstructs, for each write transaction, the originating CLI
+command (from the `pond_txn` metadata in the data Delta commit), the
+timing and status (from the control table), and a one-line change summary
+(files/directories/partitions touched, from the data table).  Pure reads
+are omitted; crashed writes appear under `pond log --incomplete`.
+
 ### Configuration
 
 ```

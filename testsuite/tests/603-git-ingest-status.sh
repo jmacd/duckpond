@@ -23,7 +23,7 @@ echo "Commit SHA: $COMMIT_SHA"
 cd /
 
 # --- Initialize pond ----------------------------------------------------------
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}

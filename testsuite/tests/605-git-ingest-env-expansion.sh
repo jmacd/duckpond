@@ -38,7 +38,7 @@ echo "--- Test 1: env var with default (GIT_TEST_REF unset -> main) ---"
 # Ensure GIT_TEST_REF is NOT set
 unset GIT_TEST_REF
 
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-envref.yaml << 'EOF'
 url: file:///tmp/test-envref
@@ -68,7 +68,7 @@ echo "--- Test 2: env var set (GIT_TEST_REF=dev) ---"
 
 # Re-init a fresh pond
 rm -rf "$POND"
-pond init
+pond init --birthplace test-host
 
 export GIT_TEST_REF=dev
 

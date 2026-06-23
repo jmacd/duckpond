@@ -14,7 +14,7 @@ echo "=== Test: Truncated File Without Archive ==="
 echo ""
 
 export POND=/pond
-pond init
+pond init --birthplace test-host
 
 #############################
 # SETUP

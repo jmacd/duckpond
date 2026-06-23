@@ -9,7 +9,7 @@ source check.sh
 
 echo "=== Experiment: pond apply -- copy and lifecycle ==="
 
-pond init
+pond init --birthplace test-host
 
 # ==============================================================================
 # Step 1: Create host content to copy
@@ -130,11 +130,12 @@ echo "--- Step 5: Verify transaction log ---"
 
 LOG_OUT=$(pond log --limit 5)
 echo "$LOG_OUT"
-# Post-D2 the control table no longer stores `cli_args`, so `pond log` cannot
-# print the originating command name.  Assert instead that a committed write
-# transaction is present after running apply.
+# `pond log` now reconstructs the originating CLI command from the data
+# Delta commit metadata (`pond_txn`).  Assert a committed write transaction
+# is present and its command is shown.
 check 'echo "$LOG_OUT" | grep -q "(write)"' "write transaction in log"
 check 'echo "$LOG_OUT" | grep -q "COMMITTED"' "COMMITTED transaction in log"
+check 'echo "$LOG_OUT" | grep -q "Command  : pond apply"' "apply command shown in log"
 
 # ==============================================================================
 # Step 6: Copy with overwrite=false should fail if exists

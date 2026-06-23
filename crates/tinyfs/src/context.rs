@@ -257,8 +257,10 @@ pub struct PondMetadata {
     pub pond_id: uuid7::Uuid,
     /// Timestamp when this pond was originally created (microseconds since epoch)
     pub birth_timestamp: i64,
-    /// Hostname where the pond was originally created
-    pub birth_hostname: String,
+    /// Birthplace of the pond: a user-asserted, immutable label for where
+    /// this pond was originally created (for example a hostname, site, or
+    /// deployment name).  Set once at `pond init` and preserved across replicas.
+    pub birthplace: String,
     /// Username who originally created the pond
     pub birth_username: String,
 }
@@ -269,8 +271,9 @@ impl Default for PondMetadata {
         let pond_id = uuid7::uuid7();
         let birth_timestamp = chrono::Utc::now().timestamp_micros();
 
-        // Note: std::net::hostname() is unstable, using placeholder
-        let birth_hostname = "unknown".into();
+        // Birthplace is user-asserted at `pond init`; the default is empty
+        // and is overridden by the value the operator provides.
+        let birthplace = String::new();
 
         let birth_username = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
@@ -279,7 +282,7 @@ impl Default for PondMetadata {
         Self {
             pond_id,
             birth_timestamp,
-            birth_hostname,
+            birthplace,
             birth_username,
         }
     }

@@ -15,7 +15,7 @@ use std::path::Path;
 /// Replica bootstrap (formerly `--from-backup` / `--config`) is going
 /// away in the D4 redesign: use `pond init` + `pond remote add` +
 /// `pond pull` (or the future `pond restart-from-compact`) instead.
-pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
+pub async fn init_command(ship_context: &ShipContext, birthplace: &str) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
     let pond_path_display = pond_path.display().to_string();
 
@@ -29,14 +29,14 @@ pub async fn init_command(ship_context: &ShipContext) -> Result<()> {
     }
 
     info!("Initializing pond at: {pond_path_display}");
-    init_normal(ship_context).await
+    init_normal(ship_context, birthplace).await
 }
 
 /// Normal initialization - creates empty pond with initial transaction
-async fn init_normal(ship_context: &ShipContext) -> Result<()> {
+async fn init_normal(ship_context: &ShipContext, birthplace: &str) -> Result<()> {
     // Pond doesn't exist, so create a new one
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
-    let _ship = ship_context.create_pond().await?;
+    let _ship = ship_context.create_pond(birthplace).await?;
     log::debug!("Pond initialized successfully with transaction #1");
     Ok(())
 }

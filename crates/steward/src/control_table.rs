@@ -51,7 +51,7 @@ const BOOTSTRAP_POND_ID: StdUuid = StdUuid::nil();
 
 const KEY_STORE_ID: &str = "store_id";
 const KEY_BIRTH_TIMESTAMP: &str = "birth_timestamp";
-const KEY_BIRTH_HOSTNAME: &str = "birth_hostname";
+const KEY_BIRTHPLACE: &str = "birthplace";
 const KEY_BIRTH_USERNAME: &str = "birth_username";
 
 const FACTORY_MODE_PREFIX: &str = "factory_mode:";
@@ -869,7 +869,7 @@ async fn seed_pond_metadata(
         .await
         .map_err(map_err)?;
     inner
-        .config_set(BOOTSTRAP_POND_ID, KEY_BIRTH_HOSTNAME, &m.birth_hostname)
+        .config_set(BOOTSTRAP_POND_ID, KEY_BIRTHPLACE, &m.birthplace)
         .await
         .map_err(map_err)?;
     inner
@@ -900,10 +900,7 @@ async fn load_pond_metadata(inner: &InnerControlTable) -> Result<PondMetadata, S
         .get(KEY_BIRTH_TIMESTAMP)
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
-    let birth_hostname = bootstrap
-        .get(KEY_BIRTH_HOSTNAME)
-        .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
+    let birthplace = bootstrap.get(KEY_BIRTHPLACE).cloned().unwrap_or_default();
     let birth_username = bootstrap
         .get(KEY_BIRTH_USERNAME)
         .cloned()
@@ -911,7 +908,7 @@ async fn load_pond_metadata(inner: &InnerControlTable) -> Result<PondMetadata, S
     Ok(PondMetadata {
         pond_id,
         birth_timestamp,
-        birth_hostname,
+        birthplace,
         birth_username,
     })
 }
@@ -946,7 +943,12 @@ pub fn pond_metadata_banner(data: &PondMetadata) {
         format!("Created {}", created_str),
     ];
 
-    let right = vec![data.birth_username.clone(), data.birth_hostname.clone()];
+    let birthplace = if data.birthplace.is_empty() {
+        "(unspecified)".to_string()
+    } else {
+        data.birthplace.clone()
+    };
+    let right = vec![data.birth_username.clone(), birthplace];
 
     println!(
         "{}",

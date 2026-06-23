@@ -15,7 +15,7 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
 
     // Initialize pond with first Ship instance
     {
-        let _ship = Ship::create_pond(&pond_path)
+        let _ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
@@ -48,7 +48,7 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     let pond_path = temp_dir.path().join("same_instance_test_pond");
 
     // Initialize pond and keep the Ship instance
-    let mut ship = Ship::create_pond(&pond_path)
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 

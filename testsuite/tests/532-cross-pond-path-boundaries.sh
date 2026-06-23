@@ -129,7 +129,7 @@ echo ""
 echo "=== Phase 1: Pond A — init, populate, push ==="
 export POND=/tmp/pond-a
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond mkdir /data >/dev/null
 
@@ -171,7 +171,7 @@ echo ""
 echo "=== Phase 2: Pond B — init, attach + pull A as /imports/A ==="
 export POND=/tmp/pond-b
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 POND_ID_B=$(pond config 2>/dev/null | awk '/^Pond ID:/ {print $NF; exit}')
 echo "Pond B pond_id: ${POND_ID_B}"

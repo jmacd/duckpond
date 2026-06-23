@@ -36,7 +36,7 @@ impl SimpleReplicationTest {
         let ship_context =
             ShipContext::pond_only(Some(self.source_pond.clone()), vec!["pond".to_string()]);
 
-        init_command(&ship_context).await?;
+        init_command(&ship_context, "test-host").await?;
         Ok(())
     }
 

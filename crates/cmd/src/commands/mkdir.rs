@@ -27,82 +27,71 @@ pub async fn mkdir_command(
 
     debug!("Creating directory in pond: {path} (create_parents: {create_parents})");
 
-    ship.write_transaction(
-        &steward::PondUserMetadata::new(vec![
-            "mkdir".to_string(),
-            path_for_closure.clone(),
-            if create_parents {
-                "-p".to_string()
-            } else {
-                "".to_string()
-            },
-        ]),
-        async |fs| {
-            let root = fs.root().await?;
+    ship.write_transaction(&ship_context.command_metadata(), async |fs| {
+        let root = fs.root().await?;
 
-            if create_parents {
-                let path_components: Vec<&str> = path_for_closure
-                    .trim_start_matches('/')
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .collect();
+        if create_parents {
+            let path_components: Vec<&str> = path_for_closure
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
 
-                if path_components.is_empty() {
-                    return Ok(());
-                }
-
-                let mut current_path = String::new();
-                for (i, component) in path_components.iter().enumerate() {
-                    if path_for_closure.starts_with('/') || i > 0 {
-                        current_path.push('/');
-                    }
-                    current_path.push_str(component);
-
-                    if root.exists(&current_path).await {
-                        match root.open_dir_path(&current_path).await {
-                            Ok(_) => continue,
-                            Err(_) => {
-                                return Err(tinyfs::Error::Other(format!(
-                                    "Path '{}' exists but is not a directory",
-                                    current_path
-                                ))
-                                .into());
-                            }
-                        }
-                    } else {
-                        _ = root.create_dir_path(&current_path).await?;
-                    }
-                }
-            } else {
-                if path_for_closure.is_empty() || path_for_closure == "/" {
-                    return Ok(());
-                }
-
-                if let Some(parent_pos) = path_for_closure.rfind('/') {
-                    let parent_path = if parent_pos == 0 {
-                        "/"
-                    } else {
-                        &path_for_closure[..parent_pos]
-                    };
-
-                    if !root.exists(parent_path).await {
-                        return Err(tinyfs::Error::not_found(format!(
-                            "Parent directory '{}' does not exist",
-                            parent_path
-                        ))
-                        .into());
-                    }
-                }
-
-                if root.exists(&path_for_closure).await {
-                    return Err(tinyfs::Error::already_exists(&path_for_closure).into());
-                }
-
-                _ = root.create_dir_path(&path_for_closure).await?;
+            if path_components.is_empty() {
+                return Ok(());
             }
-            Ok(())
-        },
-    )
+
+            let mut current_path = String::new();
+            for (i, component) in path_components.iter().enumerate() {
+                if path_for_closure.starts_with('/') || i > 0 {
+                    current_path.push('/');
+                }
+                current_path.push_str(component);
+
+                if root.exists(&current_path).await {
+                    match root.open_dir_path(&current_path).await {
+                        Ok(_) => continue,
+                        Err(_) => {
+                            return Err(tinyfs::Error::Other(format!(
+                                "Path '{}' exists but is not a directory",
+                                current_path
+                            ))
+                            .into());
+                        }
+                    }
+                } else {
+                    _ = root.create_dir_path(&current_path).await?;
+                }
+            }
+        } else {
+            if path_for_closure.is_empty() || path_for_closure == "/" {
+                return Ok(());
+            }
+
+            if let Some(parent_pos) = path_for_closure.rfind('/') {
+                let parent_path = if parent_pos == 0 {
+                    "/"
+                } else {
+                    &path_for_closure[..parent_pos]
+                };
+
+                if !root.exists(parent_path).await {
+                    return Err(tinyfs::Error::not_found(format!(
+                        "Parent directory '{}' does not exist",
+                        parent_path
+                    ))
+                    .into());
+                }
+            }
+
+            if root.exists(&path_for_closure).await {
+                return Err(tinyfs::Error::already_exists(&path_for_closure).into());
+            }
+
+            _ = root.create_dir_path(&path_for_closure).await?;
+        }
+        Ok(())
+    })
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create directory: {}", e))?;
 
@@ -132,7 +121,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize pond
-            init_command(&ship_context)
+            init_command(&ship_context, "test-host")
                 .await
                 .expect("Failed to initialize pond");
 

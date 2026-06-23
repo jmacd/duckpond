@@ -165,7 +165,7 @@ async fn export_pond_data(
 
     let export_summary = crate::common::with_write_transaction(
         &mut ship,
-        vec!["export".to_string()],
+        ship_context.command_args(),
         async |stx_guard| {
             let mut export_summary = ExportSummary::default();
 

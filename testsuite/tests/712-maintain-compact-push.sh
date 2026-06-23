@@ -36,7 +36,7 @@ mkdir -p "$REMOTE"
 
 echo "--- Step 1: producer ingest + backup add ---"
 export POND="$P1"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data >/dev/null 2>&1
 for i in 1 2 3 4; do
     printf 'compact-row-%d\n' "$i" > /tmp/712-f$i.txt
@@ -61,7 +61,7 @@ check_contains /tmp/712-verify.log "verify clean after compact" "live data match
 
 echo "--- Step 5: fresh consumer pulls (incl. compact baseline) ---"
 export POND="$P2"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up >/dev/null 2>&1
 pond pull upstream > /tmp/712-pull.log 2>&1
 check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/712-pull.log' "consumer applied bundles"

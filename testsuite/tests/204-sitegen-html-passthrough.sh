@@ -12,7 +12,7 @@ source check.sh
 
 echo "=== Experiment: Sitegen HTML Pass-Through ==="
 
-pond init
+pond init --birthplace test-host
 
 OUTDIR=/tmp/sitegen-html-test
 

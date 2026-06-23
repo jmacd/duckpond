@@ -31,7 +31,7 @@ git commit -m "Nested dirs and symlinks"
 cd /
 
 # --- Initialize pond and pull -------------------------------------------------
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}

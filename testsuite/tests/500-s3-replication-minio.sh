@@ -66,7 +66,7 @@ echo ""
 echo "=== Setting up Pond (Primary) ==="
 
 export POND=/pond1
-pond init
+pond init --birthplace test-host
 echo "[OK] Pond initialized"
 
 pond mkdir /data

@@ -6,7 +6,7 @@
 
 | Command | Purpose | Example |
 |---------|---------|---------|
-| `pond init` | Initialize a new pond | `pond init` |
+| `pond init` | Initialize a new pond | `pond init --birthplace water-prod` |
 | `pond mkdir` | Create directories | `pond mkdir /data` |
 | `pond copy` | Copy files into pond | `pond copy host:///tmp/data.csv /data/` |
 | `pond list` | List files (glob patterns) | `pond list '**/*'` |
@@ -62,10 +62,15 @@ Initialize a new pond at the path specified by `$POND`.
 
 ```bash
 export POND=/data/mypond
-pond init
+pond init --birthplace water-prod
 ```
 
 Creates the pond directory structure with Delta Lake metadata.
+
+The required `--birthplace` is an immutable label for where the pond is
+created (for example a hostname, site, or deployment name).  It is
+recorded permanently in the pond's identity metadata and shown by
+`pond status`, `pond log`, and `pond config`.
 
 ---
 

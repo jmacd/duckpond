@@ -59,7 +59,7 @@ cons_pulled() {  # remote-name -> LAST_PULLED_SEQ field
 
 echo "--- Step 1: SLOW producer (low frontier) ---"
 export POND="$SLOW"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data >/dev/null 2>&1
 pond backup add origin "file://${R_SLOW}" >/dev/null 2>&1
 printf 'slow-one\n' > /tmp/715-slow1.txt
@@ -69,7 +69,7 @@ check '[ -n "'"${SLOW1_MD5}"'" ]' "slow producer s1 md5 computed"
 
 echo "--- Step 2: FAST producer (high frontier) ---"
 export POND="$FAST"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data >/dev/null 2>&1
 pond backup add origin "file://${R_FAST}" >/dev/null 2>&1
 # Push the frontier well past the slow producer's: each copy is one
@@ -83,7 +83,7 @@ check '[ -n "'"${FAST1_MD5}"'" ]' "fast producer f1 md5 computed"
 
 echo "--- Step 3: consumer imports BOTH producers ---"
 export POND="$CONS"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond remote add slow "file://${R_SLOW}" /imports/slow >/dev/null 2>&1
 pond remote add fast "file://${R_FAST}" /imports/fast >/dev/null 2>&1
 pond pull slow > /tmp/715-pull-slow1.log 2>&1

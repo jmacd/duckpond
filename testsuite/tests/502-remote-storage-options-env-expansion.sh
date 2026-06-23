@@ -54,7 +54,7 @@ echo "[OK] bucket ready"
 
 export POND=/tmp/502-pond
 rm -rf "$POND"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir /data >/dev/null
 printf 'timestamp,sensor_id,value\n2024-01-01T00:00:00Z,s1,1.0\n2024-01-01T01:00:00Z,s1,2.0\n' > /tmp/502-data.csv
 pond copy host:///tmp/502-data.csv /data/data.csv >/dev/null

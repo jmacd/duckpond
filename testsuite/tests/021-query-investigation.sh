@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: Query Flag Investigation ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 # Create test data with clear filter boundary
 cat > /tmp/data.csv << 'EOF'

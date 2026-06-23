@@ -42,8 +42,13 @@ impl Steward {
     // -- Pond-specific constructors (wrap Ship) --
 
     /// Initialize a completely new pond.
-    pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Ok(Steward::Pond(Box::new(Ship::create_pond(pond_path).await?)))
+    pub async fn create_pond<P: AsRef<Path>>(
+        pond_path: P,
+        birthplace: impl Into<String>,
+    ) -> Result<Self, StewardError> {
+        Ok(Steward::Pond(Box::new(
+            Ship::create_pond(pond_path, birthplace).await?,
+        )))
     }
 
     /// Open an existing pond.

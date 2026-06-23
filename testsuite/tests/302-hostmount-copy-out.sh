@@ -11,7 +11,7 @@ source check.sh
 echo "=== Experiment: Copy Out via Hostmount ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 # ---------------------------------------------------------------------------
 # Setup: create test data in the pond

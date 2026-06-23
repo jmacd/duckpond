@@ -25,7 +25,6 @@ struct RecentTransaction {
     tx_kind: String,
     started_at: Option<i64>,
     final_state: Option<String>,
-    ended_at: Option<i64>,
     error_metadata: Option<String>,
     duration_ms: Option<i64>,
 }
@@ -94,10 +93,16 @@ pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> R
 
     match mode {
         ControlMode::Recent { limit } => {
-            show_recent_transactions(ship.control_table_mut(), limit).await?;
+            crate::common::with_read_transaction(&mut ship, vec!["log".to_string()], async |tx| {
+                show_recent_transactions(tx, limit).await
+            })
+            .await?;
         }
         ControlMode::Detail { txn_seq } => {
-            show_transaction_detail(ship.control_table_mut(), txn_seq).await?;
+            crate::common::with_read_transaction(&mut ship, vec!["log".to_string()], async |tx| {
+                show_transaction_detail(tx, txn_seq).await
+            })
+            .await?;
         }
         ControlMode::Incomplete => {
             show_incomplete_operations(ship.control_table_mut()).await?;
@@ -120,116 +125,193 @@ pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> R
     Ok(())
 }
 
-/// Show recent transactions with summary status
-async fn show_recent_transactions(
-    control_table: &mut steward::ControlTable,
-    limit: usize,
-) -> Result<()> {
-    // Control table automatically sees latest Delta commits via DataFusion
+/// Per-transaction operation summary, aggregated from the data Delta
+/// table.  Reads (which never write a data commit) have no entry.
+#[derive(Debug, Deserialize)]
+struct OpSummary {
+    txn_seq: i64,
+    ops: i64,
+    files: i64,
+    dirs: i64,
+    partitions: i64,
+}
 
-    control_table.print_banner();
-
-    // Use control table's SessionContext (following tlogfs pattern)
-    // This ensures we see all committed transactions via Delta's latest _delta_log
-    let ctx = control_table.session_context();
-
-    // Post-D2 lean schema lives at table "control" with columns:
-    //   pond_id, record_kind, txn_seq, txn_id,
-    //   commit_kind, has_commit_kind,
-    //   parent_seq, has_parent_seq,
-    //   duration_ms, has_duration_ms,
-    //   ts_micros, metadata_json
-    //
-    // Transaction kind is inferred from lifecycle records:
-    //   * a tx with a `data_committed` record is a "write"
-    //   * any other tx (begin -> completed/failed only) is a "read"
-    //
-    // Setting records (record_kind='setting') and post-commit records
-    // (parent_seq present) are excluded from this view.
-    let sql = format!(
-        r#"
-        WITH user_txns AS (
-            SELECT *
-            FROM control
-            WHERE record_kind <> 'setting'
-              AND NOT (has_parent_seq = true AND parent_seq <> txn_seq)
-        ),
-        recent_seqs AS (
-            SELECT DISTINCT txn_seq
-            FROM user_txns
-            WHERE txn_seq > 0
-            ORDER BY txn_seq DESC
-            LIMIT {limit}
-        )
-        SELECT
-            t.txn_seq,
-            t.txn_id,
-            CASE
-                WHEN MAX(CASE WHEN t.record_kind = 'data_committed' THEN 1 ELSE 0 END) = 1
-                    THEN 'write'
-                ELSE 'read'
-            END AS tx_kind,
-            MAX(CASE WHEN t.record_kind = 'begin' THEN t.ts_micros END) AS started_at,
-            MAX(CASE
-                WHEN t.record_kind IN ('data_committed', 'completed', 'failed')
-                    THEN t.record_kind
-            END) AS final_state,
-            MAX(CASE
-                WHEN t.record_kind IN ('data_committed', 'completed', 'failed')
-                    THEN t.ts_micros
-            END) AS ended_at,
-            MAX(CASE WHEN t.record_kind = 'failed' THEN t.metadata_json END) AS error_metadata,
-            MAX(CASE WHEN t.has_duration_ms = true THEN t.duration_ms END) AS duration_ms
-        FROM user_txns t
-        WHERE t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
-        GROUP BY t.txn_seq, t.txn_id
-        ORDER BY t.txn_seq ASC, started_at ASC
-        "#,
-        limit = limit
-    );
-
-    let df = ctx
-        .sql(&sql)
+/// Render the enriched transaction log (the `pond log` default view).
+///
+/// Combines three sources so the operator can see, at a glance, *what*
+/// each transaction did and whether it succeeded:
+///   * control table -- lifecycle (status, timing, duration, errors);
+///   * data Delta commit metadata (`pond_txn`) -- the original CLI
+///     command that produced the transaction;
+///   * data Delta table -- a count of the objects the transaction wrote.
+///
+/// Output is newest-first, matching `pond show` and `git log`.
+/// Build a map from `txn_seq` to the original CLI command (argv) by
+/// reading the `pond_txn` metadata embedded in each data Delta commit.
+/// Compaction/optimize commits carry no `pond_txn` and are skipped.
+async fn build_command_map(
+    pond: &steward::StewardTransactionGuard<'_>,
+) -> Result<std::collections::HashMap<i64, Vec<String>>> {
+    let mut command_map: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
+    let commits = pond
+        .get_commit_history(None)
         .await
-        .map_err(|e| anyhow!("Failed to query recent transactions: {}", e))?;
+        .map_err(|e| anyhow!("Failed to read commit history: {}", e))?;
+    for commit in &commits {
+        if let Some(meta) = tlogfs::PondTxnMetadata::from_delta_metadata(&commit.info) {
+            _ = command_map.insert(meta.txn_seq, meta.user.args);
+        }
+    }
+    Ok(command_map)
+}
 
-    let batches = df
-        .collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
+/// Render a stored command argv as a single canonical `pond ...` line.
+fn render_command(args: &[String]) -> String {
+    format!("pond {}", normalize_command_args(args))
+}
 
-    // Print header
+async fn show_recent_transactions(tx: &mut steward::Transaction<'_>, limit: usize) -> Result<()> {
+    use std::collections::HashMap;
+
+    // --- Phase 1: control-table lifecycle + commit-history commands ---
+    // These only need shared access to the pond guard; collect everything
+    // into owned values so the borrow ends before we reach for the data
+    // session context (which needs a mutable borrow of `tx`).
+    let (transactions, command_map) = {
+        let pond = tx
+            .as_pond()
+            .ok_or_else(|| anyhow!("`pond log` requires a pond transaction"))?;
+
+        pond.control_table().print_banner();
+
+        let ctx = pond.control_table().session_context();
+
+        // Post-D2 lean schema lives at table "control".  A transaction's
+        // kind is inferred from its lifecycle records: a tx with a
+        // `data_committed` record is a "write"; anything else is a "read".
+        // `recent_seqs` keeps only transactions that actually attempted a
+        // write (they have a `data_committed` or `failed` record), so pure
+        // reads -- including this `pond log` invocation's own in-flight read
+        // -- never appear.  Crashed/incomplete writes are surfaced
+        // separately by `pond log --incomplete`.
+        let sql = format!(
+            r#"
+            WITH user_txns AS (
+                SELECT *
+                FROM control
+                WHERE record_kind <> 'setting'
+                  AND NOT (has_parent_seq = true AND parent_seq <> txn_seq)
+            ),
+            recent_seqs AS (
+                SELECT txn_seq
+                FROM user_txns
+                WHERE txn_seq > 0
+                GROUP BY txn_seq
+                HAVING MAX(CASE WHEN record_kind IN ('data_committed', 'failed') THEN 1 ELSE 0 END) = 1
+                ORDER BY txn_seq DESC
+                LIMIT {limit}
+            )
+            SELECT
+                t.txn_seq,
+                t.txn_id,
+                CASE
+                    WHEN MAX(CASE WHEN t.record_kind = 'data_committed' THEN 1 ELSE 0 END) = 1
+                        THEN 'write'
+                    ELSE 'read'
+                END AS tx_kind,
+                MAX(CASE WHEN t.record_kind = 'begin' THEN t.ts_micros END) AS started_at,
+                MAX(CASE
+                    WHEN t.record_kind IN ('data_committed', 'completed', 'failed')
+                        THEN t.record_kind
+                END) AS final_state,
+                MAX(CASE WHEN t.record_kind = 'failed' THEN t.metadata_json END) AS error_metadata,
+                MAX(CASE WHEN t.has_duration_ms = true THEN t.duration_ms END) AS duration_ms
+            FROM user_txns t
+            WHERE t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
+            GROUP BY t.txn_seq, t.txn_id
+            ORDER BY t.txn_seq DESC, started_at DESC
+            "#,
+            limit = limit
+        );
+
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| anyhow!("Failed to query recent transactions: {}", e))?
+            .collect()
+            .await
+            .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
+
+        let mut transactions = Vec::new();
+        for batch in &batches {
+            let batch_txns: Vec<RecentTransaction> = serde_arrow::from_record_batch(batch)
+                .map_err(|e| anyhow!("Failed to deserialize transaction records: {}", e))?;
+            transactions.extend(batch_txns);
+        }
+
+        // Map txn_seq -> original CLI command from data Delta commit
+        // metadata (`pond_txn`).
+        let command_map = build_command_map(pond).await?;
+
+        (transactions, command_map)
+    };
+
+    // --- Phase 2: per-transaction operation summary from the data table ---
+    let op_map = if transactions.is_empty() {
+        HashMap::new()
+    } else {
+        let seq_list = transactions
+            .iter()
+            .map(|t| t.txn_seq.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let session = tx
+            .session_context()
+            .await
+            .map_err(|e| anyhow!("Failed to get session context: {}", e))?;
+        let sql = format!(
+            r#"
+            SELECT
+                txn_seq,
+                CAST(COUNT(*) AS BIGINT) AS ops,
+                CAST(COUNT(DISTINCT CASE WHEN file_type <> 'directory' THEN node_id END) AS BIGINT) AS files,
+                CAST(COUNT(DISTINCT CASE WHEN file_type = 'directory' THEN node_id END) AS BIGINT) AS dirs,
+                CAST(COUNT(DISTINCT part_id) AS BIGINT) AS partitions
+            FROM delta_table
+            WHERE txn_seq IN ({seq_list})
+            GROUP BY txn_seq
+            "#
+        );
+        let batches = session
+            .sql(&sql)
+            .await
+            .map_err(|e| anyhow!("Failed to query operation summary: {}", e))?
+            .collect()
+            .await
+            .map_err(|e| anyhow!("Failed to collect operation summary: {}", e))?;
+        let mut map: HashMap<i64, OpSummary> = HashMap::new();
+        for batch in &batches {
+            let rows: Vec<OpSummary> = serde_arrow::from_record_batch(batch)
+                .map_err(|e| anyhow!("Failed to deserialize operation summary: {}", e))?;
+            for row in rows {
+                _ = map.insert(row.txn_seq, row);
+            }
+        }
+        map
+    };
+
+    // --- Phase 3: render ---
     println!("\n+===========================================================================+");
-    println!("|                        RECENT TRANSACTIONS                                 |");
+    println!("|                          TRANSACTION LOG                                   |");
     println!("+===========================================================================+\n");
 
-    if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+    if transactions.is_empty() {
         println!("No transactions found.\n");
         return Ok(());
     }
 
-    // Deserialize batches into structs using serde_arrow
-    let mut transactions = Vec::new();
-    for batch in &batches {
-        let batch_txns: Vec<RecentTransaction> = serde_arrow::from_record_batch(batch)
-            .map_err(|e| anyhow!("Failed to deserialize transaction records: {}", e))?;
-        transactions.extend(batch_txns);
-    }
-
-    // Format output
-    for txn in transactions {
-        // Format timestamps
-        let started_at = txn
-            .started_at
-            .map(format_timestamp)
-            .unwrap_or_else(|| "<unknown>".to_string());
-
-        let ended_at = txn
-            .ended_at
-            .map(format_timestamp)
-            .unwrap_or_else(|| "incomplete".to_string());
-
-        // Status indicator
+    for txn in &transactions {
         let status = match txn.final_state.as_deref() {
             Some("data_committed") => "COMMITTED",
             Some("completed") => "COMPLETED",
@@ -238,51 +320,116 @@ async fn show_recent_transactions(
             None => "INCOMPLETE",
         };
 
-        // Duration
-        let duration_str = txn
+        let when = txn
+            .started_at
+            .map(format_timestamp)
+            .unwrap_or_else(|| "<unknown time>".to_string());
+        let duration = txn
             .duration_ms
             .map(|d| format!("{}ms", d))
-            .unwrap_or_else(|| "N/A".to_string());
+            .unwrap_or_else(|| "n/a".to_string());
+
+        let command = match command_map.get(&txn.txn_seq) {
+            Some(args) if !args.is_empty() => render_command(args),
+            _ if txn.tx_kind == "read" => "(read-only, no changes)".to_string(),
+            _ => "(no command recorded)".to_string(),
+        };
 
         println!(
-            "+- Transaction {} ({}) -----------------------------",
-            txn.txn_seq, txn.tx_kind
+            "+- Transaction {}  ({})  {} {}",
+            txn.txn_seq,
+            txn.tx_kind,
+            status,
+            "-".repeat(40usize.saturating_sub(status.len() + txn.tx_kind.len()))
         );
-        println!("|  Status       : {}", status);
-        println!("|  UUID         : {}", txn.txn_id);
-        println!("|  Started      : {}", started_at);
-        println!("|  Ended        : {}", ended_at);
-        println!("|  Duration     : {}", duration_str);
-        // CLI args are no longer captured in the post-D2 lean control
-        // table.  Source the original command from data Delta commit
-        // metadata (`pond_txn`) if it is needed.
+        println!("|  Command  : {}", command);
+        println!("|  When     : {}  ({})", when, duration);
+        println!("|  Changes  : {}", format_changes(op_map.get(&txn.txn_seq)));
+        println!("|  TxnID    : {}", txn.txn_id);
 
-        // Show error if present (parsed from metadata_json on Failed records)
         if let Some(reason) = txn
             .error_metadata
             .as_deref()
             .and_then(extract_failure_reason)
         {
-            println!("|  Error        : {}", truncate_error(&reason));
+            println!("|  Error    : {}", truncate_error(&reason));
         }
 
-        println!("+----------------------------------------------------------------");
-        println!();
+        println!("+----------------------------------------------------------------------------");
     }
+    println!();
 
     Ok(())
 }
 
+/// Render a human-readable change summary from an [`OpSummary`].
+fn format_changes(summary: Option<&OpSummary>) -> String {
+    let Some(s) = summary else {
+        return "(no data changes)".to_string();
+    };
+    let mut parts = Vec::new();
+    if s.files > 0 {
+        parts.push(format!("{} file{}", s.files, plural(s.files)));
+    }
+    if s.dirs > 0 {
+        parts.push(format!(
+            "{} director{}",
+            s.dirs,
+            if s.dirs == 1 { "y" } else { "ies" }
+        ));
+    }
+    let what = if parts.is_empty() {
+        "no objects".to_string()
+    } else {
+        parts.join(", ")
+    };
+    format!(
+        "{} operation{} -> {} across {} partition{}",
+        s.ops,
+        plural(s.ops),
+        what,
+        s.partitions,
+        plural(s.partitions),
+    )
+}
+
+/// Return "s" for plural counts, "" for singular.
+fn plural(n: i64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Normalize stored command args for display.  Args may or may not carry a
+/// leading binary token (legacy hand-built metadata used "pond"; the init
+/// transaction stores ["pond", "init"]; argv-based metadata strips argv[0]).
+/// Drop any leading "pond" token and re-join so the caller can prefix a
+/// single canonical "pond ".
+fn normalize_command_args(args: &[String]) -> String {
+    let rest = match args.first() {
+        Some(first) if first == "pond" => &args[1..],
+        _ => args,
+    };
+    rest.join(" ")
+}
+
 /// Show detailed lifecycle for a specific transaction
-async fn show_transaction_detail(
-    control_table: &mut steward::ControlTable,
-    txn_seq: i64,
-) -> Result<()> {
+async fn show_transaction_detail(tx: &mut steward::Transaction<'_>, txn_seq: i64) -> Result<()> {
+    let pond = tx
+        .as_pond()
+        .ok_or_else(|| anyhow!("`pond log` requires a pond transaction"))?;
+
     // Control table automatically sees latest Delta commits via DataFusion
-    control_table.print_banner();
+    pond.control_table().print_banner();
+
+    // The original CLI command for this transaction lives in the data
+    // Delta commit metadata (`pond_txn`), not the control table.
+    let command = build_command_map(pond)
+        .await?
+        .get(&txn_seq)
+        .filter(|args| !args.is_empty())
+        .map(|args| render_command(args));
 
     // Use control table's SessionContext (following tlogfs pattern)
-    let ctx = control_table.session_context();
+    let ctx = pond.control_table().session_context();
 
     // Post-D2 lean schema: post-commit records carry the parent
     // transaction's seq in `parent_seq` (with `has_parent_seq=true`).
@@ -376,9 +523,10 @@ async fn show_transaction_detail(
                 println!("|  Sequence     : {}", current_txn_seq);
                 println!("|  UUID         : {}", txn_id);
                 println!("|  Timestamp    : {}", timestamp);
-                // CLI args are not persisted in the post-D2 control table;
-                // see `pond_txn` in the data Delta commit metadata for
-                // the original command.
+                match &command {
+                    Some(cmd) => println!("|  Command      : {}", cmd),
+                    None => println!("|  Command      : (no command recorded)"),
+                }
                 println!("+----------------------------------------------------------------");
             }
             "data_committed" => {
@@ -609,9 +757,14 @@ async fn show_pond_config(control_table: &steward::ControlTable) -> Result<()> {
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
+    println!("Created by:     {}", metadata.birth_username);
     println!(
-        "Created by:     {}@{}",
-        metadata.birth_username, metadata.birth_hostname
+        "Birthplace:     {}",
+        if metadata.birthplace.is_empty() {
+            "(unspecified)"
+        } else {
+            &metadata.birthplace
+        }
     );
     println!();
     println!("Factory Modes:");

@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: List Pattern Variations ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 echo "✓ pond init succeeded"
 echo ""
 
