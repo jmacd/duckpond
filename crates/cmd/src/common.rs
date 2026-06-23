@@ -437,7 +437,15 @@ impl FileInfo {
 
         let time_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let node_id_str = format_node_id(&self.node_id.node_id());
+        // Show two provenance tags: the node's own id (unique per entry, for
+        // identity) and the owning pond's id (shared within a pond, which
+        // reveals the origin pond for cross-pond imports). This mirrors the
+        // FileID Display form `[node]@[pond]`.
+        let node_id_str = format!(
+            "{}@{}",
+            format_node_id(&self.node_id.node_id()),
+            format_node_id(&self.node_id.pond_id())
+        );
 
         let version_str = format!("v{}", self.metadata.version);
 
