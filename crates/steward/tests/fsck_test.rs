@@ -55,7 +55,7 @@ async fn write_file(ship: &mut Ship, path: &str, bytes: &[u8]) {
 async fn fsck_root_is_deterministic_and_data_sensitive() {
     init_log();
     let tmp = tempdir().expect("tempdir");
-    let mut ship = Ship::create_pond(tmp.path().join("pond"))
+    let mut ship = Ship::create_pond(tmp.path().join("pond"), "fsck-test")
         .await
         .expect("create pond");
 
@@ -111,7 +111,9 @@ async fn fsck_detects_corrupted_large_file_blob() {
     init_log();
     let tmp = tempdir().expect("tempdir");
     let pond_path = tmp.path().join("pond");
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "fsck-test")
+        .await
+        .expect("create pond");
 
     let big = pseudo_random(200_000);
     write_file(&mut ship, "/big.bin", &big).await;
