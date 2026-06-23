@@ -26,6 +26,7 @@
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
 | `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
+| `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
 | `pond restart-from-compact` | Recover a consumer past the retention horizon (D6.4) | `pond restart-from-compact origin` |
@@ -585,6 +586,64 @@ Exit code is non-zero if any remote reports a mismatch or fails to load.
 > remote, because the producer's `pond_init` transaction is replicated as
 > a normal bundle so the replica is byte-identical (P2-VERIFY-BOOTSTRAP-DRIFT,
 > fixed).
+
+---
+
+### pond fsck
+
+Local, **offline** filesystem-check.  Unlike `pond verify` (which compares
+against a *remote*), `fsck` validates the pond against itself and prints a
+single deterministic **root checksum** that exhaustively fingerprints every
+row in the data table -- across every `pond_id`, including cross-pond
+imports.
+
+```bash
+# Print the root checksum (one line, 64 hex chars)
+pond fsck
+
+# Skip the content-rehash pass; compute only the structural root (fast)
+pond fsck --quick
+
+# Per-partition breakdown + content statistics
+pond fsck --verbose
+```
+
+The root is a Merkle tree of Merkle trees:
+
+```text
+root                                  <- fold of all partition checksums
+|- partition (pond_id, part_id) -> per-partition Merkle checksum
+|  |- row leaf = blake3(serde_json(OplogEntry))
+|  +- ...
++- ...
+```
+
+It is **layout- and compaction-independent** (it hashes row content, not
+parquet file layout), so two true replicas of the same pond produce the
+**same root hex**.  Comparing two replicas is therefore a string compare:
+
+```bash
+pond fsck            # on replica A  ->  a1b2c3...
+pond fsck            # on replica B  ->  a1b2c3...   (identical iff in sync)
+```
+
+**Content-checksum pass** (default; skipped with `--quick`): the row Merkle
+commits to each file's *recorded* `blake3`, but not to the bytes it points
+at.  By default `fsck` also re-hashes inline file content and re-reads every
+external `_large_files/blake3=<hash>.parquet` blob, confirming the bytes
+match their recorded `blake3`.  This catches bit-rot / blob corruption that
+the structural root alone cannot see.
+
+Output:
+- Default: the root checksum on one line.
+- `--verbose`: `Root checksum`, a per-partition digest list, and counts of
+  rows / inline content / blobs verified, ending in `Result: OK` or
+  `Result: FAILED`.
+
+Exit code is non-zero if any content check fails; each failure is logged
+with the offending `pond_id/part_id`, node, version, and the mismatching
+`blake3`.  Because content errors are collected (not fatal on first hit),
+one corrupt blob does not hide the rest of the report.
 
 ---
 
