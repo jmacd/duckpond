@@ -7,7 +7,7 @@ set -e
 
 echo "=== Experiment: Timeseries Join with Synthetic Data ==="
 
-pond init
+pond init --birthplace test-host
 
 # --- Create the dynamic directory config inline ------------------------------
 # station_a: Jan 1–15  sine temperature (offset 20), sine pressure (offset 1013)

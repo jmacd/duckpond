@@ -63,27 +63,19 @@ pub async fn mknod_command(
 
     // mknod needs the transaction guard for tx.state() (provider context), so it
     // takes the full Transaction (not the &FS-only Steward::write_transaction).
-    crate::common::with_write_transaction(
-        &mut ship,
-        vec![
-            "mknod".to_string(),
-            factory_type_clone.clone(),
-            path_clone.clone(),
-        ],
-        async |tx| {
-            mknod_impl(
-                tx,
-                tx,
-                &path_clone,
-                &factory_type_clone,
-                stored_config_bytes.clone(),
-                expanded_content.into_bytes(),
-                overwrite,
-            )
-            .await
-            .map_err(|e| anyhow!("mknod operation failed: {}", e))
-        },
-    )
+    crate::common::with_write_transaction(&mut ship, ship_context.command_args(), async |tx| {
+        mknod_impl(
+            tx,
+            tx,
+            &path_clone,
+            &factory_type_clone,
+            stored_config_bytes.clone(),
+            expanded_content.into_bytes(),
+            overwrite,
+        )
+        .await
+        .map_err(|e| anyhow!("mknod operation failed: {}", e))
+    })
     .await?;
 
     Ok(())
@@ -215,7 +207,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize pond
-            init_command(&ship_context).await?;
+            init_command(&ship_context, "test-host").await?;
 
             Ok(Self {
                 temp_dir,

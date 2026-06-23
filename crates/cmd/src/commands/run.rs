@@ -84,12 +84,7 @@ async fn run_host_command(
 
     // Open host steward
     let mut ship = ship_context.open_host()?;
-    let tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "run".to_string(),
-            config_path.to_string(),
-        ]))
-        .await?;
+    let tx = ship.begin_write(&ship_context.command_metadata()).await?;
 
     // Read config bytes from host filesystem
     let host_path = url.path();
@@ -194,12 +189,7 @@ async fn run_pond_command(
     log::debug!("Loaded factory modes: {:?}", all_factory_modes);
 
     // Start write transaction for the entire operation
-    let mut tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "run".to_string(),
-            config_path.to_string(),
-        ]))
-        .await?;
+    let mut tx = ship.begin_write(&ship_context.command_metadata()).await?;
 
     match run_pond_command_impl(
         &mut tx,

@@ -7,7 +7,7 @@ set -e
 
 echo "=== Experiment: Mkdir Basic ==="
 
-pond init
+pond init --birthplace test-host
 echo "✓ pond init succeeded"
 
 # Create single directory

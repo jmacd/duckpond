@@ -9,7 +9,7 @@ source check.sh
 
 echo "=== Experiment: pond apply -- update and validation ==="
 
-pond init
+pond init --birthplace test-host
 
 # ==============================================================================
 # Step 1: Initial apply -- create a node

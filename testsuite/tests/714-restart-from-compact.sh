@@ -38,7 +38,7 @@ mkdir -p "$REMOTE"
 
 echo "--- Step 1: producer + compact baseline ---"
 export POND="$P1"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data >/dev/null 2>&1
 for i in 1 2 3; do
     printf 'prod-row-%d\n' "$i" > /tmp/714-f$i.txt
@@ -52,7 +52,7 @@ check '[ -n "'"${SRC_MD5}"'" ]' "producer f2 md5 computed"
 
 echo "--- Step 2: consumer own data + cross-pond import ---"
 export POND="$P2"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 printf 'consumer-private\n' > /tmp/714-own.txt
 pond mkdir -p /local >/dev/null 2>&1
 pond copy host:///tmp/714-own.txt /local/own.txt >/dev/null 2>&1

@@ -16,7 +16,7 @@ source check.sh
 
 echo "=== Experiment: Temporal-Reduce Factory Isolation ==="
 
-pond init
+pond init --birthplace test-host
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 1: Create synthetic sensor data (same as test 201)

@@ -46,7 +46,7 @@ cat /tmp/ingest.yaml
 
 echo ""
 echo "=== Initializing pond ==="
-pond init
+pond init --birthplace test-host
 
 #############################
 # CREATE FACTORY NODE

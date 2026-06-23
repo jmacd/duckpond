@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: Verify Table Default ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 # Create test data
 cat > /tmp/data.csv << 'EOF'

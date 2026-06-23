@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: CSV URL Scheme ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/data.csv << 'EOF'
 timestamp,temperature,humidity

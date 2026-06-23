@@ -20,7 +20,7 @@ if [ ! -f "$SAMPLE" ]; then
 fi
 echo "Using sample: ${SAMPLE} ($(wc -l < "$SAMPLE") lines, $(wc -c < "$SAMPLE") bytes)"
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # STEP 1: INGEST RAW DATA

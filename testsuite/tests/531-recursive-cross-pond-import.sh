@@ -129,7 +129,7 @@ echo "=== Phase 1: Pond A — init, write /data/a.txt, push to bucket-A ==="
 
 export POND=/tmp/pond-a-531
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond mkdir /data >/dev/null
 echo "from pond A" > /tmp/a-531.txt
@@ -154,7 +154,7 @@ echo "=== Phase 2: Pond B — mount A, pull, add own data, push to bucket-B ==="
 
 export POND=/tmp/pond-b-531
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstreamA "s3://${BUCKET_A}" /imports/A \
     "${s3_args[@]}" --overwrite >/dev/null
@@ -189,7 +189,7 @@ echo "=== Phase 3: Pond C — mount B, pull ==="
 
 export POND=/tmp/pond-c-531
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstreamB "s3://${BUCKET_B}" /imports/B \
     "${s3_args[@]}" --overwrite >/dev/null

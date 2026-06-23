@@ -14,7 +14,7 @@ source check.sh
 
 echo "=== Experiment: Sitegen Factory — Markdown + Maud ==="
 
-pond init
+pond init --birthplace test-host
 
 OUTDIR=/tmp/sitegen-dist
 

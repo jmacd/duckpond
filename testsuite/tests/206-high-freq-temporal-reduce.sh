@@ -8,7 +8,7 @@ source check.sh
 
 echo "=== Experiment: High-frequency temporal reduce + count verification ==="
 
-pond init
+pond init --birthplace test-host
 
 OUTDIR=/tmp/sitegen-hf-test
 

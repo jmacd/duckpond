@@ -11,7 +11,7 @@ source check.sh
 
 echo "=== Experiment: billing -- verify detects corruption ==="
 
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 # ---- Setup: a clean issued cycle ----
 

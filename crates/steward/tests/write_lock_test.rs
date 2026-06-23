@@ -48,7 +48,7 @@ async fn write_lock_blocks_concurrent_writer() -> Result<()> {
     let pond_path = temp.path().join("pond");
 
     // Create pond + first Ship.
-    let mut ship_a = Ship::create_pond(&pond_path)
+    let mut ship_a = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("create_pond: {e}"))?;
 
@@ -93,7 +93,7 @@ async fn read_transaction_emits_no_control_records() -> Result<()> {
     let pond_path = temp.path().join("pond");
     let control_path = steward::get_control_path(&pond_path);
 
-    let mut ship = Ship::create_pond(&pond_path)
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("create_pond: {e}"))?;
 

@@ -29,7 +29,7 @@ echo "Created test repo at $REPO_DIR"
 cd /
 
 # --- Initialize pond and create factory -------------------------------------
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}

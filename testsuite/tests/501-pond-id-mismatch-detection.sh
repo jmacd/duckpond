@@ -65,7 +65,7 @@ echo "--- Step 1: Create first pond, attach, and push ---"
 POND1_DIR=$(mktemp -d)
 export POND="${POND1_DIR}"
 
-pond init
+pond init --birthplace test-host
 
 # First attach auto-initializes the bucket as a fresh Delta table
 # with Pond1's pond_id as the store_id.
@@ -95,7 +95,7 @@ echo "--- Step 2: Create second pond, try to attach to same bucket ---"
 POND2_DIR=$(mktemp -d)
 export POND="${POND2_DIR}"
 
-pond init
+pond init --birthplace test-host
 
 POND2_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
 echo "Pond2 ID: ${POND2_ID}"

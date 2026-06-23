@@ -10,7 +10,7 @@ set -e
 echo "=== Experiment: CSV Workflow ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/data.csv << 'EOF'
 timestamp,temperature,humidity

@@ -7,7 +7,7 @@ set -e
 
 echo "=== Experiment: Temporal Reduce with Synthetic Data ==="
 
-pond init
+pond init --birthplace test-host
 
 # --- Create the source synthetic-timeseries -----------------------------------
 # 24 hours of data at 1-minute intervals = 1441 rows (inclusive endpoints)

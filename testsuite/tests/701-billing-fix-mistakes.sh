@@ -12,7 +12,7 @@ source check.sh
 
 echo "=== Experiment: billing -- fixing operator mistakes ==="
 
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 # ---- Setup ----
 

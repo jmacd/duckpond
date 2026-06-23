@@ -9,7 +9,7 @@ source check.sh
 
 echo "=== Experiment: Sitegen base_url ==="
 
-pond init
+pond init --birthplace test-host
 
 OUTDIR=/tmp/sitegen-baseurl-test
 

@@ -126,7 +126,7 @@ git commit -q -m "Initial sensor CSV (max temp 22.1)"
 cd /
 
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 cat > /tmp/git-dyncache.yaml << EOF
 url: file://${REPO_DIR}
 ref: main

@@ -210,7 +210,13 @@ struct RemoteAddOptions {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
-    Init,
+    Init {
+        /// Birthplace of the pond: an immutable label for where this pond
+        /// is created (for example a hostname, site, or deployment name).
+        /// Recorded permanently in the pond's identity metadata.
+        #[arg(long)]
+        birthplace: String,
+    },
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
     /// Run Delta Lake maintenance (checkpoint, vacuum, optional compaction)
@@ -530,9 +536,9 @@ async fn main() -> Result<()> {
     let started = Instant::now();
 
     let result = match cli.command {
-        Commands::Init => {
+        Commands::Init { birthplace } => {
             // Init command creates a new empty pond.
-            commands::init_command(&ship_context).await
+            commands::init_command(&ship_context, &birthplace).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially

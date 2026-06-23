@@ -14,7 +14,7 @@ source check.sh
 
 echo "=== Experiment: billing bootstrap + full cycle issuance ==="
 
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 # ==============================================================================
 # Step 1: Apply the accounts factory

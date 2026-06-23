@@ -121,7 +121,7 @@ echo ""
 echo "=== Phase 1: Pond A — multi-txn history, push ==="
 export POND=/tmp/pond-a-542
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data/sensors >/dev/null
 pond mkdir -p /data/logs >/dev/null
 
@@ -158,7 +158,7 @@ echo ""
 echo "=== Phase 2: Pond B (original) — attach + first pull ==="
 export POND=/tmp/pond-b-542
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --region us-east-1 \
@@ -194,7 +194,7 @@ check "Pond B physically removed" "[ ! -d /tmp/pond-b-542 ]"
 
 echo ""
 echo "=== Phase 4: Pond B' (fresh) — re-init, re-attach, pre-pull state ==="
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --region us-east-1 \
