@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: Table Format Storage ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/data.csv << 'EOF'
 timestamp,temperature

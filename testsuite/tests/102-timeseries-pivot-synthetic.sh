@@ -7,7 +7,7 @@ set -e
 
 echo "=== Experiment: Timeseries Pivot with Synthetic Data ==="
 
-pond init
+pond init --birthplace test-host
 
 # --- Build the full pipeline in a single dynamic-dir --------------------------
 # Layer 1: two synthetic-timeseries (station_a, station_b)

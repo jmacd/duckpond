@@ -127,7 +127,7 @@ pub async fn rebuild_control_table(
     let metadata = PondMetadata {
         pond_id: pond_id_uuid7,
         birth_timestamp,
-        birth_hostname: "unknown".to_string(),
+        birthplace: String::new(),
         birth_username: "unknown".to_string(),
     };
 

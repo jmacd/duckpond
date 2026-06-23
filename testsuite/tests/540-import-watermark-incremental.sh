@@ -126,7 +126,7 @@ echo ""
 echo "=== Phase 1: Pond A — init, populate, push ==="
 export POND=/tmp/pond-a-540
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond mkdir -p /data/sensors >/dev/null
 pond mkdir -p /data/logs >/dev/null
@@ -160,7 +160,7 @@ echo ""
 echo "=== Phase 2: Pond B — init, attach A as /imports/A ==="
 export POND=/tmp/pond-b-540
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --region us-east-1 \

@@ -42,7 +42,7 @@ async fn rebuild_control_recovers_identity_and_history() -> Result<()> {
 
     // 1) Build a pond with several write transactions.
     let (orig_pond_id, orig_last_seq) = {
-        let mut ship = Ship::create_pond(&pond_path).await?;
+        let mut ship = Ship::create_pond(&pond_path, "test-host").await?;
         write_file(&mut ship, "/a.txt", b"alpha", vec!["copy", "a.txt"]).await?;
         write_file(&mut ship, "/b.txt", b"beta", vec!["copy", "b.txt"]).await?;
         let pond_id = ship.control_table().pond_id_uuid();
@@ -114,7 +114,7 @@ async fn rebuild_control_requires_force_when_control_exists() -> Result<()> {
     let pond_path = temp.path().join("pond");
 
     {
-        let mut ship = Ship::create_pond(&pond_path).await?;
+        let mut ship = Ship::create_pond(&pond_path, "test-host").await?;
         write_file(&mut ship, "/x.txt", b"x", vec!["copy", "x.txt"]).await?;
     }
 

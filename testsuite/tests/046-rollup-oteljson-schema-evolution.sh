@@ -29,7 +29,7 @@ source check.sh
 
 echo "=== Experiment: Rollup over oteljson schema evolution ==="
 
-pond init
+pond init --birthplace test-host
 
 # ---- Setup: two oteljson files with evolving schemas ----
 #

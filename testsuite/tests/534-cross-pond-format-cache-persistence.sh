@@ -131,7 +131,7 @@ echo "=== Phase 1: Pond A (producer) — raw oteljson ingest files ==="
 
 export POND=/tmp/pond-a-534
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /ingest >/dev/null
 
 # Three independent raw oteljson files, mirroring the per-file ingest
@@ -177,7 +177,7 @@ echo ""
 echo "=== Phase 3: Pond B (consumer) — init + cross-pond pull ==="
 export POND=/tmp/pond-b-534
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 POND_ID_B=$(pond config 2>/dev/null | awk '/^Pond ID:/ {print $NF; exit}')
 check "Pond A and Pond B have distinct pond_ids" \

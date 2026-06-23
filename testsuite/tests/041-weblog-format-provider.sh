@@ -12,7 +12,7 @@ source check.sh
 echo "=== Experiment: Weblog Format Provider ==="
 
 export POND=/pond
-pond init
+pond init --birthplace test-host
 
 #############################
 # STEP 1: Create sample CLF access logs

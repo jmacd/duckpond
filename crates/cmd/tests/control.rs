@@ -33,7 +33,7 @@ impl TestSetup {
         let ship_context = ShipContext::pond_only(Some(&pond_path), init_args);
 
         // Initialize pond
-        init_command(&ship_context).await?;
+        init_command(&ship_context, "test-host").await?;
 
         Ok(TestSetup {
             _temp_dir: temp_dir,
@@ -1294,7 +1294,7 @@ async fn test_transaction_completion_records_written() {
 /// Test that replica pond preserves transaction sequence numbers from source
 ///
 /// This test verifies the fix for a bug where replica ponds had an off-by-one
-/// error in transaction sequences. The bug was caused by calling create_pond()
+/// error in transaction sequences. The bug was caused by calling create_pond("test-host")
 /// during restoration, which recorded an initial "pond init" transaction, then
 /// bundle restoration added the source's "pond init" as a second transaction.
 ///
@@ -1307,7 +1307,7 @@ async fn test_replica_preserves_transaction_sequences() {
 
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
 
-    // Part 1: Verify that create_pond() records transaction #1
+    // Part 1: Verify that create_pond("test-host") records transaction #1
     println!("\n--- Part 1: Normal pond creation ---");
     let normal_path = temp_dir.path().join("normal_pond");
     let normal_context = ShipContext::pond_only(
@@ -1316,7 +1316,7 @@ async fn test_replica_preserves_transaction_sequences() {
     );
 
     let normal_ship = normal_context
-        .create_pond()
+        .create_pond("test-host")
         .await
         .expect("Failed to create normal pond");
 

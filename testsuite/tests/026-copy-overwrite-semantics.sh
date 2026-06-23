@@ -10,7 +10,7 @@ source check.sh
 echo "=== Experiment: Copy Overwrite Semantics ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 pond mkdir -p /etc/site
 
 # --- Round 1: initial copy ---

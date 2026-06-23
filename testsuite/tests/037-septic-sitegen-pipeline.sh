@@ -31,7 +31,7 @@ INGESTED_PATH="/ingest/${INGESTED_NAME}"
 
 OUTDIR=/tmp/septic-site
 
-pond init
+pond init --birthplace test-host
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 1: Set up directory structure

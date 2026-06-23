@@ -664,7 +664,7 @@ mod tests {
                 mount_specs: Vec::new(),
                 original_args: vec!["pond".to_string(), "init".to_string()],
             };
-            init_command(&ship_context).await?;
+            init_command(&ship_context, "test-host").await?;
 
             Ok(TestSetup {
                 temp_dir,

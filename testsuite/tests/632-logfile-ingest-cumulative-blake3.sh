@@ -17,7 +17,7 @@ echo "=== Test: Logfile Ingest Cumulative BLAKE3 ==="
 echo ""
 
 export POND=/pond
-pond init
+pond init --birthplace test-host
 
 #############################
 # SETUP

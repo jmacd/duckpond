@@ -15,7 +15,7 @@ set -e
 echo "=== Experiment: OtelJSON Variable Schema Glob ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # CREATE SYNTHETIC OTELJSON FILES WITH EVOLVING SCHEMAS

@@ -15,7 +15,7 @@ async fn test_post_commit_factory_execution() -> Result<()> {
     let pond_path = temp_dir.path().join("post_commit_test_pond");
 
     // Initialize pond
-    let mut ship = Ship::create_pond(&pond_path)
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
@@ -204,7 +204,7 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
     let pond_path = temp_dir.path().join("post_commit_read_test_pond");
 
     // Initialize pond
-    let mut ship = Ship::create_pond(&pond_path)
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
@@ -276,7 +276,7 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
     let temp_dir = tempdir()?;
     let pond_path = temp_dir.path().join("post_commit_ordered_test_pond");
 
-    let mut ship = Ship::create_pond(&pond_path).await?;
+    let mut ship = Ship::create_pond(&pond_path, "test-host").await?;
 
     // Set factory mode early to prevent error logs
     ship.control_table_mut()

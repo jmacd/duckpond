@@ -43,7 +43,7 @@ backup_field() {  # name colnum
 }
 
 echo "--- Step 1: init + ingest ---"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 printf 'alpha\nbravo\ncharlie\n' > /tmp/710-a.txt
 pond copy host:///tmp/710-a.txt /a.txt >/dev/null 2>&1
 check 'pond cat /a.txt | grep -q bravo' "raw file ingested"

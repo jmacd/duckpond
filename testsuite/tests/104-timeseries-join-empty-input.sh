@@ -9,7 +9,7 @@ set -e
 
 echo "=== Experiment: Timeseries Join with a Zero-Match Input ==="
 
-pond init
+pond init --birthplace test-host
 
 # --- Dynamic directory config ------------------------------------------------
 # station_a (scope StationA) and station_b (scope StationB) both exist.

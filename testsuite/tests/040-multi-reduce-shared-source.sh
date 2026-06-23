@@ -20,7 +20,7 @@ set -e
 echo "=== Experiment: Multi-Reduce Shared Source ==="
 echo ""
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # CREATE SYNTHETIC OTELJSON FILES

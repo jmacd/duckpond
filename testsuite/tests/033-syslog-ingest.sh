@@ -11,7 +11,7 @@ echo "=== Experiment: Syslog Ingest with logfile-ingest ==="
 echo ""
 
 export POND=/pond
-pond init
+pond init --birthplace test-host
 
 #############################
 # STEP 1: Configure rsyslog and logrotate

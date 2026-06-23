@@ -104,7 +104,7 @@ echo "=== Phase 1: Pond setup + push ==="
 
 export POND=/pond1
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 pond mkdir -p /data
 
 # Create three files of varying sizes -- all under the 64KB large-file

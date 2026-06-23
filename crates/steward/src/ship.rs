@@ -67,8 +67,14 @@ impl std::fmt::Display for CollapseReport {
 impl Ship {
     /// Initialize a completely new pond with proper transaction #1.
     ///
+    /// `birthplace` is a user-asserted, immutable label for where the pond
+    /// was created (recorded in the pond's identity metadata).
+    ///
     /// Use `open_pond()` to work with ponds that already exist.
-    pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
+    pub async fn create_pond<P: AsRef<Path>>(
+        pond_path: P,
+        birthplace: impl Into<String>,
+    ) -> Result<Self, StewardError> {
         let meta = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
 
         // Create infrastructure (includes root directory initialization with txn_seq=1)
@@ -78,6 +84,7 @@ impl Ship {
             true,
             Some(meta.clone()),
             None, // No preserved metadata for fresh pond
+            Some(birthplace.into()),
         )
         .await?;
 
@@ -146,13 +153,13 @@ impl Ship {
         // Report pond identity (already set by create_infrastructure)
         let metadata = ship.control_table.pond_metadata().clone();
         info!(
-            "Pond created with ID: {} at {} by {}@{}",
+            "Pond created with ID: {} at {} by {} (birthplace: {})",
             metadata.pond_id,
             chrono::DateTime::from_timestamp_micros(metadata.birth_timestamp)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
             metadata.birth_username,
-            metadata.birth_hostname
+            metadata.birthplace
         );
 
         // Set default factory modes for primary pond
@@ -168,11 +175,11 @@ impl Ship {
 
     /// Create pond infrastructure for bundle restoration (replication/backup restore).
     ///
-    /// Unlike `create_pond()`, this creates the pond structure WITHOUT recording
+    /// Unlike `create_pond("test-host")`, this creates the pond structure WITHOUT recording
     /// the initial transaction #1. The first bundle will create txn_seq=1 with
     /// the original command metadata from the source pond.
     ///
-    /// Use this ONLY when restoring from bundles. Use `create_pond()` for normal initialization.
+    /// Use this ONLY when restoring from bundles. Use `create_pond("test-host")` for normal initialization.
     ///
     /// # Arguments
     /// * `pond_path` - Path to the pond directory
@@ -249,7 +256,7 @@ impl Ship {
 
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Self::create_infrastructure(pond_path, false, None, None).await
+        Self::create_infrastructure(pond_path, false, None, None, None).await
     }
 
     /// Internal method to create just the filesystem infrastructure.
@@ -271,6 +278,7 @@ impl Ship {
         create_new: bool,
         txn_metadata: Option<PondUserMetadata>,
         preserve_metadata: Option<PondMetadata>,
+        birthplace: Option<String>,
     ) -> Result<Self, StewardError> {
         let data_path = get_data_path(pond_path.as_ref());
         let control_path = get_control_path(pond_path.as_ref());
@@ -297,7 +305,10 @@ impl Ship {
             // the control table (cache) and, implicitly via the upcoming root
             // initialization, the data table (canonical).
             assert!(preserve_metadata.is_none());
-            let metadata = PondMetadata::default();
+            let metadata = PondMetadata {
+                birthplace: birthplace.unwrap_or_default(),
+                ..PondMetadata::default()
+            };
             let pond_id = metadata.pond_id.to_string();
             debug!(
                 "Creating control table with pond identity: {}",
@@ -326,7 +337,7 @@ impl Ship {
                         );
                         // Auto-heal: rewrite the control cache to match the
                         // canonical data-table value.  Birth metadata (timestamp,
-                        // hostname, username) is preserved from the existing
+                        // birthplace, username) is preserved from the existing
                         // control cache - those fields live only there.
                         let healed = PondMetadata {
                             pond_id: from_data.parse::<uuid7::Uuid>().map_err(|e| {
@@ -336,7 +347,7 @@ impl Ship {
                                 ))
                             })?,
                             birth_timestamp: ct.pond_metadata().birth_timestamp,
-                            birth_hostname: ct.pond_metadata().birth_hostname.clone(),
+                            birthplace: ct.pond_metadata().birthplace.clone(),
                             birth_username: ct.pond_metadata().birth_username.clone(),
                         };
                         ct.set_pond_metadata(&healed).await?;
@@ -1127,6 +1138,7 @@ impl Ship {
             true,
             Some(txn_meta.clone()),
             None, // No preserved metadata for fresh pond
+            None, // birthplace unset for this legacy constructor
         )
         .await?;
 
@@ -1255,7 +1267,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization code (same as pond init)
-        let ship = Ship::create_pond(&pond_path)
+        let ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to initialize pond");
 
@@ -1284,7 +1296,7 @@ mod tests {
         let pond_path = temp_dir.path().join("pond");
 
         // Create a fresh pond; both tables will agree on the same pond_id.
-        let ship = Ship::create_pond(&pond_path)
+        let ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("create_pond failed");
         let canonical_id = ship.control_table.pond_metadata().pond_id.to_string();
@@ -1340,7 +1352,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use the same constructor as production (pond init)
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to initialize pond");
 
@@ -1368,7 +1380,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Use production initialization (pond init) - this creates version 0
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to initialize pond");
 
@@ -1419,7 +1431,7 @@ mod tests {
 
         // FIRST: Create a properly initialized pond and simulate a crash scenario
         {
-            let mut ship = Ship::create_pond(&pond_path)
+            let mut ship = Ship::create_pond(&pond_path, "test-host")
                 .await
                 .expect("Failed to create ship");
 
@@ -1530,7 +1542,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create ship");
 
@@ -1575,7 +1587,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create ship");
 
@@ -1592,7 +1604,7 @@ mod tests {
 
         // Step 1: Initialize pond using production code (pond init)
         {
-            let _ship = Ship::create_pond(&pond_path)
+            let _ship = Ship::create_pond(&pond_path, "test-host")
                 .await
                 .expect("Failed to initialize pond");
         }
@@ -1739,7 +1751,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create ship");
 
@@ -1786,7 +1798,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond_new_api");
 
         // Initialize a new pond
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -1824,7 +1836,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond_sequences");
 
         // Initialize pond - this creates root directory with txn_seq=1
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -1891,7 +1903,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_root_version");
 
         // Initialize pond
-        let ship = Ship::create_pond(&pond_path)
+        let ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -1932,7 +1944,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_dir_tree");
 
         // Initialize pond
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -2035,7 +2047,7 @@ mod tests {
 
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond_collapse");
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -2135,7 +2147,7 @@ mod tests {
 
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond_multi_collapse");
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to create pond");
 
@@ -2194,7 +2206,9 @@ mod tests {
     async fn test_control_log_cleanup_bounds_delta_log() {
         let temp_dir = tempdir().expect("temp dir");
         let pond_path = temp_dir.path().join("test_pond");
-        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
+            .await
+            .expect("create pond");
 
         // Drive enough write transactions to accumulate control commit JSONs
         // well past a checkpoint boundary.

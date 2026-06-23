@@ -35,7 +35,7 @@ rm -rf "$POND"
 pond_id() { pond config 2>/dev/null | grep -iE "pond[ _]?id" | grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" | head -1; }
 
 echo "--- Step 1: init + writes ---"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 for i in 1 2 3; do
     printf 'rc-row-%d\n' "$i" > /tmp/713-f$i.txt
     pond copy host:///tmp/713-f$i.txt /f$i.txt >/dev/null 2>&1
