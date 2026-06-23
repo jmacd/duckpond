@@ -417,6 +417,7 @@ mod tests {
                 base_url: "/test/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![ExportStage {
@@ -595,6 +596,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],

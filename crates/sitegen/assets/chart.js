@@ -129,6 +129,17 @@
     activeDays = 0.5;
   }
 
+  // A site may pin an explicit default range via `data-default-range` on the
+  // chart container (sitegen `site.default_range`, e.g. "1M"). When the label
+  // resolves to a known range it overrides the adaptive default; otherwise the
+  // adaptive value stands. The clamp to `visibleRanges` below still applies, so
+  // a pinned range wider than the data falls back to the largest that fits.
+  const defaultRangeLabel = container.dataset.defaultRange;
+  if (defaultRangeLabel) {
+    const match = ranges.find(([label]) => label === defaultRangeLabel);
+    if (match) activeDays = match[1];
+  }
+
   // Only show buttons whose window fits within the data span (with a small
   // margin — show the button if data covers at least 50% of the window).
   const visibleRanges = ranges.filter(([, days]) => days <= dataSpanDays * 2);

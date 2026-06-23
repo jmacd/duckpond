@@ -66,6 +66,7 @@ site:
   title: "Noyo Harbor Blue Economy"
   base_url: "/"
   site_url: "https://example.com"             # Required for RSS feed generation
+  default_range: "1M"                          # Optional: pin the chart duration default (e.g. 1M, 3M, 24h)
 
 # Export stages - specify what data to export and how
 # These run first, producing file manifests with auto-computed temporal partitioning

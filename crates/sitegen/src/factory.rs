@@ -1628,6 +1628,7 @@ fn generate_site(
             metric_captions: config.metric_captions.clone(),
             pond_statuses: pond_statuses.clone(),
             generated_at: generated_at.to_string(),
+            default_range: config.site.default_range.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1849,6 +1850,7 @@ fn render_partial(
                 metric_captions: config.metric_captions.clone(),
                 pond_statuses: pond_statuses.clone(),
                 generated_at: generated_at.to_string(),
+                default_range: config.site.default_range.clone(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
@@ -2024,6 +2026,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: Some("https://example.com".to_string()),
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],
@@ -2150,6 +2153,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],

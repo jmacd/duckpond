@@ -218,6 +218,12 @@ pub struct SiteMeta {
     /// If absent, the GitHub icon is omitted.
     #[serde(default)]
     pub github_url: Option<String>,
+    /// Default time-range button selected when a chart first loads, given as
+    /// one of the chart.js duration labels such as "1M", "3M" or "24h". When
+    /// absent, chart.js falls back to its adaptive default based on the data
+    /// span. The value is clamped to the ranges that fit the available data.
+    #[serde(default)]
+    pub default_range: Option<String>,
 }
 
 /// RSS feed configuration (optional section in site.yaml).
