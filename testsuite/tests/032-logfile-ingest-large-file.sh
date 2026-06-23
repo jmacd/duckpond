@@ -14,7 +14,7 @@ echo ""
 # Use a fixed pond location to preserve state between runs
 export POND=/pond
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # SETUP - Create 100KB log file (above 64KB threshold)

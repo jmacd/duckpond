@@ -129,7 +129,7 @@ echo ""
 echo "=== Phase 2: Setup Pond1 (Primary) ==="
 
 export POND=/pond1
-pond init
+pond init --birthplace test-host
 pond mkdir -p /data/metrics
 pond mkdir -p /system/run
 
@@ -177,7 +177,7 @@ echo ""
 echo "=== Phase 4: Setup Pond2 (Cross-Pond Replica) ==="
 
 export POND=/pond2
-pond init
+pond init --birthplace test-host
 
 # Cross-pond import: store_id from the remote MUST differ from Pond2's
 # fresh pond_id; first pull materializes the /imports/origin mount entry.

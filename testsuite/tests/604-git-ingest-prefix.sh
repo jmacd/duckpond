@@ -41,7 +41,7 @@ cd /
 # --- Test 1: prefix = "site" ------------------------------------------------
 echo ""
 echo "--- Test 1: prefix=site ---"
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-prefix1.yaml << EOF
 url: file://${REPO_DIR}

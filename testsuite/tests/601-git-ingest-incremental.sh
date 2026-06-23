@@ -27,7 +27,7 @@ git commit -m "Initial commit"
 cd /
 
 # --- Initialize pond and do first pull ---------------------------------------
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}

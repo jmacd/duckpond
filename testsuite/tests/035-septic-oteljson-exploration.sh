@@ -23,7 +23,7 @@ if [ ! -f "$SAMPLE" ]; then
 fi
 echo "Using sample: ${SAMPLE} ($(wc -l < "$SAMPLE") lines)"
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # INGEST THE SAMPLE DATA

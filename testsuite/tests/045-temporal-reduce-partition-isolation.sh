@@ -21,7 +21,7 @@ set -e
 
 echo "=== Experiment: temporal-reduce partition isolation ==="
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # TWO SOURCE FILES, DISJOINT EXTRA COLUMNS, DISTINCT OUTPUT PARTITIONS

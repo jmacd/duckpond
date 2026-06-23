@@ -35,7 +35,7 @@ echo "Created test repo at $REPO_DIR"
 cd /
 
 # --- Initialize pond and create git-ingest factory ---------------------------
-pond init
+pond init --birthplace test-host
 
 cat > /tmp/git-csv.yaml << EOF
 url: file://${REPO_DIR}

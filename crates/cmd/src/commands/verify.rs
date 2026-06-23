@@ -17,6 +17,7 @@
 //! When invoked without `name`, every attached remote is verified.
 //! Each remote is processed independently; one failure does not halt
 //! the others.
+#![allow(clippy::print_stdout)]
 
 use crate::commands::remote::{list_remote_names, load_remote_attachment};
 use crate::common::ShipContext;
@@ -36,7 +37,7 @@ pub async fn verify_command(ship_context: &ShipContext, name: Option<String>) ->
     };
 
     if targets.is_empty() {
-        log::info!("no remotes attached; nothing to verify");
+        println!("No remotes attached; nothing to verify.");
         return Ok(());
     }
 
@@ -113,19 +114,19 @@ fn print_report(name: &str, report: &RemoteVerifyReport) {
             seq
         ),
     };
-    log::info!("{}", header);
+    println!("{}", header);
 
     for m in &report.mismatches {
         match (&m.consumer_live, &m.remote_recorded) {
-            (Some(_), None) => log::info!(
+            (Some(_), None) => println!(
                 "  partition `{}`: present locally, absent on remote",
                 m.partition
             ),
-            (None, Some(_)) => log::info!(
+            (None, Some(_)) => println!(
                 "  partition `{}`: present on remote, absent locally",
                 m.partition
             ),
-            (Some(_), Some(_)) => log::info!(
+            (Some(_), Some(_)) => println!(
                 "  partition `{}`: checksums differ between local and remote",
                 m.partition
             ),
@@ -134,11 +135,11 @@ fn print_report(name: &str, report: &RemoteVerifyReport) {
     }
 
     if let Some(boundary) = report.divergence_boundary {
-        log::info!(
+        println!(
             "  divergence boundary: consumer last agreed with remote at seq={} (drift began after)",
             boundary
         );
     } else if !report.ok && report.remote_latest_seq.is_some() {
-        log::info!("  divergence boundary: no prior bundle in remote history agrees with consumer");
+        println!("  divergence boundary: no prior bundle in remote history agrees with consumer");
     }
 }

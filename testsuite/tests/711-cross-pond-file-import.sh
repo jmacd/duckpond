@@ -47,7 +47,7 @@ remote_last_pulled() {  # name
 
 echo "--- Step 1: producer ingest + backup add (auto-push) ---"
 export POND="$P1"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond mkdir -p /data >/dev/null 2>&1
 printf 'p1-one\np1-two\n'   > /tmp/711-f1.txt
 printf 'p1-three\np1-four\n' > /tmp/711-f2.txt
@@ -59,7 +59,7 @@ check '[ -n "'"${F1_MD5}"'" ]' "producer f1 md5 computed"
 
 echo "--- Step 2: consumer cross-pond import + pull ---"
 export POND="$P2"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up > /tmp/711-add.log 2>&1
 check_contains /tmp/711-add.log "remote add reports pull mount" "mode=pull, mount=/imports/up"
 pond pull upstream > /tmp/711-pull1.log 2>&1

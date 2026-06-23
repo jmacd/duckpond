@@ -25,7 +25,7 @@ echo ""
 echo "=== Setting up Pond1 (Log Collector) ==="
 
 export POND=/pond1
-pond init
+pond init --birthplace test-host
 echo "✓ Pond1 initialized at ${POND}"
 
 # Create log directory structure
@@ -77,7 +77,7 @@ echo ""
 echo "=== Setting up Pond2 (Observer) ==="
 
 export POND=/pond2
-pond init
+pond init --birthplace test-host
 echo "✓ Pond2 initialized at ${POND}"
 
 pond mkdir /observations

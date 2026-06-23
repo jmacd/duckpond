@@ -31,7 +31,7 @@ mkdir -p "$REMOTE"
 
 echo "--- Step 1: producer accumulates a multi-version series file ---"
 export POND="$P1"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 mkdir -p /var/log/app717
 cat > /tmp/717-ingest.yaml << 'EOF'
@@ -70,7 +70,7 @@ check_contains /tmp/717-verify.log "verify clean after collapse" "live data matc
 
 echo "--- Step 6: fresh consumer pulls and reproduces content ---"
 export POND="$P2"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up >/dev/null 2>&1
 pond pull upstream > /tmp/717-pull.log 2>&1
 check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/717-pull.log' "consumer applied bundles"

@@ -107,7 +107,7 @@ echo "=== Phase 1: Pond A (producer) — init and populate ==="
 
 export POND=/tmp/pond-a
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond mkdir /data >/dev/null
 pond mkdir /data/nested >/dev/null
@@ -183,7 +183,7 @@ echo "=== Phase 3: Pond B (consumer) — init and write local data ==="
 
 export POND=/tmp/pond-b
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 POND_ID_B=$(pond config 2>/dev/null | awk '/^Pond ID:/ {print $NF; exit}')
 echo "Pond B pond_id: ${POND_ID_B}"

@@ -111,7 +111,7 @@ echo "=== Phase 1: Pond1 attach + push ==="
 
 export POND=/pond1
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 
 POND1_ID=$(pond config | grep "Pond ID" | awk '{print $NF}')
 echo "Pond1 ID: ${POND1_ID}"
@@ -179,7 +179,7 @@ echo "=== Phase 3: Pond2 attaches same URL, bucket auto-inits ==="
 
 export POND=/pond2
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 
 POND2_ID=$(pond config | grep "Pond ID" | awk '{print $NF}')
 echo "Pond2 ID: ${POND2_ID}"
@@ -208,7 +208,7 @@ echo "=== Phase 4: Pond3 attach to occupied bucket should fail ==="
 
 export POND=/pond3
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 
 POND3_ID=$(pond config | grep "Pond ID" | awk '{print $NF}')
 echo "Pond3 ID: ${POND3_ID}"

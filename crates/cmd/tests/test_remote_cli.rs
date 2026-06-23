@@ -101,7 +101,7 @@ async fn pond_remote_push_pull_roundtrip() {
 
     // 1) Source pond + one user write transaction.
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
     write_small_file(
         &src_ctx,
         "/hello.txt",
@@ -256,7 +256,7 @@ async fn pond_remote_push_pull_large_file_roundtrip() {
 
     // 1) Source pond + one user write transaction.
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
     write_small_file(&src_ctx, "/big.bin", &big, vec!["copy", "big.bin"])
         .await
         .expect("write big.bin");
@@ -367,7 +367,7 @@ async fn pond_push_no_remotes_is_noop() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     push_command(&ctx, None).await.expect("push noop");
 }
 
@@ -378,7 +378,7 @@ async fn pond_pull_no_remotes_is_noop() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     pull_command(&ctx, None).await.expect("pull noop");
 }
 
@@ -396,7 +396,7 @@ async fn pond_verify_ok_after_push() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     write_small_file(&ctx, "/v.txt", b"verify me", vec!["copy", "v.txt"])
         .await
         .expect("write v.txt");
@@ -446,7 +446,7 @@ async fn pond_verify_no_remotes_is_noop() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     verify_command(&ctx, None).await.expect("verify noop");
 }
 
@@ -457,7 +457,7 @@ async fn pond_status_fresh_pond() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     status_command(&ctx).await.expect("status fresh");
 }
 
@@ -473,7 +473,7 @@ async fn pond_status_with_backup() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     write_small_file(&ctx, "/s.txt", b"status", vec!["copy", "s.txt"])
         .await
         .expect("write s.txt");
@@ -522,7 +522,7 @@ async fn pond_restart_from_compact_no_restart_point() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     write_small_file(&ctx, "/r.txt", b"restart", vec!["copy", "r.txt"])
         .await
         .expect("write r.txt");
@@ -589,7 +589,7 @@ async fn pond_remote_add_rejects_duplicate() {
     std::fs::create_dir_all(&remote_b).expect("mkdir remote_b");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_backup_command(
         &ctx, "origin", &url_a, false, None, None, None, None, false, false,
@@ -632,7 +632,7 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
 
     // 1) Source pond.
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
 
     // 2) Create the remote bucket as a fresh Delta table.
     let store_id = {
@@ -729,7 +729,7 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
 
     // Create the bucket so any erroneous push would actually succeed
     // and update the watermark; the test would catch that.
@@ -796,7 +796,7 @@ async fn pond_remote_add_auto_initializes_fresh_remote() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
 
     // No Remote::create_at_url call here -- add_backup_command must do it.
     add_backup_command(
@@ -861,7 +861,7 @@ async fn pond_remote_add_push_refuses_foreign_store_id() {
         .expect("create foreign remote");
 
     let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&src_ctx).await.expect("init src");
+    init_command(&src_ctx, "test-host").await.expect("init src");
 
     let err = add_backup_command(
         &src_ctx,
@@ -898,7 +898,7 @@ async fn pond_remote_add_pull_refuses_empty_remote() {
     std::fs::create_dir_all(&remote_path).expect("mkdir empty remote");
 
     let dst_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&dst_ctx).await.expect("init dst");
+    init_command(&dst_ctx, "test-host").await.expect("init dst");
 
     let err = add_remote_command(
         &dst_ctx,
@@ -948,7 +948,7 @@ async fn pond_remote_add_persists_mount_path() {
         .expect("init upstream");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     // Pull attach with an explicit non-root mount path.
     add_remote_command(
@@ -1034,7 +1034,7 @@ async fn pond_backup_add_bidirectional_records_both_mode() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_backup_command(
         &ctx,
@@ -1072,7 +1072,7 @@ async fn pond_remote_add_rejects_relative_mount_path() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     let err = add_remote_command(
         &ctx,
@@ -1115,7 +1115,7 @@ async fn pond_remote_remove_clears_mount_path_key() {
         .expect("create foreign remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -1167,7 +1167,7 @@ async fn pond_remote_add_root_path_refuses_foreign_store_id() {
         .expect("create foreign remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     let err = add_remote_command(
         &ctx,
@@ -1207,7 +1207,7 @@ async fn pond_remote_add_nonroot_path_refuses_matching_store_id() {
     // with the same store_id (simulating a self-mirror -- which is
     // valid for `/` but invalid for a non-root mount).
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     let local_id = {
         let ship = ctx.open_pond().await.expect("open");
         ship.control_table().pond_id_uuid()
@@ -1260,7 +1260,7 @@ async fn cross_pond_pull_materializes_mount_entry() {
 
     // 1) Pond A: init + write a file.
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     write_small_file(
         &a_ctx,
         "/sensor.txt",
@@ -1299,7 +1299,7 @@ async fn cross_pond_pull_materializes_mount_entry() {
 
     // 3) Pond B: init (gets its own distinct pond_id).
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     let b_pond_id = {
         let ship = b_ctx.open_pond().await.expect("open B");
         ship.control_table().pond_id_uuid()
@@ -1397,7 +1397,7 @@ async fn cross_pond_pull_does_not_inflate_local_seq() {
 
     // 1) Pond A: init (seq 1) + four writes (seq 2..5) so A's frontier is high.
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     for i in 0..4 {
         write_small_file(
             &a_ctx,
@@ -1443,7 +1443,7 @@ async fn cross_pond_pull_does_not_inflate_local_seq() {
 
     // 3) Pond B: init -> local seq 1.
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     let b_seq_before = {
         let mut ship = b_ctx.open_pond().await.expect("open B");
         ship.as_pond_mut().expect("pond steward").last_write_seq()
@@ -1526,7 +1526,7 @@ async fn foreign_mount_writes_are_refused() {
 
     // Set up A with a small file and push to remote.
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     write_small_file(&a_ctx, "/data.txt", b"upstream", vec!["copy", "data.txt"])
         .await
         .expect("write data.txt on A");
@@ -1558,7 +1558,7 @@ async fn foreign_mount_writes_are_refused() {
 
     // B pulls A as a cross-pond import.
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     add_remote_command(
         &b_ctx,
         "upstream",
@@ -1660,7 +1660,7 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
     //    /system/run/ directory has a real dynamic-node entry that
     //    cross-pond import will replicate to B.
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     let a_pond_id = {
         let ship = a_ctx.open_pond().await.expect("open A");
         ship.control_table().pond_id_uuid()
@@ -1708,7 +1708,7 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
 
     // 2) Pond B: init.
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
 
     // 3) B cross-pond-imports A at /imports/upstream.
     add_remote_command(
@@ -1797,7 +1797,7 @@ async fn pond_remote_remove_detach_preserves_mount_entry() {
 
     // Set up A with a file, push to remote.
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     write_small_file(&a_ctx, "/blob.txt", b"keep me", vec!["copy", "blob.txt"])
         .await
         .expect("write blob.txt on A");
@@ -1829,7 +1829,7 @@ async fn pond_remote_remove_detach_preserves_mount_entry() {
 
     // B cross-pond-imports A and pulls.
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     add_remote_command(
         &b_ctx,
         "upstream",
@@ -1911,7 +1911,7 @@ async fn pond_remote_remove_purge_drops_mount_entry() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     write_small_file(&a_ctx, "/blob.txt", b"keep me", vec!["copy", "blob.txt"])
         .await
         .expect("write blob.txt on A");
@@ -1942,7 +1942,7 @@ async fn pond_remote_remove_purge_drops_mount_entry() {
         .expect("push from A");
 
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     add_remote_command(
         &b_ctx,
         "upstream",
@@ -2015,7 +2015,7 @@ async fn pond_backup_remove_purge_is_no_op_for_mount() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
     let pond_id = {
         let ship = ctx.open_pond().await.expect("open");
         ship.control_table().pond_id_uuid()
@@ -2087,7 +2087,7 @@ async fn pond_remote_add_refuses_duplicate_mount_path() {
         .expect("create remote b");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -2150,7 +2150,7 @@ async fn pond_remote_add_refuses_duplicate_mount_path_trailing_slash() {
         .expect("create remote b");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -2205,7 +2205,7 @@ async fn pond_remote_add_refuses_duplicate_foreign_store_id() {
         .expect("create remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -2261,7 +2261,7 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
         .expect("create remote");
 
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx).await.expect("init");
+    init_command(&ctx, "test-host").await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -2339,7 +2339,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
 
     // --- Pond A: init + write + push to A's bucket. -----------------
     let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
-    init_command(&a_ctx).await.expect("init A");
+    init_command(&a_ctx, "test-host").await.expect("init A");
     write_small_file(&a_ctx, "/a.txt", b"from pond A", vec!["copy", "a.txt"])
         .await
         .expect("write a.txt on A");
@@ -2362,7 +2362,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
 
     // --- Pond B: init + mount A + pull + own write + push to B. -----
     let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
-    init_command(&b_ctx).await.expect("init B");
+    init_command(&b_ctx, "test-host").await.expect("init B");
     add_remote_command(
         &b_ctx,
         "upstreamA",
@@ -2410,7 +2410,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
 
     // --- Pond C: init + mount B + pull. ------------------------------
     let c_ctx = ctx_for(&c_pond, vec!["pond", "init"]);
-    init_command(&c_ctx).await.expect("init C");
+    init_command(&c_ctx, "test-host").await.expect("init C");
     let c_pond_id = {
         let ship = c_ctx.open_pond().await.expect("open C");
         ship.control_table().pond_id_uuid()

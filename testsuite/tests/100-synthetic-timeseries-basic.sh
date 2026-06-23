@@ -6,7 +6,7 @@ set -e
 
 echo "=== Experiment: Synthetic Timeseries Factory ==="
 
-pond init
+pond init --birthplace test-host
 
 # --- Create the factory config inside the container --------------------------
 cat > /tmp/synth.yaml << 'EOF'

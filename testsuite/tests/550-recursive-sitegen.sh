@@ -94,7 +94,7 @@ echo ""
 echo "=== Phase 1: Pond A — data + sitegen factory + standalone build ==="
 export POND=/tmp/pond-a-550
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 # Synthetic sensors (parents of dynamic-dir)
 cat > /tmp/sensors.yaml << 'YAML'
@@ -254,7 +254,7 @@ echo ""
 echo "=== Phase 2: Pond B — attach producer, install top-level sitegen ==="
 export POND=/tmp/pond-b-550
 rm -rf "${POND}"
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 pond remote add upstream "s3://${BUCKET_NAME}" /sources/producer \
     --region us-east-1 \

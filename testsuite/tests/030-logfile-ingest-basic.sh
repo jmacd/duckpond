@@ -15,7 +15,7 @@ echo ""
 # Use a fixed pond location to preserve state between runs
 export POND=/pond
 
-pond init
+pond init --birthplace test-host
 
 #############################
 # SETUP HOST LOG FILES

@@ -8,7 +8,7 @@ source check.sh
 
 echo "=== Experiment: pond apply -- init ==="
 
-pond init
+pond init --birthplace test-host
 
 # ==============================================================================
 # Step 1: Create config files with k8s-style format
@@ -90,11 +90,11 @@ echo "--- Step 4: Verify transaction log ---"
 LOG_OUT=$(pond log --limit 5)
 echo "$LOG_OUT"
 
-# Post-D2 the control table no longer stores `cli_args`, so `pond log` cannot
-# print the originating command name.  Assert instead that the first apply
-# produced a committed write transaction (the second apply is idempotent and
-# rolls back without committing).
+# `pond log` now reconstructs the originating CLI command from the data
+# Delta commit metadata (`pond_txn`), so the apply command appears in the
+# log.  Assert the write transaction committed and the command is shown.
 check 'echo "$LOG_OUT" | grep -q "(write)"' "transaction log contains a write transaction"
 check 'echo "$LOG_OUT" | grep -q "COMMITTED"' "transaction log contains a COMMITTED transaction"
+check 'echo "$LOG_OUT" | grep -q "Command  : pond apply"' "transaction log shows the apply command"
 
 check_finish

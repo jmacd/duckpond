@@ -16,7 +16,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
     debug!("=== Testing Delta Lake version progression ===");
 
     // Initialize pond
-    let mut ship = Ship::create_pond(&pond_path)
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
@@ -77,7 +77,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     debug!("=== Inspecting Delta Lake table versions directly ===");
 
     // Initialize pond
-    let _ship = Ship::create_pond(&pond_path)
+    let _ship = Ship::create_pond(&pond_path, "test-host")
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 

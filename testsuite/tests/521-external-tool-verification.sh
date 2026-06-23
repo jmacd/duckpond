@@ -110,7 +110,7 @@ echo "=== Phase 1: Pond setup + push ==="
 
 export POND=/pond1
 rm -rf "${POND}"
-pond init
+pond init --birthplace test-host
 pond mkdir -p /data
 
 # A small text file -- guarantees one source parquet whose chunk_count = 1.

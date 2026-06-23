@@ -291,7 +291,7 @@ async fn copy_directory_recursive(
 
     pond_ship
         .write_transaction(
-            &steward::PondUserMetadata::new(vec!["copy-recursive".to_string()]),
+            &ship_context.command_metadata(),
             async |fs| {
                 let root = fs.root().await?;
 
@@ -478,7 +478,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
 
     // Use scoped write transaction on the pond side
     pond_ship.write_transaction(
-        &steward::PondUserMetadata::new(vec!["copy".to_string(), dest.clone()]),
+        &ship_context.command_metadata(),
         async |pond_fs| {
             let pond_root = pond_fs.root().await?;
 
@@ -915,7 +915,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
-            init_command(&ship_context).await?;
+            init_command(&ship_context, "test-host").await?;
 
             Ok(TestSetup {
                 pond_path,
@@ -1678,7 +1678,7 @@ mod tests {
         );
 
         // Initialize the pond
-        init_command(&ship_context).await?;
+        init_command(&ship_context, "test-host").await?;
 
         // Copy using relative path: host:///file.txt resolves to host_files_dir/file.txt
         copy_command(

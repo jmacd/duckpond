@@ -24,7 +24,7 @@ source check.sh
 echo "=== Experiment: data:series version collapse ==="
 
 export POND=/pond
-pond init >/dev/null
+pond init --birthplace test-host >/dev/null
 
 mkdir -p /var/log/app
 cat > /tmp/716-ingest.yaml << 'EOF'

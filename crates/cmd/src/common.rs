@@ -67,6 +67,24 @@ impl ShipContext {
         get_pond_path_with_override(self.pond_path.clone())
     }
 
+    /// The CLI argument vector with the binary path (argv[0]) stripped, for
+    /// recording in transaction metadata.  This is the real command the
+    /// user ran, so `pond log` can faithfully show what each transaction
+    /// did instead of a hand-built, often-incomplete label.
+    #[must_use]
+    pub fn command_args(&self) -> Vec<String> {
+        self.original_args.iter().skip(1).cloned().collect()
+    }
+
+    /// Transaction metadata carrying the real CLI command (see
+    /// [`command_args`](Self::command_args)).  Write commands should pass
+    /// this to `write_transaction` / `begin_write` so the audit log is
+    /// accurate.
+    #[must_use]
+    pub fn command_metadata(&self) -> steward::PondUserMetadata {
+        steward::PondUserMetadata::new(self.command_args())
+    }
+
     /// Create a Ship for an existing pond (read-only operations)
     pub async fn open_pond(&self) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
@@ -76,9 +94,9 @@ impl ShipContext {
     }
 
     /// Initialize a new pond (for init command only)
-    pub async fn create_pond(&self) -> Result<steward::Steward> {
+    pub async fn create_pond(&self, birthplace: &str) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Steward::create_pond(&pond_path)
+        steward::Steward::create_pond(&pond_path, birthplace)
             .await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
@@ -419,7 +437,15 @@ impl FileInfo {
 
         let time_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let node_id_str = format_node_id(&self.node_id);
+        // Show two provenance tags: the node's own id (unique per entry, for
+        // identity) and the owning pond's id (shared within a pond, which
+        // reveals the origin pond for cross-pond imports). This mirrors the
+        // FileID Display form `[node]@[pond]`.
+        let node_id_str = format!(
+            "{}@{}",
+            format_node_id(&self.node_id.node_id()),
+            format_node_id(&self.node_id.pond_id())
+        );
 
         let version_str = format!("v{}", self.metadata.version);
 

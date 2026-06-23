@@ -192,7 +192,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Initialize the root directory in the oplog.
     ///
     /// This is used during pond creation / restoration to set up the
-    /// filesystem root. Most callers should use `Ship::create_pond()` instead.
+    /// filesystem root. Most callers should use `Ship::create_pond("test-host")` instead.
     pub async fn initialize_root_directory(&self) -> Result<(), tlogfs::TLogFSError> {
         self.state()?.initialize_root_directory().await
     }

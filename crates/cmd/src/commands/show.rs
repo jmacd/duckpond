@@ -62,7 +62,8 @@ async fn show_filesystem_transactions(
 
     // Route to appropriate display mode
     match mode {
-        "brief" | "concise" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
+        "brief" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
+        "concise" => show_concise_mode(tx).await,
         "detailed" => show_detailed_mode(&commit_history, &store_path, &pond_path, tx).await,
         _ => Err(steward::StewardError::Dyn(
             format!(
@@ -225,7 +226,11 @@ async fn show_brief_mode(
         }
     }
 
-    // Resolve partition paths by traversing TinyFS
+    // Resolve partition paths by traversing TinyFS.  Partition map keys
+    // are the raw OpLog `part_id` hex strings.  A partition is owned by a
+    // self-partitioned physical directory, so its path is found by
+    // reconstructing that directory's FileID (part_id + pond_id) and
+    // looking it up in a FileID-keyed path map -- mirroring detailed mode.
     log::debug!("Resolving partition paths via TinyFS...");
     let root = tx
         .root()
@@ -236,21 +241,29 @@ async fn show_brief_mode(
         steward::StewardError::Dyn(format!("Failed to collect matches: {}", e).into())
     })?;
 
-    // Build path map from all matched entries
+    // Build a FileID-string -> path map from all matched entries, plus the
+    // root directory (which collect_matches does not itself yield).
+    let mut path_map: HashMap<String, String> = HashMap::new();
     for (node_path, _captured) in matches {
-        let node_id = node_path.id();
-        let path = node_path.path();
-        let node_id_str = node_id.to_string();
-
-        if let Some(stats) = partition_map.get_mut(&node_id_str) {
-            stats.path_name = Some(path.to_string_lossy().to_string());
-        }
+        _ = path_map.insert(
+            node_path.id().to_string(),
+            node_path.path().to_string_lossy().to_string(),
+        );
     }
+    let root_file_id = root.node_path().id();
+    let pond_id = root_file_id.pond_id();
+    _ = path_map.insert(root_file_id.to_string(), "/".to_string());
 
-    // Also add the root directory
-    let root_node_id = root.node_path().id();
-    if let Some(stats) = partition_map.get_mut(&root_node_id.to_string()) {
-        stats.path_name = Some("/".to_string());
+    // For each partition, reconstruct the owning directory's FileID and
+    // resolve its path.
+    for (part_id_hex, stats) in partition_map.iter_mut() {
+        let Ok(part_id) = tinyfs::PartID::from_hex_string(part_id_hex) else {
+            continue;
+        };
+        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id(), pond_id);
+        if let Some(path) = path_map.get(&dir_file_id.to_string()) {
+            stats.path_name = Some(path.clone());
+        }
     }
 
     // Format the output
@@ -328,6 +341,101 @@ async fn query_transaction_commands(
     _control_table: &steward::ControlTable,
 ) -> Result<std::collections::HashMap<i64, Vec<String>>, steward::StewardError> {
     Ok(std::collections::HashMap::new())
+}
+
+/// Show a one-line-per-transaction summary (newest first).  Each line
+/// reports the transaction sequence, how many OpLog operations it wrote,
+/// how many distinct nodes it touched, and when it committed.
+async fn show_concise_mode(
+    tx: &mut steward::Transaction<'_>,
+) -> Result<String, steward::StewardError> {
+    use arrow::array::{Array, Int64Array};
+
+    let control_table = tx
+        .as_pond()
+        .expect("show command requires a pond transaction")
+        .control_table();
+    control_table.print_banner();
+
+    let session_ctx = tx.session_context().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into())
+    })?;
+
+    let sql = "
+        SELECT txn_seq,
+            CAST(COUNT(*) AS BIGINT) AS ops,
+            CAST(COUNT(DISTINCT node_id) AS BIGINT) AS nodes,
+            CAST(MAX(timestamp) AS BIGINT) AS ts
+        FROM delta_table
+        GROUP BY txn_seq
+        ORDER BY txn_seq DESC
+    ";
+
+    let batches = session_ctx
+        .sql(sql)
+        .await
+        .map_err(|e| {
+            steward::StewardError::Dyn(format!("Failed to query transactions: {}", e).into())
+        })?
+        .collect()
+        .await
+        .map_err(|e| {
+            steward::StewardError::Dyn(format!("Failed to collect transactions: {}", e).into())
+        })?;
+
+    let mut output = String::new();
+    output.push_str("\nTransactions (newest first)\n");
+    output.push_str("---------------------------\n");
+
+    let mut any_rows = false;
+    for batch in &batches {
+        let col = |name: &str| -> Result<&Int64Array, steward::StewardError> {
+            batch
+                .column_by_name(name)
+                .ok_or_else(|| {
+                    steward::StewardError::Dyn(format!("Missing {} column", name).into())
+                })?
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| {
+                    steward::StewardError::Dyn(format!("Failed to downcast {} column", name).into())
+                })
+        };
+        let txn_seqs = col("txn_seq")?;
+        let ops = col("ops")?;
+        let nodes = col("nodes")?;
+        let ts = col("ts")?;
+
+        for i in 0..batch.num_rows() {
+            any_rows = true;
+            let when = if ts.is_null(i) {
+                "unknown time".to_string()
+            } else {
+                format_micros_timestamp(ts.value(i))
+            };
+            output.push_str(&format!(
+                "  seq {:>5}  {:>4} op(s)  {:>4} node(s)  {}\n",
+                txn_seqs.value(i),
+                ops.value(i),
+                nodes.value(i),
+                when,
+            ));
+        }
+    }
+
+    if !any_rows {
+        output.push_str("  (no transactions)\n");
+    }
+    output.push('\n');
+
+    Ok(output)
+}
+
+/// Format a microsecond Unix timestamp as a readable UTC string.
+fn format_micros_timestamp(micros: i64) -> String {
+    chrono::DateTime::from_timestamp_micros(micros)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| format!("<invalid timestamp: {}>", micros))
 }
 
 /// Show detailed transaction log using transaction sequences
@@ -815,7 +923,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(pond_path.clone()), init_args.clone());
 
             // Initialize pond
-            init_command(&ship_context)
+            init_command(&ship_context, "test-host")
                 .await
                 .expect("Failed to initialize pond");
 
@@ -862,7 +970,7 @@ mod tests {
         let pond_path = temp_dir.path().join("test_pond");
 
         // Initialize pond using steward - this creates the full Delta Lake setup
-        let mut ship = Ship::create_pond(&pond_path)
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
             .await
             .expect("Failed to initialize pond");
 

@@ -7,7 +7,7 @@ set -e
 
 echo "=== Experiment: Cat with SQL ==="
 
-pond init
+pond init --birthplace test-host
 
 # Create test data
 cat > /tmp/data.csv << 'EOF'

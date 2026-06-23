@@ -8,7 +8,7 @@ set -e
 echo "=== Experiment: Basic Init ==="
 
 # Initialize pond
-pond init
+pond init --birthplace test-host
 echo "✓ pond init succeeded"
 
 # List root directory

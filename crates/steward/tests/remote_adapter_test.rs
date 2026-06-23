@@ -43,7 +43,9 @@ async fn ship_remote_push_pull_roundtrip() {
     let remote_path = tmp.path().join("remote");
 
     // 1. Source pond + one write transaction.
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let src_pond_id = src.control_table().pond_id_uuid();
     let src_pond_meta = src.control_table().pond_metadata().clone();
 
@@ -142,7 +144,9 @@ async fn ship_remote_push_pull_two_transactions() {
     let dst_path = tmp.path().join("dst");
     let remote_path = tmp.path().join("remote");
 
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let src_pond_id = src.control_table().pond_id_uuid();
     let src_pond_meta = src.control_table().pond_metadata().clone();
 
@@ -234,7 +238,9 @@ async fn ship_remote_pull_empty_remote_is_noop() {
     let remote_path = tmp.path().join("remote");
 
     // Create dst pond first so we have a pond_id to reuse for the remote.
-    let mut dst = Ship::create_pond(&dst_path).await.expect("create dst");
+    let mut dst = Ship::create_pond(&dst_path, "test-host")
+        .await
+        .expect("create dst");
     let dst_pond_id = dst.control_table().pond_id_uuid();
 
     let remote = Remote::create(&remote_path, dst_pond_id)
@@ -266,7 +272,9 @@ async fn ship_remote_actions_at_version_filters_by_pond_id() {
     let pond_path = tmp.path().join("pond");
 
     // Create a pond and commit one write so a Delta commit exists.
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create");
     let local_pond_id = ship.control_table().pond_id_uuid();
     ship.write_transaction(&meta("seed_write"), async |fs| {
         let root = fs.root().await?;
@@ -377,7 +385,9 @@ async fn ship_remote_bootstrap_consumer_no_compact() {
     let remote_path = tmp.path().join("remote");
 
     // 1) Source pond + one write.
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let src_pond_id = src.control_table().pond_id_uuid();
     src.write_transaction(&meta("seed"), async |fs| {
         let root = fs.root().await?;
@@ -505,7 +515,9 @@ async fn ship_compute_live_checksums_is_deterministic() {
     let tmp = tempdir().expect("tempdir");
     let pond_path = tmp.path().join("pond");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
     ship.write_transaction(&meta("seed"), async |fs| {
@@ -560,7 +572,9 @@ async fn ship_compute_live_checksums_changes_with_content() {
     let tmp = tempdir().expect("tempdir");
     let pond_path = tmp.path().join("pond");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
     // Initial write.
@@ -619,7 +633,9 @@ async fn ship_compute_live_checksums_unknown_pond_id_is_empty() {
     let tmp = tempdir().expect("tempdir");
     let pond_path = tmp.path().join("pond");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
 
     ship.write_transaction(&meta("seed"), async |fs| {
         let root = fs.root().await?;
@@ -668,7 +684,9 @@ async fn ship_remote_push_replicates_pond_init() {
     let pond_path = tmp.path().join("pond");
     let remote_path = tmp.path().join("remote");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
     // No data writes -- only the pond_init txn (txn_seq=1) exists, whose
@@ -741,7 +759,9 @@ async fn push_pending_to_remote_errors_on_corrupt_watermark() {
     let pond_path = tmp.path().join("pond");
     let remote_path = tmp.path().join("remote");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
     let remote = Remote::create(&remote_path, pond_id)
@@ -801,7 +821,9 @@ async fn ship_remote_native_write_then_verify_passes() {
     let remote_path = tmp.path().join("remote");
 
     // 1. Source pond with a real write transaction.
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let src_pond_id = src.control_table().pond_id_uuid();
 
     src.write_transaction(&meta("write_for_verify"), async |fs| {
@@ -872,7 +894,9 @@ async fn ship_compact_records_pushable_compact_transaction() {
     let tmp = tempdir().expect("tempdir");
     let pond_path = tmp.path().join("pond");
 
-    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let mut ship = Ship::create_pond(&pond_path, "test-host")
+        .await
+        .expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
     // Several writes -> several small parquet files in the root partition.
@@ -1001,7 +1025,9 @@ async fn ship_compact_bundle_drives_restart_from_compact() {
     let remote_path = tmp.path().join("remote");
 
     // 1. Source pond with several writes, all under the root partition.
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let src_pond_id = src.control_table().pond_id_uuid();
     let src_pond_meta = src.control_table().pond_metadata().clone();
 
@@ -1087,7 +1113,9 @@ async fn ship_compact_survives_reopen() {
     let pond_path = tmp.path().join("pond");
 
     let compact_seq = {
-        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
+            .await
+            .expect("create pond");
         for i in 0..4 {
             let _ = write_one(
                 &mut ship,
@@ -1140,7 +1168,9 @@ async fn ship_maintain_compact_survives_reopen() {
     let pond_path = tmp.path().join("pond");
 
     let expected_seq = {
-        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
+            .await
+            .expect("create pond");
         for i in 0..4 {
             let _ = write_one(
                 &mut ship,
@@ -1181,7 +1211,9 @@ async fn ship_replica_verify_matches_after_bootstrap() {
     let remote_path = tmp.path().join("remote");
 
     // Producer with a few writes.
-    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let mut src = Ship::create_pond(&src_path, "test-host")
+        .await
+        .expect("create src");
     let pond_id = src.control_table().pond_id_uuid();
     for i in 0..3 {
         let _ = write_one(
