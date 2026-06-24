@@ -18,7 +18,7 @@ source check.sh
 
 echo "=== Experiment: pond fsck ==="
 
-pond init
+pond init --birthplace test-host
 
 echo "hello duckpond" > /tmp/small.txt
 head -c 200000 /dev/urandom > /tmp/big.bin

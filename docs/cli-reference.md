@@ -632,6 +632,19 @@ pond fsck            # on replica A  ->  a1b2c3...
 pond fsck            # on replica B  ->  a1b2c3...   (identical iff in sync)
 ```
 
+> **What "replica" means here.**  The root is keyed by `pond_id`/`part_id`,
+> so equal-root comparison applies to **identity-preserving** replicas: a
+> byte copy of the pond directory, or a *mirror* restart that keeps the
+> producer's `pond_id`.  It is **not** a content-only fingerprint: two ponds
+> created independently with the same files get different random
+> `pond_id`/`part_id` UUIDs and therefore different roots.  A **cross-pond
+> consumer** (`pond remote add ... /imports/<name>`) keeps its own `pond_id`
+> and mounts the producer's partitions, so its root differs by design --
+> compare such a consumer at the **partition** level instead: every
+> producer partition line in `pond fsck --verbose`
+> (`<pond_id>/<part_id>  rows=N  <checksum>`) reappears verbatim in the
+> consumer's `--verbose` output once it has pulled.
+
 **Content-checksum pass** (default; skipped with `--quick`): the row Merkle
 commits to each file's *recorded* `blake3`, but not to the bytes it points
 at.  By default `fsck` also re-hashes inline file content and re-reads every
