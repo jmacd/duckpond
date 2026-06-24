@@ -15,20 +15,30 @@
 
 ## 1. Goal
 
-Make the content checksum we already compute a sound, reusable foundation
-for three consumers, in priority order:
+Make the content hash we already compute a sound, reusable foundation for
+three consumers, in priority order:
 
 1. **Replica / state comparison** (today): is replica B byte-identical to
    pond A? -- already shipped as `pond fsck`.
-2. **Recursive partition equality** (near term): look up a content digest
-   for any directory/partition in O(1) and compare two clones in
-   O(divergence) instead of O(size).
+2. **Content-addressed, git-style versioning** (the real target): a
+   **pure, lineage-independent content hash** (a git "tree" hash) so two
+   ponds can compare roots, find divergent subtrees in O(difference), and
+   push/pull only the objects the other side lacks -- regardless of
+   `pond_id` or creation time. See Section 6.
 3. **Transparency log** (later): publish an append-only, independently
    verifiable log of the data, using industry-standard tooling.
 
 The throughline is a single **leaf atom** (Section 3) that every consumer
 reuses. The two tree *shapes* built over that atom are different and must
 not be conflated (Section 4).
+
+**A note on "clone comparison" vs "content addressing."** An earlier draft
+framed goal 2 as comparing *clones* with an identifier-keyed digest. That
+is a strictly weaker thing: it matches replicas that share a `pond_id` but
+NOT two ponds that independently hold the same content. Git-style
+versioning needs the stronger, **pure content hash** (Section 6), which
+keys by name/path and commits to content only. This document targets the
+pure version; clone comparison falls out as a degenerate case.
 
 ---
 
@@ -181,38 +191,92 @@ not affect the SHA-256 decision.
 
 ---
 
-## 6. Recursive state Merkle (the near-term, no-regret step)
+## 6. Content-addressed object model (the real target: git-style versioning)
 
-Generalize `fsck`'s fixed two-level fold (4a) into a **recursive** fold
-over the directory/partition tree, and **persist each child's subtree
-digest in its parent**:
+The goal is a **pure content hash** so DuckPond can do git-style
+push-pull: compare two ponds by a single hash, locate divergent subtrees
+in O(difference), and transfer only the objects the other side lacks --
+**independent of `pond_id`, `part_id`, or creation time**. That requires
+modeling the filesystem as a content-addressed object graph, exactly like
+git.
 
-- file leaf  = Section 3 atom (or series cumulative bao root)
-- directory  = fold of `(child entry, child subtree digest)` over its
-  entries
-- the root is then an O(1) lookup, and comparing two clones descends only
-  where subtree digests differ -- **O(divergence)**, the same top-down
-  walk git fetch and Merkle anti-entropy use.
+### 6.1 The objects
 
-**Keying:** keep the existing identifiers (`part_id` / `node_id` /
-position). This is correct for the actual goal -- comparing **clones**,
-which preserve those identifiers (cross-pond import preserves them
-verbatim; see `testsuite/tests/718-fsck-replica-equality.sh`). Path/name
-keying would only be needed to equate two *independently built* ponds with
-the same content, which is **not** a goal.
+| Git | DuckPond object | Hash over | Status |
+|-----|-----------------|-----------|--------|
+| **blob** | one file version | `blake3(version bytes)` (Section 3 atom); series may use cumulative bao root | **have** (large files already CAS) |
+| **tree** | one directory | sorted list of `(name, entry_type, child_hash)` -- **content only** | **net-new** -- *this is the pure content hash* |
+| **commit** | one transaction | `(root_tree_hash, parent_commit_hash, author, timestamp, txn metadata)` | **partial** -- have txn_seq/pond_txn/timestamp; add root-tree + parent |
+| **ref** | a branch/remote tip | a commit hash | net-new |
 
-**Cost to design around:** naive Merkle propagation rehashes every ancestor
-on each deep write and serializes through the root. Mitigation: compute
-touched subtrees at **commit time** only (DuckPond is already
-per-transaction, so this is bounded by the txn working set -- the git
-model), and/or back per-partition digests with the `Homomorphic`
-`PartitionChecksum` strategy already present for O(1) incremental update.
+The **tree hash is the content hash.** It is pure because it commits to
+**names + child content**, and deliberately **excludes** `pond_id`,
+`part_id`, `node_id`, `txn_seq`, and `timestamp`. Two ponds that ingested
+the same bytes therefore produce identical blob hashes -> identical tree
+hashes -> identical root, regardless of lineage.
 
-**Payoff now:** fast partition-level content lookup + clone comparison.
-**Payoff later:** each persisted per-partition digest is exactly the input
-a per-partition checkpoint signs -- the attestation design's "checkpoint
-per partition + pond-level manifest" recursion, ready to sign when key
-custody is decided.
+### 6.2 Keying: by name/path, content-only (this is required, not optional)
+
+A tree's entries are keyed and sorted **by name**, and each entry's value
+is the child's **content hash** (blob or subtree) plus its `entry_type` --
+nothing else. This is the inversion of the shipped `fsck`/state Merkle,
+which hashes the whole `OplogEntry` (identity included) and keys by
+`node_id`/`part_id`. Both are legitimate; they answer different questions:
+
+| | State Merkle (4a, `fsck`) | Content tree (this section) |
+|---|---|---|
+| Leaf commits to | whole row (content + identity) | content only |
+| Keyed by | `node_id` / `part_id` | **name / path** |
+| Equal across | clones (same `pond_id`) | **any same-content pond** (lineage-independent) |
+| Enables | replica drift detection | git-style compare + fetch |
+
+Clone comparison falls out of the content tree as a degenerate case (a
+clone has the same content, so the same root), so the content tree
+*subsumes* the weaker clone-comparison goal.
+
+### 6.3 What it unlocks immediately -- and the gap
+
+On the object graph, **one-way sync** (git `clone` / `fetch`) works
+directly:
+
+- **Compare:** equal root tree hash ⇒ identical content; otherwise descend
+  by child hash to the divergent subtrees in O(difference).
+- **Transfer:** send only objects (blobs/trees/commits) the peer lacks,
+  named by hash. Works between *any* two ponds.
+
+**Full bidirectional push-pull needs two more pieces git has and DuckPond
+does not yet:**
+
+1. **A commit DAG with refs/parents.** Today the history is a linear
+   per-pond `txn_seq`; git has branches. Add parent pointers + per-remote
+   tip refs.
+2. **A merge model.** When two clones both advance from a common base,
+   content hashes *detect* divergence but do not *resolve* it; git uses
+   3-way merge per path. DuckPond is single-writer-per-pond today, and the
+   remote redesign explicitly parked "git-clone-like symmetric" sync as
+   future (`docs/remote-redesign.md`).
+
+So the object model (6.1-6.2) is the **prerequisite and the ~80%**: it
+delivers compare + dedup + one-way fetch now; the commit-DAG + merge layer
+is the remaining work for divergent push-pull.
+
+### 6.4 Hash function
+
+The content object graph is **internal** (pond-to-pond), so it reuses
+**BLAKE3** -- your existing blob hashes, bao, and CAS. No external verifier
+consumes it, so there is no reason to switch it to SHA-256. The
+transparency log (Section 4b/5) remains **SHA-256** for standards interop;
+a commit's `root_tree_hash` is exactly what a published checkpoint later
+attests, re-expressed as a SHA-256 log leaf. The two layers stack.
+
+### 6.5 Cost to design around
+
+Naive Merkle propagation rehashes every ancestor on each deep write and
+serializes through the root. Mitigation: compute touched trees at **commit
+time** only -- DuckPond is already per-transaction, so this is bounded by
+the txn working set (the git model: trees are built at commit, not on every
+file touch). The `Homomorphic` `PartitionChecksum` strategy already present
+offers O(1) incremental partition updates if measured to matter.
 
 ---
 
@@ -220,11 +284,14 @@ custody is decided.
 
 | Capability | Status | Reuses |
 |-----------|--------|--------|
-| Per-version content atom | have | BLAKE3, schema row |
+| Per-version content atom (blob) | have | BLAKE3, schema row |
 | Verified byte-range streaming | have | bao-tree |
 | Large-file CAS | have | `_large_files/blake3=` |
 | State equality / replica compare | have | state Merkle, `pond fsck` |
-| Recursive persisted partition digests | **near-term** | state Merkle + commit-time fold / homomorphic |
+| **Pure content tree hash** (git tree) | **net-new** | blob hashes + commit-time fold, name-keyed |
+| **Commit object** (root tree + parent) | partial | txn_seq / pond_txn / timestamp |
+| One-way fetch / clone / dedup | near-term | content object graph |
+| Refs + merge (bidirectional push-pull) | later | commit DAG + 3-way merge |
 | Append-only log tree (SHA-256, tiles) | later | atom as leaf payload; new tree + `sha2` dep |
 | Inclusion / consistency proofs | later | append-only tree |
 | Signed checkpoints, witnesses, publishing | **deferred** | -- |
@@ -242,6 +309,12 @@ These need decisions we are intentionally **not** making yet:
   format; design later.
 - **Leaf granularity** (per-transaction vs per-row). Per-transaction is the
   cheap strong default; per-row layers on later.
+- **Merge model for divergent push-pull.** The content object graph
+  (Section 6) enables one-way fetch now; *bidirectional* sync where two
+  clones both advanced needs a commit DAG with refs plus 3-way merge. The
+  object model is the prerequisite; the merge layer is sequenced after it
+  (`docs/remote-redesign.md` parks "git-clone-like symmetric" sync as
+  future).
 - **Tile layout, multi-channel publishing, sitegen integration.** Covered
   by `docs/design-attestation-and-publishing.md`; not part of the
   foundation.
