@@ -30,7 +30,10 @@ three consumers, in priority order:
 
 The throughline is a single **leaf atom** (Section 3) that every consumer
 reuses. The two tree *shapes* built over that atom are different and must
-not be conflated (Section 4).
+not be conflated (Section 4). **Section 8 describes the clean-slate target
+architecture** -- what the replication layer would be if rebuilt around
+content addressing -- and how Sections 3-7 are the road to it, not a
+detour.
 
 **A note on "clone comparison" vs "content addressing."** An earlier draft
 framed goal 2 as comparing *clones* with an identifier-keyed digest. That
@@ -298,6 +301,175 @@ offers O(1) incremental partition updates if measured to matter.
 
 ---
 
+## 8. The ideal target architecture (clean-slate replication layer)
+
+Sections 3-7 describe how to *carry today's checksums forward*. This section
+describes the **end state we would build if starting from scratch** -- and it
+is what the replication layer was meant to be in the first place: a
+content-addressed object store, synchronized like git, with provenance and
+publishing as thin layers on top rather than as machinery woven through every
+row.
+
+### 8.1 The one change that collapses the apparatus
+
+Today, **provenance is smeared into every content hash.** Each row's leaf is
+`blake3(serde_json(OplogEntry))`, which bakes in `pond_id`, `part_id`,
+`node_id`, `txn_seq`, and `timestamp` (Section 3). Because content and lineage
+are entangled at the leaf, *every* comparison drags lineage along. That single
+entanglement is the root cause of:
+
+- two Merkle shapes that must not be conflated (Section 4);
+- a per-partition checksum **bundle format** for replication;
+- `(pond_id, seq)` **frontier sequencing**;
+- **compaction-invariance assertions** (`ship.rs` asserts pre/post checksum
+  equality because a rewrite must not "shift" the lineage-bearing hash).
+
+The ideal design **isolates provenance in one place -- the commit object --
+and keeps content pure.** Everything below follows from that.
+
+### 8.2 The object store (the whole model)
+
+Four object kinds, BLAKE3-addressed, with the store invariant **name ==
+hash(bytes)**:
+
+| Object | Hash over | Carries lineage? |
+|--------|-----------|------------------|
+| **blob** | exact stored bytes of one file version | no |
+| **tree** | sorted `(name, entry_type, child_hash)` for one directory | no |
+| **commit** | `(root_tree_hash, parent_commit_hash(es), provenance)` | **yes -- the only place** |
+| **ref** | a commit hash (a pond's tip, or an imported pond's tip) | (pointer) |
+
+`provenance` in the commit = `pond_id`, `seq`, `time`, author, original CLI
+args -- exactly the `pond_txn` blob already stamped into Delta commitInfo
+today, but now attached to a commit object instead of dissolved into every
+row. **Blobs and trees are pure**: two ponds that ingested the same bytes
+produce identical blob hashes -> identical tree hashes -> identical root,
+regardless of who wrote them or when.
+
+This is the git object model. DuckPond directories *are* trees; file versions
+*are* blobs; transactions *are* commits.
+
+### 8.3 Corruption checking becomes the store invariant, not a separate Merkle
+
+In a content-addressed store, an object's **name is its hash**, so "is this
+object intact?" = "re-hash the bytes; do they match the name?" There is no
+"recorded hash vs actual bytes" gap to bridge, because the name *is* the
+recorded hash. The scrub (today's most valuable fsck capability -- re-read
+bytes, check BLAKE3, validate bao chains) becomes simply:
+
+> walk all objects reachable from the ref, re-hash each, verify name ==
+> hash, and verify bao chains for large blobs.
+
+No separate state Merkle is computed for integrity. `pond fsck` becomes
+"verify the CAS invariant + reachability," and the *equality* question it also
+answers today is subsumed by comparing root commit/tree hashes (8.4).
+
+### 8.4 Replication = commit-DAG fetch + fast-forward
+
+Sync becomes git fetch, verbatim:
+
+- **Compare:** equal root tree hash ⇒ identical content; otherwise descend by
+  child hash to the divergent subtrees in O(difference).
+- **Transfer:** "I have commit X, you have commit Y -- send me the objects
+  reachable from Y that I lack," named by hash. Works between *any* two ponds.
+- **Frontier:** a single **commit hash**, not a `(pond_id, seq)` pair. The
+  per-pond seq allocator and the bundle's per-partition checksum list both
+  disappear; reachability replaces them.
+
+This is the replication layer as originally intended: peers exchange objects
+by content hash, and "are we in sync?" is one hash comparison.
+
+### 8.5 Single-writer ⇒ fast-forward, no 3-way merge
+
+DuckPond is **single-writer-per-pond**, so each pond's commit chain is
+**linear** -- there are never two concurrent commits on the same ref to
+reconcile. Therefore push-pull is **fast-forward**, and cross-pond import is
+**grafting** another pond's chain in as a *distinct ref* (its own lineage,
+its own commits). DuckPond never needs git's hardest part, **3-way merge**.
+This refines Sections 6.3 and "Deferred": the merge engine is only required if
+you permit concurrent writers to the *same* ref; the single-writer model
+sidesteps it entirely.
+
+### 8.6 Compaction = a rewrite commit (the invariance assertion disappears)
+
+With byte-equality blobs (Section 3, your choice), compaction legitimately
+produces **new** blobs and trees and therefore a **new** content hash. In the
+ideal model that is fine and expected: compaction is simply a commit whose
+trees were rewritten, recorded with a "compaction" relationship to its parent.
+The pre/post checksum-invariance assertion in `ship.rs` -- which exists only
+because the lineage-bearing hash was expected to stay stable across a rewrite
+-- is no longer needed. The rewrite is a first-class, recorded fact, not an
+invariant to defend.
+
+### 8.7 Partitions are physical, not logical
+
+`part_id` (one Delta partition per directory) is a **storage** optimization,
+not a logical necessity. In the object model the logical structure is just the
+tree; partitioning is how blobs/trees happen to be laid out on disk. So
+`part_id` leaves the *logical/content* layer entirely and survives only as a
+physical detail of the Delta/parquet store. One less identifier in the model.
+
+### 8.8 The publishing boundary: one SHA-256 log above the graph
+
+The content graph stays **BLAKE3** (internal; reuses blob hashes, bao, CAS --
+Section 6.4). The **only** append-only / promotion Merkle in the whole system
+is the published **transparency log**, and it lives strictly *above* the
+content graph: its leaves are **commit hashes** (or periodic checkpoints),
+hashed with **SHA-256** for standards interop and external witnesses (Sections
+4b, 5). The two layers stack cleanly and never mix:
+
+```
+publish:   SHA-256 append-only log   (leaves = commit hashes)   <- the ONLY append-only tree
+              |
+content:   BLAKE3 object graph        (commit -> tree -> blob)
+              |
+bytes:     bao-tree byte-range proofs (within a large blob)
+```
+
+### 8.9 What disappears, relative to today
+
+| Apparatus today | Replaced by |
+|-----------------|-------------|
+| identity-bearing per-row state Merkle | pure tree hashes + provenance isolated in commits |
+| per-partition checksum **bundle format** | objects reachable from a commit |
+| `(pond_id, seq)` frontier sequencing | a single **commit hash** ref |
+| compaction-invariance assertions | compaction recorded as a rewrite commit |
+| `part_id` in the logical model | physical storage detail only |
+| "two Merkle shapes" tension | one content tree (state) + one log (history), cleanly separated because provenance no longer pollutes content |
+
+### 8.10 What stays
+
+- **BLAKE3** for the content graph; **bao-tree** for intra-file byte-range
+  inclusion proofs (composes *under* a blob).
+- A **scrub** (8.3) -- now expressed as the CAS invariant rather than a
+  separate computation.
+- An **append-only SHA-256 log** -- but only at the publishing boundary
+  (8.8), never inside the content graph.
+- **Single-writer-per-pond**, which is what keeps sync at fast-forward.
+
+### 8.11 The migration gap (honest)
+
+This is a genuine rewrite of the **replication / verify / sequencing** layer,
+not a flag flip. What is load-bearing today and would change:
+
+- the **bundle format** records `partition_checksums`
+  (`remote_adapter.rs:536,738`);
+- `verify_against_remote` compares those per-partition checksums;
+- the **per-pond `seq` allocator** and control-table reconstruction assume the
+  lineage-bearing row hash;
+- `Ship::compact` asserts checksum invariance (`ship.rs:920,989`).
+
+The object model makes all four derivable or unnecessary, but they exist
+because the current replication layer predates content addressing. The path
+is: (1) introduce tree/commit objects computed at commit time alongside the
+existing checksums; (2) move provenance into the commit; (3) switch sync to
+commit-DAG fetch; (4) retire the bundle/frontier apparatus once verify runs on
+the object graph. Sections 3-7 are deliberately compatible with this --
+they reuse the same blob atom -- so the carry-forward work and the clean-slate
+target are the same road, not two.
+
+---
+
 ## Deferred (explicitly out of scope)
 
 These need decisions we are intentionally **not** making yet:
@@ -310,9 +482,12 @@ These need decisions we are intentionally **not** making yet:
 - **Leaf granularity** (per-transaction vs per-row). Per-transaction is the
   cheap strong default; per-row layers on later.
 - **Merge model for divergent push-pull.** The content object graph
-  (Section 6) enables one-way fetch now; *bidirectional* sync where two
-  clones both advanced needs a commit DAG with refs plus 3-way merge. The
-  object model is the prerequisite; the merge layer is sequenced after it
+  (Section 6) enables one-way fetch now; *bidirectional* sync needs a commit
+  DAG with refs. Note (Section 8.5): because DuckPond is
+  single-writer-per-pond, each ref is linear, so push-pull is **fast-forward**
+  and cross-pond import is **grafting** a distinct ref -- a full 3-way merge
+  engine is only required if concurrent writers share one ref, which the
+  single-writer model avoids. The object model is the prerequisite either way
   (`docs/remote-redesign.md` parks "git-clone-like symmetric" sync as
   future).
 - **Tile layout, multi-channel publishing, sitegen integration.** Covered
