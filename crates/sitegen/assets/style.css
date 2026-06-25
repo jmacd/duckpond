@@ -473,6 +473,65 @@ tr:hover td {
   color: var(--fg-muted);
 }
 
+/* ── Window readout / editor + shareable link ───────────────── */
+
+.window-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+}
+
+.window-bar .window-label {
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.window-bar .window-arrow {
+  color: var(--fg-muted);
+}
+
+.window-input {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  font-family: inherit;
+}
+
+.window-input:focus {
+  outline: none;
+  border-color: var(--accent-light);
+}
+
+.copy-link {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--accent-light);
+  background: transparent;
+  color: var(--accent-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.copy-link:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.copy-link.copied {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
 /* ── Brush-to-zoom overlay ──────────────────────────────────── */
 
 .brush-overlay {

@@ -95,6 +95,21 @@
   // When non-null, overrides the duration-button window.
   let zoomDomain = null;  // [beginMs, endMs] or null
 
+  // Current effective window, refreshed on every render. Used by the window
+  // inputs (start/end readout + editor) and the "Copy link" button.
+  let curBegin = null, curEnd = null;
+
+  // A shareable link encodes the window as an absolute, fixed epoch-ms range
+  // in the URL hash (`#t=<begin>,<end>`). Parse it on load so the page opens
+  // showing exactly that range.
+  {
+    const m = /[#&]t=(\d+),(\d+)/.exec(location.hash);
+    if (m) {
+      const a = +m[1], b = +m[2];
+      if (isFinite(a) && isFinite(b) && a < b) zoomDomain = [a, b];
+    }
+  }
+
   // Compute the data time span from the manifest so we can hide buttons
   // for ranges wider than the available data.
   let dataStartMs = Infinity;
@@ -183,6 +198,102 @@
 
   function showResetBtn() { resetBtn.disabled = false; }
   function hideResetBtn() { resetBtn.disabled = true; }
+
+  // ── Window readout / editor + shareable link ─────────────────────────────────
+  // A second toolbar row shows the effective window as two editable
+  // datetime-local fields (start → end). Editing either sets a custom
+  // (absolute) window, exactly like a brush selection. "Copy link" writes a
+  // URL that reproduces the current absolute range.
+  const windowBar = document.createElement("div");
+  windowBar.className = "window-bar";
+
+  const winLabel = document.createElement("span");
+  winLabel.className = "window-label";
+  winLabel.textContent = "Window:";
+
+  const startInput = document.createElement("input");
+  startInput.type = "datetime-local";
+  startInput.className = "window-input";
+  startInput.setAttribute("aria-label", "Window start");
+
+  const arrow = document.createElement("span");
+  arrow.className = "window-arrow";
+  arrow.textContent = "→";
+
+  const endInput = document.createElement("input");
+  endInput.type = "datetime-local";
+  endInput.className = "window-input";
+  endInput.setAttribute("aria-label", "Window end");
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "copy-link";
+  copyBtn.textContent = "Copy link";
+
+  windowBar.append(winLabel, startInput, arrow, endInput, copyBtn);
+  toolbar.after(windowBar);
+
+  function pad2(n) { return String(n).padStart(2, "0"); }
+  function toLocalInput(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+      `T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  // Keep the inputs in step with the rendered window, but never overwrite a
+  // field the user is actively editing.
+  function syncWindowControls(begin, end) {
+    curBegin = begin;
+    curEnd = end;
+    if (document.activeElement !== startInput) startInput.value = toLocalInput(begin);
+    if (document.activeElement !== endInput) endInput.value = toLocalInput(end);
+  }
+
+  function applyWindow() {
+    const s = new Date(startInput.value).getTime();
+    const e = new Date(endInput.value).getTime();
+    if (!isFinite(s) || !isFinite(e) || s >= e) {
+      // Revert to the last good values on invalid input.
+      if (curBegin != null) syncWindowControls(curBegin, curEnd);
+      return;
+    }
+    zoomDomain = [s, e];
+    btnBar.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    showResetBtn();
+    renderChart();
+  }
+  startInput.addEventListener("change", applyWindow);
+  endInput.addEventListener("change", applyWindow);
+
+  let copyResetTimer = null;
+  copyBtn.addEventListener("click", async () => {
+    if (curBegin == null) return;
+    const url = `${location.origin}${location.pathname}` +
+      `#t=${Math.round(curBegin)},${Math.round(curEnd)}`;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      ok = true;
+    } catch (e) {
+      // Clipboard unavailable (e.g. non-secure context): reflect the range in
+      // the address bar so the user can copy it manually.
+      history.replaceState(null, "", url);
+    }
+    copyBtn.textContent = ok ? "Copied!" : "Link in URL";
+    copyBtn.classList.add("copied");
+    clearTimeout(copyResetTimer);
+    copyResetTimer = setTimeout(() => {
+      copyBtn.textContent = "Copy link";
+      copyBtn.classList.remove("copied");
+    }, 1800);
+  });
+
+  // If the page opened with a shared (custom) range, reflect that state:
+  // no duration button is active and Reset is available.
+  if (zoomDomain) {
+    btnBar.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    showResetBtn();
+  }
 
   // ── Full-screen toggle ──────────────────────────────────────────────────────
   // Inject a control into the top bar, just right of the "<- Home" link, that
@@ -685,6 +796,11 @@
     // (resolution + time filter) and the chart axis.
     const domainEnd = zoomDomain ? zoomDomain[1] : nowMs;
     const domainBegin = zoomDomain ? zoomDomain[0] : (nowMs - activeDays * 86400000);
+
+    // Reflect the effective window in the start/end inputs (and Copy-link
+    // state) before querying, so the readout is correct even if no data
+    // falls in range.
+    syncWindowControls(domainBegin, domainEnd);
 
     const data = await queryData(domainBegin, domainEnd);
 
