@@ -494,6 +494,64 @@ tr:hover td {
   pointer-events: none;
 }
 
+.crosshair-line {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background: var(--accent-light);
+  pointer-events: none;
+  z-index: 11;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 12;
+  pointer-events: none;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-sm);
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  min-width: 110px;
+  max-width: 260px;
+}
+
+.chart-tooltip .tt-time {
+  font-weight: 600;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.chart-tooltip .tt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.chart-tooltip .tt-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.chart-tooltip .tt-label {
+  color: var(--fg-muted);
+  margin-right: auto;
+}
+
+.chart-tooltip .tt-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 /* ── Charts ─────────────────────────────────────────────────── */
 
 .chart-container {
@@ -649,6 +707,67 @@ tr:hover td {
 
 .top-bar-icons a:hover {
   color: var(--accent);
+}
+
+/* ── Full-screen chart toggle + overlay ─────────────────────── */
+
+/* Link-styled button sitting just right of the back link; margin-right:auto
+   keeps it next to "<- Home" while pushing the icon group to the far right. */
+.fullscreen-toggle {
+  margin-right: auto;
+  margin-left: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--accent-light);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.fullscreen-toggle:hover {
+  color: var(--accent);
+}
+
+.fullscreen-toggle .fs-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* While a chart is full screen, lift its <main> out of the grid and let it
+   cover the viewport (over the sidebar).  The chart re-renders to fit. */
+body.chart-fullscreen {
+  overflow: hidden;
+}
+
+body.chart-fullscreen .content-page {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  margin: 0;
+  padding: 1rem 2rem 2rem;
+  overflow: auto;
+  background: var(--bg);
+}
+
+body.chart-fullscreen .blog-post {
+  min-height: calc(100vh - 7rem);
+}
+
+/* The post body and content normally cap at --max-width; let them span the
+   full overlay so the chart can use the entire width (and, via its computed
+   height, the entire height). */
+body.chart-fullscreen .blog-post,
+body.chart-fullscreen .blog-post-content {
+  max-width: none;
 }
 
 .blog-post {

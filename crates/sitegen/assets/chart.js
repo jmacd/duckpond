@@ -184,6 +184,49 @@
   function showResetBtn() { resetBtn.disabled = false; }
   function hideResetBtn() { resetBtn.disabled = true; }
 
+  // ── Full-screen toggle ──────────────────────────────────────────────────────
+  // Inject a control into the top bar, just right of the "<- Home" link, that
+  // expands the chart view to fill the page (same chart, wider/taller). It is
+  // JS-injected so it never appears for no-JS visitors, who could not use the
+  // interactive view anyway. The same button becomes an "x Close" affordance
+  // while active; Escape also exits.
+  const topBar = document.querySelector(".top-bar");
+  if (topBar) {
+    const fsToggle = document.createElement("button");
+    fsToggle.type = "button";
+    fsToggle.className = "fullscreen-toggle";
+
+    const syncFsLabel = () => {
+      const on = document.body.classList.contains("chart-fullscreen");
+      fsToggle.innerHTML = on
+        ? '<span class="fs-icon">\u00d7</span> Close'
+        : 'Full screen <span class="fs-icon">\u2192</span>';
+      fsToggle.setAttribute("aria-pressed", on ? "true" : "false");
+      fsToggle.title = on ? "Exit full screen (Esc)" : "Expand chart to full screen";
+    };
+
+    const setFullscreen = (on) => {
+      document.body.classList.toggle("chart-fullscreen", on);
+      syncFsLabel();
+      // Re-render so the chart recomputes its width/height for the new size.
+      renderChart();
+    };
+
+    fsToggle.onclick = () =>
+      setFullscreen(!document.body.classList.contains("chart-fullscreen"));
+    syncFsLabel();
+
+    const backLink = topBar.querySelector(".top-bar-back");
+    if (backLink) backLink.insertAdjacentElement("afterend", fsToggle);
+    else topBar.insertAdjacentElement("afterbegin", fsToggle);
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && document.body.classList.contains("chart-fullscreen")) {
+        setFullscreen(false);
+      }
+    });
+  }
+
   // Status message while loading
   container.innerHTML = '<div class="empty-state">Loading chart data…</div>';
 
@@ -495,7 +538,7 @@
   //
   // `domainBegin` / `domainEnd` are epoch-ms values that correspond to the
   // left/right edges of the plot area (the SVG viewBox minus margins).
-  function attachBrush(wrapper, plotEl, domainBegin, domainEnd, marginLeft, plotWidth) {
+  function attachBrush(wrapper, plotEl, domainBegin, domainEnd, marginLeft, plotWidth, hover) {
     const overlay = document.createElement("div");
     overlay.className = "brush-overlay";
     // Position over just the plot area (inside margins)
@@ -508,6 +551,84 @@
     rect.className = "brush-rect";
     overlay.appendChild(rect);
 
+    // ── Hover crosshair + value tooltip ──────────────────────────────────────
+    // A thin vertical line tracks the cursor (snapped to the nearest sample)
+    // and a small box lists each series' value (with its colour and units) at
+    // that instant. Built on the same overlay so it shares the plot geometry
+    // and yields to brushing while a drag is in progress.
+    let crosshair = null, tooltip = null, sampleMs = null;
+    if (hover && hover.rows.length) {
+      crosshair = document.createElement("div");
+      crosshair.className = "crosshair-line";
+      crosshair.style.display = "none";
+      overlay.appendChild(crosshair);
+
+      tooltip = document.createElement("div");
+      tooltip.className = "chart-tooltip";
+      tooltip.style.display = "none";
+      overlay.appendChild(tooltip);
+
+      sampleMs = hover.rows.map(hover.toMs);
+    }
+
+    function nearestIdx(t) {
+      let lo = 0, hi = sampleMs.length - 1;
+      if (t <= sampleMs[0]) return 0;
+      if (t >= sampleMs[hi]) return hi;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (sampleMs[mid] < t) lo = mid + 1; else hi = mid - 1;
+      }
+      // `lo` is the first sample >= t; pick whichever neighbour is closer.
+      return (Math.abs(sampleMs[lo] - t) < Math.abs(t - sampleMs[lo - 1])) ? lo : lo - 1;
+    }
+
+    function showHover(offsetX, offsetY) {
+      if (!crosshair) return;
+      const clampedX = Math.max(0, Math.min(offsetX, plotWidth));
+      const t = domainBegin + (clampedX / plotWidth) * (domainEnd - domainBegin);
+      const idx = nearestIdx(t);
+      const row = hover.rows[idx];
+      const px = ((sampleMs[idx] - domainBegin) / (domainEnd - domainBegin)) * plotWidth;
+
+      crosshair.style.left = px + "px";
+      crosshair.style.display = "block";
+
+      const timeEl = document.createElement("div");
+      timeEl.className = "tt-time";
+      timeEl.textContent = new Date(sampleMs[idx]).toLocaleString();
+      tooltip.replaceChildren(timeEl);
+      for (const s of hover.series) {
+        const r = document.createElement("div");
+        r.className = "tt-row";
+        const dot = document.createElement("span");
+        dot.className = "tt-dot";
+        dot.style.background = s.color;
+        const lab = document.createElement("span");
+        lab.className = "tt-label";
+        lab.textContent = s.label;
+        const val = document.createElement("span");
+        val.className = "tt-val";
+        val.textContent = hover.fmt(row[s.col]);
+        r.append(dot, lab, val);
+        tooltip.appendChild(r);
+      }
+      tooltip.style.display = "block";
+
+      // Prefer the right of the line; flip left if it would overflow.
+      let tl = px + 14;
+      if (tl + tooltip.offsetWidth > plotWidth) tl = px - tooltip.offsetWidth - 14;
+      if (tl < 0) tl = 4;
+      tooltip.style.left = tl + "px";
+      tooltip.style.top = Math.max(0, offsetY - tooltip.offsetHeight / 2) + "px";
+    }
+
+    function hideHover() {
+      if (!crosshair) return;
+      crosshair.style.display = "none";
+      tooltip.style.display = "none";
+    }
+
     let startX = null;
 
     overlay.addEventListener("mousedown", e => {
@@ -516,10 +637,11 @@
       rect.style.left = startX + "px";
       rect.style.width = "0";
       rect.style.display = "block";
+      hideHover();
     });
 
     overlay.addEventListener("mousemove", e => {
-      if (startX === null) return;
+      if (startX === null) { showHover(e.offsetX, e.offsetY); return; }
       const curX = Math.max(0, Math.min(e.offsetX, plotWidth));
       const left = Math.min(startX, curX);
       const width = Math.abs(curX - startX);
@@ -552,6 +674,7 @@
     overlay.addEventListener("mouseup", finish);
     overlay.addEventListener("mouseleave", e => {
       if (startX !== null) finish(e);
+      hideHover();
     });
   }
 
@@ -577,6 +700,14 @@
     const width = container.clientWidth - 32;
     const marginLeft = 60;
     const plotAreaWidth = width - marginLeft - 20; // 20 = right margin
+
+    // In full-screen mode the chart fills the viewport: split the available
+    // height across however many charts the page renders. Otherwise the chart
+    // keeps its fixed 300px height.
+    const fullscreen = document.body.classList.contains("chart-fullscreen");
+    const chartHeight = fullscreen
+      ? Math.max(300, Math.floor((window.innerHeight - 260) / Math.max(1, charts.size)) - 40)
+      : 300;
 
     for (const [chartKey, series] of charts) {
       // Counter metrics (e.g. committed.txn_ids) are monotonic counts;
@@ -652,9 +783,27 @@
         ? (isCounter ? (v) => `${formatBytes(v)}/s` : formatBytes)
         : undefined;
 
+      // Value formatter for the hover tooltip: humanize bytes, otherwise show a
+      // sensible number of significant digits followed by the unit label.
+      const fmtVal = (v) => {
+        if (v == null) return "—";
+        const n = Number(v);
+        if (Number.isNaN(n)) return "—";
+        if (isBytes) return isCounter ? `${formatBytes(n)}/s` : formatBytes(n);
+        const a = Math.abs(n);
+        let s;
+        if (a !== 0 && (a < 0.001 || a >= 1e7)) {
+          s = n.toExponential(2);
+        } else {
+          const digits = a < 10 ? 3 : (a < 1000 ? 2 : 0);
+          s = n.toLocaleString(undefined, { maximumFractionDigits: digits });
+        }
+        return yLabel ? `${s} ${yLabel}` : s;
+      };
+
       const plot = Plot.plot({
         width,
-        height: 300,
+        height: chartHeight,
         marginLeft,
         style: { background: "transparent", color: "var(--fg)" },
         x: {
@@ -688,8 +837,18 @@
 
       container.appendChild(wrapper);
 
-      // Attach brush-to-zoom on the rendered SVG
-      attachBrush(wrapper, plot, domainBegin, domainEnd, marginLeft, plotAreaWidth);
+      // Attach brush-to-zoom on the rendered SVG, plus a hover crosshair that
+      // reports each series' value at the pointed-to sample.
+      const hoverSeries = series
+        .map((s, i) => ({ col: s.avg, color: palette[i % palette.length], label: legendLabel(s.base) }))
+        .filter(h => h.col);
+      const hover = {
+        rows: plotData,
+        toMs: (r) => +toDate(r.timestamp),
+        series: hoverSeries,
+        fmt: fmtVal,
+      };
+      attachBrush(wrapper, plot, domainBegin, domainEnd, marginLeft, plotAreaWidth, hover);
     }
   }
 
