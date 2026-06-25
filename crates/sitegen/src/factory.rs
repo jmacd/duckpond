@@ -1611,7 +1611,7 @@ fn generate_site(
         };
 
         // Interpolate capture groups into the title
-        let title = interpolate_captures(&fm.title, &job.captures);
+        let title = interpolate_captures(&fm.title, &job.captures, &config.labels);
 
         // Build shortcode context for this page
         let sc_ctx = Arc::new(ShortcodeContext {
@@ -1628,6 +1628,8 @@ fn generate_site(
             metric_captions: config.metric_captions.clone(),
             pond_statuses: pond_statuses.clone(),
             generated_at: generated_at.to_string(),
+            default_range: config.site.default_range.clone(),
+            labels: config.labels.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1849,6 +1851,8 @@ fn render_partial(
                 metric_captions: config.metric_captions.clone(),
                 pond_statuses: pond_statuses.clone(),
                 generated_at: generated_at.to_string(),
+                default_range: config.site.default_range.clone(),
+                labels: config.labels.clone(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
@@ -1863,10 +1867,15 @@ fn render_partial(
     }
 }
 
-fn interpolate_captures(text: &str, captures: &[String]) -> String {
+fn interpolate_captures(
+    text: &str,
+    captures: &[String],
+    labels: &std::collections::BTreeMap<String, String>,
+) -> String {
     let mut result = text.to_string();
     for (i, val) in captures.iter().enumerate() {
-        result = result.replace(&format!("{{{{ ${} }}}}", i), val);
+        let display = labels.get(val).map(String::as_str).unwrap_or(val);
+        result = result.replace(&format!("{{{{ ${} }}}}", i), display);
     }
     result
 }
@@ -1965,15 +1974,32 @@ mod tests {
 
     #[test]
     fn test_interpolate_captures() {
+        let labels = std::collections::BTreeMap::new();
         assert_eq!(
-            interpolate_captures("{{ $0 }} data", &["Temperature".to_string()]),
+            interpolate_captures("{{ $0 }} data", &["Temperature".to_string()], &labels),
             "Temperature data"
         );
     }
 
     #[test]
+    fn test_interpolate_captures_with_label() {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("DO".to_string(), "Dissolved Oxygen".to_string());
+        assert_eq!(
+            interpolate_captures("{{ $0 }}", &["DO".to_string()], &labels),
+            "Dissolved Oxygen"
+        );
+        // A capture with no label entry falls back to the raw value.
+        assert_eq!(
+            interpolate_captures("{{ $0 }}", &["Salinity".to_string()], &labels),
+            "Salinity"
+        );
+    }
+
+    #[test]
     fn test_interpolate_empty() {
-        assert_eq!(interpolate_captures("Static", &[]), "Static");
+        let labels = std::collections::BTreeMap::new();
+        assert_eq!(interpolate_captures("Static", &[], &labels), "Static");
     }
 
     #[test]
@@ -2024,6 +2050,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: Some("https://example.com".to_string()),
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],
@@ -2042,6 +2069,7 @@ mod tests {
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
+            labels: std::collections::BTreeMap::new(),
             status_grid: None,
         };
 
@@ -2150,6 +2178,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],
@@ -2164,6 +2193,7 @@ mod tests {
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
+            labels: std::collections::BTreeMap::new(),
             status_grid: None,
         };
         let content: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();

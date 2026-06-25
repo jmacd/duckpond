@@ -42,6 +42,9 @@
   --nav-sub-btn: rgba(50, 250, 200, 0.55);
   --nav-sub-btn-hover: rgba(200, 200, 200, 0.8);
   --nav-sub-btn-active: rgba(160, 150, 140, 0.85);
+  /* Border for sub-nav buttons.  Default transparent so themes that don't
+     opt in keep solid-fill sub-tabs; set a color to get outline-style tabs. */
+  --nav-sub-btn-border: transparent;
 
   /* Surfaces */
   --bg: #f7f6f3;
@@ -161,7 +164,7 @@ a:hover { color: var(--accent); }
   background: var(--nav-btn-hover);
 }
 
-.sidebar li.active a {
+.sidebar li.active > a {
   background: var(--nav-btn-active);
   color: #ffffff;
   font-weight: 700;
@@ -194,7 +197,9 @@ a:hover { color: var(--accent); }
 
 .sidebar .subnav {
   display: none;
-  margin: 4px 0 0 0;
+  /* Inset from the left so sub-tabs are slightly narrower than their parent
+     and share its right edge (right-justified), reinforcing the hierarchy. */
+  margin: 4px 0 0 0.9rem;
   padding: 0;
 }
 
@@ -210,6 +215,7 @@ a:hover { color: var(--accent); }
   font-size: 0.85rem;
   padding: 0.4rem 0.75rem 0.4rem 1.25rem;
   background: var(--nav-sub-btn);
+  border: 1px solid var(--nav-sub-btn-border);
   border-radius: var(--radius-sm);
 }
 
@@ -217,8 +223,9 @@ a:hover { color: var(--accent); }
   background: var(--nav-sub-btn-hover);
 }
 
-.sidebar .subnav li.active a {
+.sidebar .subnav li.active > a {
   background: var(--nav-sub-btn-active);
+  border-color: var(--nav-sub-btn-active);
   color: #ffffff;
   font-weight: 600;
 }
@@ -466,6 +473,90 @@ tr:hover td {
   color: var(--fg-muted);
 }
 
+/* ── Window readout / editor + shareable link ───────────────── */
+
+.window-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+}
+
+.window-bar .window-label {
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.window-bar .window-arrow {
+  color: var(--fg-muted);
+}
+
+.window-input {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  font-family: inherit;
+}
+
+.window-input:focus {
+  outline: none;
+  border-color: var(--accent-light);
+}
+
+.copy-link {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--accent-light);
+  background: transparent;
+  color: var(--accent-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.copy-link:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.copy-link.copied {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.download-csv {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--accent-light);
+  background: transparent;
+  color: var(--accent-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.download-csv:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.download-csv:disabled {
+  opacity: 0.3;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--fg-muted);
+}
+
 /* ── Brush-to-zoom overlay ──────────────────────────────────── */
 
 .brush-overlay {
@@ -485,6 +576,64 @@ tr:hover td {
   border-left: 1px solid var(--accent-light);
   border-right: 1px solid var(--accent-light);
   pointer-events: none;
+}
+
+.crosshair-line {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background: var(--accent-light);
+  pointer-events: none;
+  z-index: 11;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 12;
+  pointer-events: none;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-sm);
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  min-width: 110px;
+  max-width: 260px;
+}
+
+.chart-tooltip .tt-time {
+  font-weight: 600;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.chart-tooltip .tt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.chart-tooltip .tt-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.chart-tooltip .tt-label {
+  color: var(--fg-muted);
+  margin-right: auto;
+}
+
+.chart-tooltip .tt-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 /* ── Charts ─────────────────────────────────────────────────── */
@@ -642,6 +791,67 @@ tr:hover td {
 
 .top-bar-icons a:hover {
   color: var(--accent);
+}
+
+/* ── Full-screen chart toggle + overlay ─────────────────────── */
+
+/* Link-styled button sitting just right of the back link; margin-right:auto
+   keeps it next to "<- Home" while pushing the icon group to the far right. */
+.fullscreen-toggle {
+  margin-right: auto;
+  margin-left: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--accent-light);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.fullscreen-toggle:hover {
+  color: var(--accent);
+}
+
+.fullscreen-toggle .fs-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* While a chart is full screen, lift its <main> out of the grid and let it
+   cover the viewport (over the sidebar).  The chart re-renders to fit. */
+body.chart-fullscreen {
+  overflow: hidden;
+}
+
+body.chart-fullscreen .content-page {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  margin: 0;
+  padding: 1rem 2rem 2rem;
+  overflow: auto;
+  background: var(--bg);
+}
+
+body.chart-fullscreen .blog-post {
+  min-height: calc(100vh - 7rem);
+}
+
+/* The post body and content normally cap at --max-width; let them span the
+   full overlay so the chart can use the entire width (and, via its computed
+   height, the entire height). */
+body.chart-fullscreen .blog-post,
+body.chart-fullscreen .blog-post-content {
+  max-width: none;
 }
 
 .blog-post {

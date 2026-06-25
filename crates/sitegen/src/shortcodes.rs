@@ -254,6 +254,18 @@ pub struct ShortcodeContext {
     /// into the static HTML output.  Format: ISO 8601, second
     /// resolution (e.g. `2026-04-27T21:00:00Z`).
     pub generated_at: String,
+
+    /// Optional default chart time-range label (e.g. "1M") plumbed through
+    /// from `SiteConfig.site.default_range`.  Emitted as `data-default-range`
+    /// on the chart container so chart.js can honor it; `None` leaves chart.js
+    /// to choose its adaptive default.
+    pub default_range: Option<String>,
+
+    /// Display-name overrides for capture values, plumbed through from
+    /// `SiteConfig.labels`.  The `cap{N}` shortcodes (`{{ $0 }}` etc.) map
+    /// their raw capture through this table so headings show a friendly name
+    /// (e.g. `DO` -> `Dissolved Oxygen`); missing keys emit the raw value.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -273,7 +285,8 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         let c = ctx.clone();
         let name = format!("cap{}", i);
         shortcodes.register(&name, move |_args: &ShortcodeArgs| {
-            c.captures.get(i).cloned().unwrap_or_default()
+            let raw = c.captures.get(i).cloned().unwrap_or_default();
+            c.labels.get(&raw).cloned().unwrap_or(raw)
         });
     }
 
@@ -282,7 +295,12 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     {
         let c = ctx.clone();
         shortcodes.register("chart", move |_args: &ShortcodeArgs| {
-            render_chart(&c.datafiles, &c.metric_registry, &c.metric_captions)
+            render_chart(
+                &c.datafiles,
+                &c.metric_registry,
+                &c.metric_captions,
+                c.default_range.as_deref(),
+            )
         });
     }
 
@@ -458,6 +476,7 @@ fn render_chart(
     datafiles: &[ExportedFile],
     registry: &BTreeMap<String, String>,
     captions: &BTreeMap<String, String>,
+    default_range: Option<&str>,
 ) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
@@ -499,13 +518,20 @@ fn render_chart(
         )
     };
 
+    let default_range_attr = match default_range {
+        Some(r) if !r.is_empty() => {
+            format!(" data-default-range=\"{}\"", html_escape(r))
+        }
+        _ => String::new(),
+    };
+
     format!(
-        "<div class=\"chart-container\" id=\"chart\">\
+        "<div class=\"chart-container\" id=\"chart\"{}>\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
          {}\
          {}\
          </div>",
-        json, registry_block, captions_block
+        default_range_attr, json, registry_block, captions_block
     )
 }
 
@@ -1318,6 +1344,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1329,7 +1357,7 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new());
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None);
         assert!(html.contains("No data files"));
     }
 
@@ -1343,11 +1371,27 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new());
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None);
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
         // Empty registry -> no chart-registry script element.
         assert!(!html.contains("chart-registry"));
+        // No default range configured -> no data-default-range attribute.
+        assert!(!html.contains("data-default-range"));
+    }
+
+    #[test]
+    fn test_render_chart_with_default_range() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"));
+        assert!(html.contains("data-default-range=\"1M\""));
     }
 
     #[test]
@@ -1364,7 +1408,7 @@ mod tests {
             ("committed.txn_ids".to_string(), "counter".to_string()),
             ("size.bytes".to_string(), "updowncounter".to_string()),
         ]);
-        let html = render_chart(&files, &registry, &BTreeMap::new());
+        let html = render_chart(&files, &registry, &BTreeMap::new(), None);
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
@@ -1401,6 +1445,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1472,6 +1518,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1559,6 +1607,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1701,6 +1751,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1761,6 +1813,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1839,6 +1893,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1910,6 +1966,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -2002,6 +2060,8 @@ mod tests {
             metric_captions: BTreeMap::new(),
             pond_statuses: None,
             generated_at: String::new(),
+            default_range: None,
+            labels: BTreeMap::new(),
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");
