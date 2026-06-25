@@ -101,6 +101,15 @@ pub struct SiteConfig {
     #[serde(default)]
     pub metric_captions: std::collections::BTreeMap<String, String>,
 
+    /// Optional display-name overrides for template-route capture values.
+    /// Keyed by the raw capture string (the `$0`/`$1` value taken from the
+    /// export path, e.g. `DO`), with the friendly label as the value
+    /// (e.g. `Dissolved Oxygen`).  Applied when a capture is rendered as a
+    /// page title or heading via `{{ $0 }}`; URL slugs keep the raw value so
+    /// links are unaffected.  Missing keys fall back to the raw capture.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+
     /// Optional pond status grid configuration.  When present, sitegen
     /// runs DataFusion queries against the configured journal data at
     /// render time and exposes per-unit status to the
@@ -218,6 +227,12 @@ pub struct SiteMeta {
     /// If absent, the GitHub icon is omitted.
     #[serde(default)]
     pub github_url: Option<String>,
+    /// Default time-range button selected when a chart first loads, given as
+    /// one of the chart.js duration labels such as "1M", "3M" or "24h". When
+    /// absent, chart.js falls back to its adaptive default based on the data
+    /// span. The value is clamped to the ranges that fit the available data.
+    #[serde(default)]
+    pub default_range: Option<String>,
 }
 
 /// RSS feed configuration (optional section in site.yaml).

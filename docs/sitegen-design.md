@@ -66,6 +66,7 @@ site:
   title: "Noyo Harbor Blue Economy"
   base_url: "/"
   site_url: "https://example.com"             # Required for RSS feed generation
+  default_range: "1M"                          # Optional: pin the chart duration default (e.g. 1M, 3M, 24h)
 
 # Export stages - specify what data to export and how
 # These run first, producing file manifests with auto-computed temporal partitioning
@@ -111,6 +112,14 @@ routes:
 # Partials included by pages (not routes)
 partials:
   sidebar: "/site/sidebar.md"
+
+# Optional display-name overrides for template-route capture values.
+# Keyed by the raw capture ($0/$1 taken from the export path); the value is
+# the friendly label rendered when a capture appears in a page title or
+# heading via {{ $0 }}.  URL slugs keep the raw capture, so links are
+# unaffected.  Missing keys fall back to the raw value.
+labels:
+  DO: "Dissolved Oxygen"
 
 # Static assets to copy
 static:

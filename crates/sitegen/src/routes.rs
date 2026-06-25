@@ -417,6 +417,7 @@ mod tests {
                 base_url: "/test/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![ExportStage {
@@ -460,6 +461,7 @@ mod tests {
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
+            labels: std::collections::BTreeMap::new(),
             status_grid: None,
         }
     }
@@ -595,6 +597,7 @@ mod tests {
                 base_url: "/".to_string(),
                 site_url: None,
                 github_url: None,
+                default_range: None,
             },
             content: vec![],
             exports: vec![],
@@ -625,6 +628,7 @@ mod tests {
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
+            labels: std::collections::BTreeMap::new(),
             status_grid: None,
         };
 
