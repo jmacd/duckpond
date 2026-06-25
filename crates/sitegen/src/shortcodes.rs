@@ -260,6 +260,12 @@ pub struct ShortcodeContext {
     /// on the chart container so chart.js can honor it; `None` leaves chart.js
     /// to choose its adaptive default.
     pub default_range: Option<String>,
+
+    /// Display-name overrides for capture values, plumbed through from
+    /// `SiteConfig.labels`.  The `cap{N}` shortcodes (`{{ $0 }}` etc.) map
+    /// their raw capture through this table so headings show a friendly name
+    /// (e.g. `DO` -> `Dissolved Oxygen`); missing keys emit the raw value.
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -279,7 +285,8 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         let c = ctx.clone();
         let name = format!("cap{}", i);
         shortcodes.register(&name, move |_args: &ShortcodeArgs| {
-            c.captures.get(i).cloned().unwrap_or_default()
+            let raw = c.captures.get(i).cloned().unwrap_or_default();
+            c.labels.get(&raw).cloned().unwrap_or(raw)
         });
     }
 
@@ -1338,6 +1345,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1438,6 +1446,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1510,6 +1519,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1598,6 +1608,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1741,6 +1752,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1802,6 +1814,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1881,6 +1894,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1953,6 +1967,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -2046,6 +2061,7 @@ mod tests {
             pond_statuses: None,
             generated_at: String::new(),
             default_range: None,
+            labels: BTreeMap::new(),
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");

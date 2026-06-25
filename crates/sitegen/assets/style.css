@@ -42,6 +42,9 @@
   --nav-sub-btn: rgba(50, 250, 200, 0.55);
   --nav-sub-btn-hover: rgba(200, 200, 200, 0.8);
   --nav-sub-btn-active: rgba(160, 150, 140, 0.85);
+  /* Border for sub-nav buttons.  Default transparent so themes that don't
+     opt in keep solid-fill sub-tabs; set a color to get outline-style tabs. */
+  --nav-sub-btn-border: transparent;
 
   /* Surfaces */
   --bg: #f7f6f3;
@@ -161,7 +164,7 @@ a:hover { color: var(--accent); }
   background: var(--nav-btn-hover);
 }
 
-.sidebar li.active a {
+.sidebar li.active > a {
   background: var(--nav-btn-active);
   color: #ffffff;
   font-weight: 700;
@@ -194,7 +197,9 @@ a:hover { color: var(--accent); }
 
 .sidebar .subnav {
   display: none;
-  margin: 4px 0 0 0;
+  /* Inset from the left so sub-tabs are slightly narrower than their parent
+     and share its right edge (right-justified), reinforcing the hierarchy. */
+  margin: 4px 0 0 0.9rem;
   padding: 0;
 }
 
@@ -210,6 +215,7 @@ a:hover { color: var(--accent); }
   font-size: 0.85rem;
   padding: 0.4rem 0.75rem 0.4rem 1.25rem;
   background: var(--nav-sub-btn);
+  border: 1px solid var(--nav-sub-btn-border);
   border-radius: var(--radius-sm);
 }
 
@@ -217,8 +223,9 @@ a:hover { color: var(--accent); }
   background: var(--nav-sub-btn-hover);
 }
 
-.sidebar .subnav li.active a {
+.sidebar .subnav li.active > a {
   background: var(--nav-sub-btn-active);
+  border-color: var(--nav-sub-btn-active);
   color: #ffffff;
   font-weight: 600;
 }
