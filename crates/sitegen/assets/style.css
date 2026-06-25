@@ -532,6 +532,31 @@ tr:hover td {
   color: #ffffff;
 }
 
+.download-csv {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--accent-light);
+  background: transparent;
+  color: var(--accent-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.download-csv:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.download-csv:disabled {
+  opacity: 0.3;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--fg-muted);
+}
+
 /* ── Brush-to-zoom overlay ──────────────────────────────────── */
 
 .brush-overlay {

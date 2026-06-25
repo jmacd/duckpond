@@ -99,6 +99,10 @@
   // inputs (start/end readout + editor) and the "Copy link" button.
   let curBegin = null, curEnd = null;
 
+  // Most recently queried rows (the data backing the current view), kept so the
+  // "Download CSV" button can export exactly what is shown for the window.
+  let lastData = null;
+
   // A shareable link encodes the window as an absolute, fixed epoch-ms range
   // in the URL hash (`#t=<begin>,<end>`). Parse it on load so the page opens
   // showing exactly that range.
@@ -230,7 +234,13 @@
   copyBtn.className = "copy-link";
   copyBtn.textContent = "Copy link";
 
-  windowBar.append(winLabel, startInput, arrow, endInput, copyBtn);
+  const downloadBtn = document.createElement("button");
+  downloadBtn.type = "button";
+  downloadBtn.className = "download-csv";
+  downloadBtn.textContent = "Download CSV";
+  downloadBtn.disabled = true;
+
+  windowBar.append(winLabel, startInput, arrow, endInput, copyBtn, downloadBtn);
   toolbar.after(windowBar);
 
   function pad2(n) { return String(n).padStart(2, "0"); }
@@ -286,6 +296,51 @@
       copyBtn.textContent = "Copy link";
       copyBtn.classList.remove("copied");
     }, 1800);
+  });
+
+  // Serialize the queried rows to CSV: a `timestamp` column (ISO 8601 / UTC)
+  // followed by every non-partition data column, sorted for stable output.
+  function buildCsv(rows) {
+    if (!rows || !rows.length) return "";
+    const cols = new Set();
+    for (const r of rows) {
+      for (const k of Object.keys(r)) {
+        if (k === "timestamp" || PARTITION_COLS.has(k)) continue;
+        cols.add(k);
+      }
+    }
+    const valueCols = Array.from(cols).sort();
+    const header = ["timestamp", ...valueCols];
+    const esc = (s) => {
+      const str = String(s);
+      return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+    const lines = [header.map(esc).join(",")];
+    for (const r of rows) {
+      const cells = [toDate(r.timestamp).toISOString()];
+      for (const c of valueCols) {
+        const v = r[c];
+        cells.push(v == null ? "" : (typeof v === "bigint" ? v.toString() : String(v)));
+      }
+      lines.push(cells.map(esc).join(","));
+    }
+    return lines.join("\n");
+  }
+
+  downloadBtn.addEventListener("click", () => {
+    if (!lastData || !lastData.length) return;
+    const csv = buildCsv(lastData);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const slug = (location.pathname.split("/").pop() || "data").replace(/\.html?$/i, "") || "data";
+    const stamp = (ms) => toLocalInput(ms).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `${slug}_${stamp(curBegin)}_${stamp(curEnd)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
 
   // If the page opened with a shared (custom) range, reflect that state:
@@ -803,6 +858,10 @@
     syncWindowControls(domainBegin, domainEnd);
 
     const data = await queryData(domainBegin, domainEnd);
+
+    // Keep the raw rows for CSV export; disable the button when empty.
+    lastData = data;
+    downloadBtn.disabled = data.length === 0;
 
     container.innerHTML = "";
 
