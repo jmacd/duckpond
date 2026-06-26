@@ -176,10 +176,18 @@ This also keeps the two digests cleanly separated:
 - the tree-hash table holds the **recursive** digest -- the content-only
   fold, beside the data, not inside it.
 
-The row key has one open sub-choice (Section 11): node identity plus version
-(a simple per-node index) or the `tree_hash` itself (content-addressed, so
-identical subtrees collapse across commits and across ponds). Either way it
-is one file per commit; object-per-file storage is the shape to avoid.
+The row is keyed by **node identity plus version** (`(pond_id, node_id,
+version)`), a per-node index whose lifecycle is identical to the existing
+per-node version history -- ordinary retention and vacuum manage it, with no
+separate garbage collection. The row *values* are content hashes, so sync
+still transfers and dedups **by hash on the wire** regardless of the storage
+key; content-addressing for transfer does not require content-addressing at
+rest. A content-addressed-at-rest store (rows keyed by `tree_hash`, so
+identical subtrees collapse across commits and ponds) is a possible later
+optimization, but it saves almost nothing -- the rows are tens of bytes -- and
+it would require a reachability/GC subsystem over the commit DAG, so this
+design does not adopt it. Either way it is one file per commit; object-per-file
+storage is the shape to avoid. See Decision D1 in Section 11.
 
 ### 5.3 The top-level commit record is the spine
 
@@ -193,6 +201,14 @@ This is simultaneously the top of the SPACE tree and -- as Section 7 shows --
 the leaf of the TIME log. It is tiny, so it is kept forever. The bulky
 per-node tree-hash deltas of Section 5.2 are a compactable detail and may be
 checkpointed and vacuumed; the commit spine is append-once.
+
+Because the commit record carries `root_tree_hash`, and that hash **is** the
+transparency-log leaf (Section 7), the root fold must be computed **at commit
+time** -- there is no leaf to log otherwise. Computing it incrementally
+(folding only the touched ancestor chain, reading unchanged children from the
+tree-hash table) is exactly why the table persists tree hashes rather than
+recomputing them at compare time. Persisting is therefore not a tuning choice
+but a requirement of the log unification. See Decision D3 in Section 11.
 
 ---
 
@@ -275,14 +291,33 @@ list and not a `(pond_id, seq)` pair; reachability replaces both.
 
 ## 9. Special cases to pin
 
-- **Series / multi-version files.** A file that accumulates versions uses a
-  cumulative content-and-history hash as its blob-level `child_hash`, stable
-  and well-defined, rather than any single version's hash.
-- **Dynamic and computed nodes.** Nodes whose content is computed on read,
-  rather than stored, have no stored bytes to hash. Each needs an explicit
-  rule for its `child_hash` -- for example, the hash of its generating
-  configuration, or exclusion from the content tree. This must be decided
-  before the tree is well-defined (Section 11).
+The `child_hash` an entry contributes to its parent's `tree_hash` depends on
+the node kind:
+
+| Node kind | `child_hash` |
+|-----------|--------------|
+| file (physical version) | `blake3(version bytes)` |
+| series / multi-version file | cumulative content-and-history hash (a stable bao root over all versions), not any single version's hash |
+| directory | `tree_hash` -- the recursive fold |
+| symlink | `blake3(target path)` |
+| dynamic dir / read-time `table:dynamic` | `blake3(canonical(factory_type, config))` -- the recipe |
+
+- **Series.** Uses the cumulative hash above so the entry commits to the whole
+  history, stable across appends.
+- **Dynamic and computed nodes.** Nodes whose content is computed on read have
+  no stored bytes. Their `child_hash` is the hash of their **definition**
+  (factory type plus configuration), not their output. The semantics are
+  explicit: for a dynamic node, tree-hash equality means *the recipe is
+  identical*, not that the output bytes are. Its dynamically generated children
+  are derived, not stored, so they are **not** folded into its hash. This is
+  correct for sync -- the recipe and its real upstream source data (ordinary
+  blobs/series that sync normally) transfer, and the consumer recomputes
+  downstream. An *executed* factory that writes real data (for example, a
+  collector that materializes a `table:series`) produces physical blobs and is
+  hashed as a series, not by this rule; only genuinely read-time-computed nodes
+  use the recipe hash. The config requires a canonical serialization so that
+  semantically identical recipes hash equal (the same pinning requirement as
+  the tree wire format, Section 11 D2).
 - **Compaction / rewrite.** Reorganizing storage legitimately produces new
   blobs and trees and therefore a new content hash. That is recorded honestly
   as a new commit whose trees were rewritten, with a rewrite relationship to
@@ -305,23 +340,36 @@ list and not a `(pond_id, seq)` pair; reachability replaces both.
 
 ---
 
-## 11. Open decisions
+## 11. Decisions and remaining open items
 
-1. **Tree wire format.** The exact byte encoding of a tree's entry list
-   (delimiters, `entry_type` representation, name encoding, sort collation).
-   A content-addressed format is permanent and must be pinned before any
-   object is written.
-2. **Tree-hash row key.** Node-identity index versus content-addressed by
-   `tree_hash` (Section 5.2). Content-addressed enables cross-commit and
-   cross-pond subtree dedup at the cost of a reachability/GC story.
-3. **Dynamic-node hashing.** The `child_hash` rule for computed nodes
-   (Section 9).
-4. **Persist vs recompute.** This design persists tree hashes at commit time
-   so comparison is O(1) on cached subtrees. The alternative -- store only
-   own-content digests and recompute the fold at compare time -- makes commits
-   cheaper but every comparison O(whole tree). Persisting is the default here.
-5. **Checkpoint cadence and the SHA-256 publish format.** When the log
-   materializes tiles and emits checkpoints; deferred with signing.
+### Decided
+
+- **D1 -- Tree-hash row key: identity index, not content-addressed at rest.**
+  Rows are keyed `(pond_id, node_id, version)`. Sync still dedups by hash on
+  the wire because the values are content hashes. At-rest content-addressing
+  (keying by `tree_hash`) is rejected for now: it saves negligible storage and
+  would require reachability/GC over the commit DAG. It remains a possible
+  later optimization (Section 5.2).
+- **D3 -- Persist tree hashes at commit, do not recompute at compare.** Forced
+  by the log unification: the commit's `root_tree_hash` is the log leaf, so the
+  fold must run at commit time. Recomputing only the touched ancestor chain
+  (children read from the persisted table) is the cheap, incremental way to
+  produce it (Sections 5.3, 7).
+- **D4 -- Dynamic-node `child_hash` is the recipe hash.** Read-time-computed
+  nodes hash `blake3(canonical(factory_type, config))`; tree equality means
+  recipe equality, not output equality; generated children are not folded
+  (Section 9).
+
+### Open
+
+- **D2 -- Canonical serialization formats.** Two permanent encodings must be
+  pinned before any object is written: (a) the **tree wire format** -- the byte
+  encoding of a tree's entry list: delimiters, `entry_type` representation,
+  name encoding, sort collation; and (b) the **canonical factory-config
+  serialization** used by D4. Both are content-addressed and therefore frozen
+  once chosen.
+- **D5 -- Checkpoint cadence and the SHA-256 publish format.** When the log
+  materializes tiles and emits checkpoints; deferred with signing.
 
 ---
 
