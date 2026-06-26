@@ -300,7 +300,7 @@ the node kind:
 | series / multi-version file | cumulative content-and-history hash (a stable bao root over all versions), not any single version's hash |
 | directory | `tree_hash` -- the recursive fold |
 | symlink | `blake3(target path)` |
-| dynamic dir / read-time `table:dynamic` | `blake3(canonical(factory_type, config))` -- the recipe |
+| dynamic dir / read-time `table:dynamic` | `blake3(stored config bytes)` -- the recipe, hashed byte-for-byte |
 
 - **Series.** Uses the cumulative hash above so the entry commits to the whole
   history, stable across appends.
@@ -315,9 +315,11 @@ the node kind:
   downstream. An *executed* factory that writes real data (for example, a
   collector that materializes a `table:series`) produces physical blobs and is
   hashed as a series, not by this rule; only genuinely read-time-computed nodes
-  use the recipe hash. The config requires a canonical serialization so that
-  semantically identical recipes hash equal (the same pinning requirement as
-  the tree wire format, Section 11 D2).
+  use the recipe hash. The recipe is hashed **byte-for-byte over the stored
+  config bytes** -- no canonicalization. This is the same byte-equality stance
+  the whole design takes (Section 4.1): reformatting a config (whitespace, key
+  order) reads as a change, which is accepted as simpler than defining a
+  canonical form. See Decision D2 in Section 11.
 - **Compaction / rewrite.** Reorganizing storage legitimately produces new
   blobs and trees and therefore a new content hash. That is recorded honestly
   as a new commit whose trees were rewritten, with a rewrite relationship to
@@ -356,20 +358,25 @@ the node kind:
   (children read from the persisted table) is the cheap, incremental way to
   produce it (Sections 5.3, 7).
 - **D4 -- Dynamic-node `child_hash` is the recipe hash.** Read-time-computed
-  nodes hash `blake3(canonical(factory_type, config))`; tree equality means
-  recipe equality, not output equality; generated children are not folded
-  (Section 9).
+  nodes hash `blake3(stored config bytes)`; tree equality means recipe
+  equality, not output equality; generated children are not folded (Section 9).
+- **D2 -- Encodings start simple and are not frozen.** Two byte encodings are
+  needed: (a) the **tree wire format** -- the byte layout of a tree's entry
+  list (delimiters, `entry_type` representation, name encoding, sort
+  collation); and (b) the **config bytes** for D4, which are taken **as-is**,
+  byte-for-byte, with no canonicalization. Both start with the simplest
+  reasonable choice. Because the project allows a **clean reset at will** (no
+  legacy ponds to migrate), these formats are *not* permanently frozen -- they
+  can be improved later by resetting. The one constraint: any two ponds that
+  sync, and any one pond across a format change, must share the same encoding
+  version, since hashes do not match across versions; a format change is a
+  coordinated reset of all participating ponds.
 
 ### Open
 
-- **D2 -- Canonical serialization formats.** Two permanent encodings must be
-  pinned before any object is written: (a) the **tree wire format** -- the byte
-  encoding of a tree's entry list: delimiters, `entry_type` representation,
-  name encoding, sort collation; and (b) the **canonical factory-config
-  serialization** used by D4. Both are content-addressed and therefore frozen
-  once chosen.
 - **D5 -- Checkpoint cadence and the SHA-256 publish format.** When the log
-  materializes tiles and emits checkpoints; deferred with signing.
+  materializes tiles and emits checkpoints; deferred together with signing
+  (Section 10).
 
 ---
 
