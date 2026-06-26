@@ -14,6 +14,7 @@ use thiserror::Error;
 
 mod control_table;
 mod dispatch;
+pub mod fsck;
 mod guard;
 mod host;
 pub mod maintenance;
@@ -25,6 +26,7 @@ mod write_lock;
 
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
+pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
 pub use rebuild::{RebuildReport, rebuild_control_table};

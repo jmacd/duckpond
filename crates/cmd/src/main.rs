@@ -278,6 +278,20 @@ enum Commands {
     /// Show an operator-facing status aggregate: identity, local commit
     /// state, recovery health, and per-remote sync watermarks (D6).
     Status,
+    /// Filesystem-check: verify content checksums and Merkle trees, and
+    /// print a single root checksum that exhaustively fingerprints every
+    /// row in the pond (across all pond_ids).  Two replicas are identical
+    /// iff their root checksums match.
+    Fsck {
+        /// Skip the content-rehash pass; compute only the structural
+        /// root checksum (fast).
+        #[arg(long)]
+        quick: bool,
+        /// Print a per-partition breakdown and content statistics in
+        /// addition to the root checksum.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Rebuild the control table from the data Delta table when the
     /// control table is lost or corrupt (D6).  Recovers pond identity
     /// and the transaction-log skeleton; settings/watermarks must be
@@ -584,6 +598,9 @@ async fn main() -> Result<()> {
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
         Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
         Commands::Status => commands::status_command(&ship_context).await,
+        Commands::Fsck { quick, verbose } => {
+            commands::fsck_command(&ship_context, quick, verbose).await
+        }
         Commands::RebuildControl { force } => {
             commands::rebuild_control_command(&ship_context, force).await
         }

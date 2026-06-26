@@ -222,6 +222,74 @@ future swap if O(1) incremental update cost is ever measured to
 matter.  Recorded here as a decision, not an accident: no benchmark
 gate blocks cutover.
 
+## Future direction: content-addressed replication (incremental coexistence)
+
+> **Decision (2026-06-23):** the next replication arc migrates this
+> subsystem onto the content-addressed object model in
+> `docs/content-addressed-pond-design.md`, via **incremental coexistence** --
+> tree/commit objects are computed *alongside* today's bundle/frontier
+> checksums, sync moves to commit-DAG fetch over phases, and the
+> bundle/frontier apparatus is retired **last**, only after the
+> object-graph `verify` reaches parity with the shipped one.
+
+> **Decision (2026-06-24): pure reset, no legacy migration.** No deployed
+> pond needs preservation, so this arc does **not** convert historical
+> ponds onto the object model. New ponds use the content-tree machinery from
+> genesis; CA4 hard-removes the bundle path with **zero on-disk migration**.
+> The verify-parity gate is retained for correctness confidence on `main`,
+> not for data migration.
+
+> **Decision (2026-06-24): checksum/tree state is per-pond.** The commit
+> stream is per-`pond_id` and linear (single-writer-per-pond; per-pond seq
+> spaces; pond-pure partitions). Touched-partition `tree_hash` updates feed a
+> **per-pond accumulator** (a persisted, node-keyed tree-hash cache updated
+> only for the partitions a commit touched), replacing today's global flat
+> `fsck` Merkle over all partitions. See
+> `docs/content-addressed-pond-design.md` Sections 5 and 6. Build it as new
+> CA1 machinery, not a retrofit of the bundle's `partition_checksums` list.
+
+The shipped subsystem (D1-D10) is the **bundle/frontier** generation:
+3-partition bundles (manifest, checksum, data), per-partition checksums,
+`(pond_id, seq)` frontier sequencing, and `push`/`pull`/`verify`/`restart`.
+The content-addressed model is its **successor**, not a competing design:
+`docs/content-addressed-pond-design.md` Sections 8 and 10 list the bundle
+format, the `(pond_id, seq)` frontier, and the compaction-invariance
+assertions as apparatus the object model **retires**. Incremental coexistence
+is the path that gets there without a big-bang rewrite or stranding either
+doc.
+
+### Coexistence invariant (the safety property)
+
+Throughout this arc, the bundle/frontier path remains the **production**
+replication path. The content graph is built and verified **in parallel**
+but is not load-bearing for sync until the final phase. Cutover of each
+capability is gated on **verify parity**: the object-graph answer must agree
+with the bundle answer before the bundle path is removed for that capability.
+This is what makes the migration safe to land incrementally on `main`.
+
+### Phases
+
+These elaborate the migration described in
+`content-addressed-pond-design.md` (Sections 5-8). Prefix `CA`
+(content-addressed) to keep them distinct from the D-series.
+
+| Phase | Goal | Touchpoints | Coexistence |
+|---|---|---|---|
+| **CA1** | Compute **blob/tree/commit objects at commit time**, BLAKE3-addressed, name == hash (design Sections 4-5). Recursive, name-keyed, content-only trees, with a **per-pond accumulator** (node-keyed `tree_hash` cache updated only for touched partitions). | new object store under `data/` (or reuse `_large_files` CAS shape); commit-time fold bounded by txn working set | additive: existing per-partition checksums still computed and authoritative |
+| **CA2** | **Move provenance into the commit object** (`pond_id`, `seq`, `time`, author, CLI args) -- the `pond_txn` blob already stamped in Delta commitInfo, now attached to a commit. | `crates/tlogfs/src/txn_metadata.rs`, control-table reconstruction (`persistence.rs` reconstruct path) | commit object mirrors `pond_txn`; control table unchanged |
+| **CA3** | **Switch sync to commit-DAG fetch**: compare root tree hashes, descend by child hash, transfer objects the peer lacks; frontier becomes a single commit hash. | `crates/sync-remote/src/remote.rs` push/pull; `remote_adapter.rs` `apply_pulled_bundle` | run object-graph `verify` next to `verify_against_remote`; require parity |
+| **CA4** | **Retire bundle/frontier** once parity holds: drop `partition_checksums` from the bundle, the per-pond `seq` allocator's frontier role, and `Ship::compact`'s checksum-invariance assertions; `fsck` becomes the CAS-invariant scrub (design Section 6.1). | `remote_adapter.rs:536,738`; `persistence.rs` seq allocator; `ship.rs:920,989`; `fsck.rs` | bundle path removed only after CA3 parity is demonstrated |
+
+### Relationship to "CRDT-style symmetric ponds" (Out of scope, below)
+
+The commit DAG delivered in CA3 is the prerequisite that item was waiting
+on. Because DuckPond is **single-writer-per-pond**, each ref is linear, so
+push-pull is **fast-forward** and cross-pond import is **grafting** a
+distinct ref -- a full 3-way merge engine is needed only if concurrent
+writers ever share one ref (foundation §9.5). So the symmetric-sync goal is
+reached by the fast-forward/grafting model, not by CRDTs; the
+out-of-scope note below is superseded by this arc once CA3 lands.
+
 ## Background
 
 The `duckpond/sandbox/` prototype (Cargo workspace separate from
@@ -986,7 +1054,10 @@ checks total:
 ## Out of scope (for now)
 
 - CRDT-style symmetric ponds (future direction; mode becomes
-  non-issue).
+  non-issue).  **Superseded** by the content-addressed arc above: the
+  CA3 commit DAG plus single-writer linear refs gives symmetric sync via
+  fast-forward + grafting, without CRDTs (see "Future direction:
+  content-addressed replication").
 - `pond init`-time configuration of FS conventions and per-replica
   defaults (currently via control-table settings).
 - Old-format bundle migration tooling (no compat needed).

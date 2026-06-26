@@ -9,6 +9,7 @@ pub mod copy;
 pub mod describe;
 pub mod emergency;
 pub mod export;
+pub mod fsck;
 // pub mod hydrovu;  // Removed: replaced by factory-based `pond run` command
 pub mod init;
 pub mod list;
@@ -35,6 +36,7 @@ pub use control::control_command;
 pub use copy::{CopyOptions, copy_command};
 pub use describe::describe_command;
 pub use export::export_command;
+pub use fsck::fsck_command;
 pub use init::init_command;
 pub use list::list_command;
 pub use list_factories::list_factories_command;
