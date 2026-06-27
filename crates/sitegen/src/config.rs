@@ -75,6 +75,13 @@ pub struct SiteConfig {
     /// If absent, no banner is rendered.
     #[serde(default)]
     pub header: Option<String>,
+    /// Browser data explorer configuration. When present, the `{{ explore }}`
+    /// shortcode (on an `layout: explore` page) exposes the named export stages
+    /// as queryable datasets in a Datasette-style SQL playground. Opt-in per
+    /// site: absent means the explorer falls back to the single export bound to
+    /// the page's route.
+    #[serde(default)]
+    pub explore: Option<ExploreConfig>,
     /// Metric instrument-kind registry, keyed by metric name (the
     /// `<param>.<unit>` portion of a wide column name).  Values are
     /// OpenTelemetry instrument kinds: `counter`, `updowncounter`,
@@ -318,6 +325,28 @@ fn default_target_points() -> u64 {
 
 fn default_timestamp_column() -> String {
     "timestamp".to_string()
+}
+
+/// Browser data explorer configuration.
+///
+/// Lists which export stages to surface as queryable datasets in the explorer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExploreConfig {
+    /// Datasets exposed in the explorer, in display order.
+    pub datasets: Vec<ExploreDataset>,
+}
+
+/// One explorer dataset: an export stage surfaced as a named DuckDB view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExploreDataset {
+    /// Name of the `exports:` stage providing this dataset's parquet files.
+    pub export: String,
+    /// DuckDB view/table name the explorer registers (SQL identifier).
+    pub table: String,
+    /// Human-readable label shown in the dataset picker.
+    pub label: String,
 }
 
 /// A route in the hierarchical route tree.

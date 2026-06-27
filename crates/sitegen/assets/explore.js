@@ -157,6 +157,18 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     }
   }
 
+  // Show the dataset's columns from the manifest immediately, without a query
+  // round-trip. DESCRIBE later refines this with column types once the view is
+  // registered. No-op when the manifest carries no column list.
+  function showManifestSchema(d, table) {
+    const cols = Array.isArray(d.columns) ? d.columns : [];
+    if (cols.length === 0) {
+      schemaInfo.textContent = "";
+      return;
+    }
+    schemaInfo.textContent = `${table}: ${cols.join(", ")}`;
+  }
+
   // ── Query execution ─────────────────────────────────────────────────────────
 
   // Wrap a query in a default LIMIT if it has none, to bound result size.
@@ -273,6 +285,9 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   async function selectDataset(i, { run = false } = {}) {
     datasetSelect.value = String(i);
     status.textContent = "Loading dataset…";
+    // Show the manifest column list immediately so the schema is visible while
+    // the parquet files download; DESCRIBE refines it with types afterward.
+    showManifestSchema(datasets[i], datasetTable(datasets[i], i));
     try {
       const table = await ensureDataset(i);
       await showSchema(table);

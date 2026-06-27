@@ -406,17 +406,54 @@ async fn run_export_stages(
     for stage in &config.exports {
         // Detect format-provider URL patterns vs bare pond glob paths
         if stage.pattern.contains("://") {
-            let by_key =
+            let (by_key, columns) =
                 run_format_provider_export(stage, root, provider_ctx, &data_dir, config).await?;
-            exports.insert(stage.name.clone(), ExportContext { by_key });
+            exports.insert(stage.name.clone(), ExportContext { by_key, columns });
         } else {
-            let by_key =
+            let (by_key, columns) =
                 run_queryable_file_export(stage, root, &data_dir, provider_ctx, config).await?;
-            exports.insert(stage.name.clone(), ExportContext { by_key });
+            exports.insert(stage.name.clone(), ExportContext { by_key, columns });
         }
     }
 
     Ok(exports)
+}
+
+/// Resolve configured data-explorer datasets against the export stages.
+///
+/// Each `SiteConfig.explore.datasets` entry names an export stage; this
+/// flattens that stage's files across all `$0` keys and pairs them with the
+/// stage's unioned column names so the explorer can register the dataset and
+/// show its schema without a DESCRIBE round-trip. Datasets whose `export`
+/// stage produced no files are skipped (empty datasets are not useful).
+fn resolve_explore_datasets(
+    config: &SiteConfig,
+    exports: &BTreeMap<String, ExportContext>,
+) -> Vec<shortcodes::ResolvedExploreDataset> {
+    let Some(explore) = &config.explore else {
+        return vec![];
+    };
+    let mut resolved = Vec::new();
+    for ds in &explore.datasets {
+        let Some(ctx) = exports.get(&ds.export) else {
+            warn!(
+                "explore dataset '{}' references unknown export stage '{}'; skipping",
+                ds.table, ds.export
+            );
+            continue;
+        };
+        let files: Vec<shortcodes::ExportedFile> = ctx.by_key.values().flatten().cloned().collect();
+        if files.is_empty() {
+            continue;
+        }
+        resolved.push(shortcodes::ResolvedExploreDataset {
+            table: ds.table.clone(),
+            label: ds.label.clone(),
+            files,
+            columns: ctx.columns.clone(),
+        });
+    }
+    resolved
 }
 
 /// Export via format-provider URL pattern (e.g., `jsonlogs:///path/*.jsonl`).
@@ -430,7 +467,7 @@ async fn run_format_provider_export(
     provider_ctx: &tinyfs::ProviderContext,
     data_dir: &std::path::Path,
     config: &SiteConfig,
-) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
+) -> Result<(BTreeMap<String, Vec<shortcodes::ExportedFile>>, Vec<String>), tinyfs::Error> {
     let fs = provider_ctx.filesystem();
     let provider = provider::Provider::new(Arc::new(fs)).with_root(root.clone());
 
@@ -444,7 +481,7 @@ async fn run_format_provider_export(
                 "Export stage '{}': pattern '{}' matched no files: {}",
                 stage.name, stage.pattern, e
             );
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), vec![]));
         }
     };
 
@@ -468,6 +505,7 @@ async fn run_format_provider_export(
     let temporal_parts: Vec<String> = vec![];
 
     let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
+    let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let base = config.site.base_url.trim_end_matches('/');
 
     for matched in &matched_files {
@@ -490,7 +528,7 @@ async fn run_format_provider_export(
                 ))
             })?;
 
-        let (export_outputs, _schema) = provider::export::export_table_provider_to_parquet(
+        let (export_outputs, schema) = provider::export::export_table_provider_to_parquet(
             table_provider,
             &path_str,
             &export_dir,
@@ -502,6 +540,10 @@ async fn run_format_provider_export(
         )
         .await
         .map_other_context(format!("export '{}'", path_str))?;
+
+        for field in &schema.fields {
+            columns.insert(field.name.clone());
+        }
 
         for (_caps, export_output) in &export_outputs {
             let mut temporal = BTreeMap::new();
@@ -535,7 +577,7 @@ async fn run_format_provider_export(
         );
     }
 
-    Ok(by_key)
+    Ok((by_key, columns.into_iter().collect()))
 }
 
 /// Run the pond status grid queries (when `SiteConfig.status_grid` is
@@ -992,7 +1034,7 @@ async fn run_queryable_file_export(
     data_dir: &std::path::Path,
     provider_ctx: &tinyfs::ProviderContext,
     config: &SiteConfig,
-) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
+) -> Result<(BTreeMap<String, Vec<shortcodes::ExportedFile>>, Vec<String>), tinyfs::Error> {
     let matches = root.collect_matches(&stage.pattern).await?;
     info!(
         "Export stage '{}': {} matches for '{}'",
@@ -1057,6 +1099,7 @@ async fn run_queryable_file_export(
     };
 
     let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
+    let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for (node_path, captures) in &matches {
         let path_str = node_path.path.to_string_lossy().to_string();
@@ -1085,7 +1128,7 @@ async fn run_queryable_file_export(
             vec!["year".to_string()]
         };
 
-        let (export_outputs, _schema) = provider::export::export_series_to_parquet(
+        let (export_outputs, schema) = provider::export::export_series_to_parquet(
             root,
             &path_str,
             &export_dir,
@@ -1098,6 +1141,10 @@ async fn run_queryable_file_export(
         .map_err(|e| {
             tinyfs::Error::Other(format!("export_series_to_parquet '{}': {}", path_str, e))
         })?;
+
+        for field in &schema.fields {
+            columns.insert(field.name.clone());
+        }
 
         for (_caps, export_output) in &export_outputs {
             let mut temporal = BTreeMap::new();
@@ -1132,7 +1179,7 @@ async fn run_queryable_file_export(
         );
     }
 
-    Ok(by_key)
+    Ok((by_key, columns.into_iter().collect()))
 }
 
 /// Run content stages: glob-match markdown data files, parse frontmatter for metadata.
@@ -1537,6 +1584,11 @@ fn generate_site(
     // Build collections for navigation shortcodes
     let collections = routes::build_collections(exports, content);
 
+    // Resolve data-explorer datasets once: map each configured explore dataset
+    // to its export stage's flattened files + unioned columns. Shared across all
+    // pages (the explore shortcode picks them up via ShortcodeContext).
+    let explore_datasets = resolve_explore_datasets(config, exports);
+
     // Build content_pages map for content_nav shortcode.
     // Includes both explicit content pages and synthetic entries from
     // template routes so that export-based pages are navigable.
@@ -1634,6 +1686,7 @@ fn generate_site(
             generated_at: generated_at.to_string(),
             default_range: config.site.default_range.clone(),
             labels: config.labels.clone(),
+            explore_datasets: explore_datasets.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1857,6 +1910,7 @@ fn render_partial(
                 generated_at: generated_at.to_string(),
                 default_range: config.site.default_range.clone(),
                 labels: config.labels.clone(),
+                explore_datasets: vec![],
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
@@ -2074,6 +2128,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         };
 
@@ -2198,6 +2253,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         };
         let content: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();

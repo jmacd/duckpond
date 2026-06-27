@@ -479,6 +479,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         }
     }
@@ -509,7 +510,13 @@ mod tests {
         );
 
         let mut exports = BTreeMap::new();
-        exports.insert("params".to_string(), ExportContext { by_key });
+        exports.insert(
+            "params".to_string(),
+            ExportContext {
+                by_key,
+                columns: vec![],
+            },
+        );
         exports
     }
 
@@ -646,6 +653,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         };
 
