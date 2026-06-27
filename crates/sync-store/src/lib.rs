@@ -25,12 +25,14 @@
 
 pub mod checksum;
 pub mod content;
+pub mod content_remote;
 mod error;
 pub mod schema;
 mod store;
 pub mod tlog;
 
 pub use content::{Commit, ObjectHash, Provenance, TreeEntry, series_hash, tree_hash};
+pub use content_remote::ContentRemote;
 pub use error::{Result, StoreError};
 pub use store::{AddPath, CompactMetrics, Op, RemovePath, Store};
 pub use tlog::{LogHash, TransparencyLog, commit_leaf_hash, verify_consistency, verify_inclusion};
