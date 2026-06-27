@@ -106,6 +106,114 @@ impl Commit {
     pub fn hash(&self) -> ObjectHash {
         ObjectHash::of_bytes(&self.encode())
     }
+
+    /// Decode a commit from its canonical wire format (the inverse of
+    /// [`Commit::encode`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the magic header is wrong or the buffer is
+    /// truncated or otherwise malformed.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut cur = Cursor::new(bytes);
+        cur.expect_tag(COMMIT_MAGIC)?;
+        let root_tree_hash = ObjectHash::from_bytes(cur.take_array()?);
+        let parent_commit_hash = match cur.take_u8()? {
+            0 => None,
+            1 => Some(ObjectHash::from_bytes(cur.take_array()?)),
+            other => return Err(format!("invalid parent flag {other}")),
+        };
+        let pond_id = cur.take_len_prefixed_string()?;
+        let seq = i64::from_le_bytes(cur.take_array8()?);
+        let time_micros = i64::from_le_bytes(cur.take_array8()?);
+        let author = cur.take_len_prefixed_string()?;
+        let request = cur.take_len_prefixed_string()?;
+        if !cur.is_empty() {
+            return Err(format!("{} trailing byte(s) after commit", cur.remaining()));
+        }
+        Ok(Self {
+            root_tree_hash,
+            parent_commit_hash,
+            provenance: Provenance {
+                pond_id,
+                seq,
+                time_micros,
+                author,
+                request,
+            },
+        })
+    }
+}
+
+/// A minimal forward cursor over a commit byte buffer.
+struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if self.remaining() < n {
+            return Err(format!(
+                "truncated: need {n} byte(s), have {}",
+                self.remaining()
+            ));
+        }
+        let out = &self.buf[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(out)
+    }
+
+    fn expect_tag(&mut self, tag: &[u8]) -> Result<(), String> {
+        let got = self.take(tag.len())?;
+        if got != tag {
+            return Err("bad magic header".to_string());
+        }
+        Ok(())
+    }
+
+    fn take_u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn take_array(&mut self) -> Result<[u8; 32], String> {
+        let slice = self.take(32)?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(slice);
+        Ok(arr)
+    }
+
+    fn take_array8(&mut self) -> Result<[u8; 8], String> {
+        let slice = self.take(8)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(slice);
+        Ok(arr)
+    }
+
+    fn take_len_prefixed_string(&mut self) -> Result<String, String> {
+        let len = u32::from_le_bytes(self.take_array4()?) as usize;
+        let bytes = self.take(len)?;
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("invalid utf-8: {e}"))
+    }
+
+    fn take_array4(&mut self) -> Result<[u8; 4], String> {
+        let slice = self.take(4)?;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(slice);
+        Ok(arr)
+    }
 }
 
 #[cfg(test)]
@@ -176,5 +284,39 @@ mod tests {
     fn commit_hash_differs_from_root_blob() {
         let c = Commit::new(root(), None, prov());
         assert_ne!(c.hash(), root());
+    }
+
+    #[test]
+    fn decode_round_trips_encode() {
+        let parent = ObjectHash::of_bytes(b"parent-commit");
+        for c in [
+            Commit::new(root(), None, prov()),
+            Commit::new(root(), Some(parent), prov()),
+        ] {
+            let bytes = c.encode();
+            let decoded = Commit::decode(&bytes).expect("decode");
+            assert_eq!(decoded, c);
+            assert_eq!(decoded.hash(), c.hash());
+        }
+    }
+
+    #[test]
+    fn decode_rejects_bad_magic() {
+        let mut bytes = Commit::new(root(), None, prov()).encode();
+        bytes[0] ^= 0xff;
+        assert!(Commit::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let mut bytes = Commit::new(root(), None, prov()).encode();
+        bytes.push(0);
+        assert!(Commit::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_truncation() {
+        let bytes = Commit::new(root(), None, prov()).encode();
+        assert!(Commit::decode(&bytes[..bytes.len() - 4]).is_err());
     }
 }

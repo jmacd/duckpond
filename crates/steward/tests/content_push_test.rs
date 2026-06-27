@@ -1,0 +1,141 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! Integration tests for `steward::push_content_to_remote`: the producer side
+//! of the single delta-managed content-addressed remote (design Section 8,
+//! Decisions D6 and D7).
+
+use steward::{Ship, push_content_to_remote};
+use sync_store::ContentRemote;
+use sync_store::content::{Commit, ObjectHash};
+use tempfile::tempdir;
+use tinyfs::async_helpers::convenience::create_file_path;
+use tlogfs::PondUserMetadata;
+
+fn meta(label: &str) -> PondUserMetadata {
+    PondUserMetadata::new(vec!["test".into(), label.into()])
+}
+
+async fn write_file(ship: &mut Ship, path: &str, bytes: &[u8]) {
+    let bytes = bytes.to_vec();
+    ship.write_transaction(&meta("write"), async move |fs| {
+        let root = fs.root().await?;
+        let _ = create_file_path(&root, path, &bytes).await?;
+        Ok(())
+    })
+    .await
+    .expect("write transaction");
+}
+
+async fn new_pond(label: &str) -> (tempfile::TempDir, Ship) {
+    let tmp = tempdir().expect("tempdir");
+    let ship = Ship::create_pond(tmp.path().join("pond"), label)
+        .await
+        .expect("create pond");
+    (tmp, ship)
+}
+
+/// A push lands the tip ref and the full inline object closure, and the tip
+/// commit object decodes to a root tree that is itself present on the remote.
+#[tokio::test]
+async fn push_lands_objects_and_decodable_tip() {
+    let (_t, mut ship) = new_pond("push").await;
+    write_file(&mut ship, "/a.txt", b"alpha").await;
+    write_file(&mut ship, "/b.txt", b"beta").await;
+
+    let pond_id = uuid::Uuid::parse_str(ship.data_persistence().pond_id()).expect("pond id");
+
+    let remote_dir = tempdir().expect("remote dir");
+    let mut remote = ContentRemote::create_at(remote_dir.path().join("remote"), pond_id)
+        .await
+        .expect("create remote");
+
+    let outcome = push_content_to_remote(&ship, &mut remote, "main")
+        .await
+        .expect("push");
+
+    assert!(outcome.objects_pushed >= 1);
+    assert_eq!(outcome.ref_name, "main");
+
+    let tip = remote.get_tip("main").await.expect("tip").expect("ref set");
+    assert_eq!(tip, outcome.tip);
+
+    let tip_bytes = remote
+        .get_object(tip)
+        .await
+        .expect("get tip object")
+        .expect("tip object present");
+    let commit = Commit::decode(&tip_bytes).expect("decode commit");
+
+    let root_present = remote
+        .has_object(commit.root_tree_hash)
+        .await
+        .expect("has root tree");
+    assert!(root_present, "root tree object must be on the remote");
+}
+
+/// Every object on the remote hashes to its key: pushing preserves the
+/// content-addressing invariant a consumer relies on to verify by hash.
+#[tokio::test]
+async fn pushed_objects_are_content_addressed() {
+    let (_t, mut ship) = new_pond("push-ca").await;
+    write_file(&mut ship, "/a.txt", b"alpha").await;
+
+    let pond_id = uuid::Uuid::parse_str(ship.data_persistence().pond_id()).expect("pond id");
+    let remote_dir = tempdir().expect("remote dir");
+    let mut remote = ContentRemote::create_at(remote_dir.path().join("remote"), pond_id)
+        .await
+        .expect("create remote");
+
+    let outcome = push_content_to_remote(&ship, &mut remote, "main")
+        .await
+        .expect("push");
+
+    let tip = remote.get_tip("main").await.expect("tip").expect("ref set");
+    let tip_bytes = remote.get_object(tip).await.expect("get").expect("present");
+    assert_eq!(
+        ObjectHash::of_bytes(&tip_bytes),
+        tip,
+        "tip object bytes must hash to the tip ref"
+    );
+
+    let commit = Commit::decode(&tip_bytes).expect("decode commit");
+    let root_bytes = remote
+        .get_object(commit.root_tree_hash)
+        .await
+        .expect("get root")
+        .expect("root present");
+    assert_eq!(
+        ObjectHash::of_bytes(&root_bytes),
+        commit.root_tree_hash,
+        "root tree object bytes must hash to its key"
+    );
+
+    let _ = outcome;
+}
+
+/// Re-pushing the same tip is idempotent: the ref stays put and the objects
+/// re-put cleanly.
+#[tokio::test]
+async fn re_push_same_tip_is_idempotent() {
+    let (_t, mut ship) = new_pond("push-idem").await;
+    write_file(&mut ship, "/a.txt", b"alpha").await;
+
+    let pond_id = uuid::Uuid::parse_str(ship.data_persistence().pond_id()).expect("pond id");
+    let remote_dir = tempdir().expect("remote dir");
+    let mut remote = ContentRemote::create_at(remote_dir.path().join("remote"), pond_id)
+        .await
+        .expect("create remote");
+
+    let first = push_content_to_remote(&ship, &mut remote, "main")
+        .await
+        .expect("first push");
+    let second = push_content_to_remote(&ship, &mut remote, "main")
+        .await
+        .expect("second push");
+
+    assert_eq!(first.tip, second.tip, "tip is unchanged by a re-push");
+    let tip = remote.get_tip("main").await.expect("tip").expect("ref set");
+    assert_eq!(tip, first.tip);
+}
