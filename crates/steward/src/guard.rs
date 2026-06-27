@@ -460,6 +460,7 @@ impl<'a> StewardTransactionGuard<'a> {
             root_tree_hash: root_tree_hash.to_hex(),
             parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
             commit_hash: commit.hash().to_hex(),
+            commit_object: hex::encode(commit.encode()),
         }))
     }
 

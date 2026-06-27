@@ -100,6 +100,9 @@ pub struct CommitSpine {
     pub parent_commit_hash: Option<String>,
     /// Hex BLAKE3 of this commit object (the TIME-log leaf identity).
     pub commit_hash: String,
+    /// Hex of the encoded commit object bytes (`Commit::encode`), retained so
+    /// the commit object can be reproduced verbatim for content-addressed push.
+    pub commit_object: String,
 }
 
 pub struct ControlTable {
@@ -392,13 +395,14 @@ impl ControlTable {
         partition_checksums: PartitionChecksums,
         commit_spine: Option<CommitSpine>,
     ) -> ControlRecord {
-        let (root_tree_hash, parent_commit_hash, commit_hash) = match commit_spine {
+        let (root_tree_hash, parent_commit_hash, commit_hash, commit_object) = match commit_spine {
             Some(spine) => (
                 Some(spine.root_tree_hash),
                 spine.parent_commit_hash,
                 Some(spine.commit_hash),
+                Some(spine.commit_object),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
         let metadata = DataCommittedMetadata {
             partition_checksums: partition_checksums
@@ -409,6 +413,7 @@ impl ControlTable {
             root_tree_hash,
             parent_commit_hash,
             commit_hash,
+            commit_object,
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut record = self.base_record(RecordKind::DataCommitted, txn_meta);
@@ -703,6 +708,16 @@ impl ControlTable {
     ) -> Result<Option<String>, StewardError> {
         self.inner
             .parent_commit_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the encoded commit object bytes recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn commit_object_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .commit_object_at(self.pond_id_uuid(), txn_seq)
             .await
             .map_err(map_err)
     }

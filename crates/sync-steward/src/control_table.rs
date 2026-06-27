@@ -164,6 +164,12 @@ pub struct DataCommittedMetadata {
     /// the TIME-log leaf identity.  `None` on unstamped records.
     #[serde(default)]
     pub commit_hash: Option<String>,
+    /// Hex of the encoded commit object bytes via `Commit::encode`, so the
+    /// commit object can be reproduced verbatim for content-addressed push
+    /// without recomputing its non-deterministic provenance such as commit time.
+    /// `None` on unstamped records.
+    #[serde(default)]
+    pub commit_object: Option<String>,
 }
 
 /// Serialized form of [`Checksum`].
@@ -770,6 +776,21 @@ impl ControlTable {
         };
         let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
         Ok(meta.parent_commit_hash)
+    }
+
+    /// Resolve the encoded commit object bytes recorded at `(pond_id, txn_seq)`.
+    /// Returns the `metadata.commit_object` hex of the `DataCommitted` record at
+    /// that seq, or `None` if no such commit exists or it did not stamp a spine.
+    pub async fn commit_object_at(&self, pond_id: Uuid, txn_seq: i64) -> Result<Option<String>> {
+        let all = self.all_records_for(pond_id).await?;
+        let rec = all
+            .iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
+        let Some(rec) = rec else {
+            return Ok(None);
+        };
+        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+        Ok(meta.commit_object)
     }
 
     /// Set a configuration key/value scoped to `pond_id`.  Records a
