@@ -28,7 +28,7 @@
 
 use tinyfs::EntryType;
 
-use super::{ObjectHash, push_len_prefixed};
+use super::{Cursor, ObjectHash, push_len_prefixed};
 
 /// Magic header distinguishing a serialized tree from a raw blob (D2).
 const TREE_MAGIC: &[u8] = b"dp.tree.1\n";
@@ -156,6 +156,54 @@ pub fn series_hash(version_hashes: &[ObjectHash]) -> ObjectHash {
     ObjectHash::of_bytes(&encode_series(version_hashes))
 }
 
+/// Decode a tree object back into its entries (the inverse of [`encode_tree`]).
+///
+/// The entries are returned in the canonical sorted-by-name order they were
+/// serialized in.
+///
+/// # Errors
+///
+/// Returns an error if the magic header is wrong, the buffer is truncated, an
+/// entry type byte is not a valid [`EntryType`] discriminant, a name is not
+/// valid UTF-8, or there are trailing bytes after the declared entry count.
+pub fn decode_tree(bytes: &[u8]) -> Result<Vec<TreeEntry>, String> {
+    let mut cur = Cursor::new(bytes);
+    cur.expect_tag(TREE_MAGIC)?;
+    let count = cur.take_u32()? as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = cur.take_len_prefixed_string()?;
+        let entry_type = EntryType::try_from(cur.take_u8()?)?;
+        let child_hash = cur.take_hash()?;
+        entries.push(TreeEntry::new(name, entry_type, child_hash));
+    }
+    if !cur.is_empty() {
+        return Err(format!("{} trailing byte(s) after tree", cur.remaining()));
+    }
+    Ok(entries)
+}
+
+/// Decode a series object back into its ordered version blob hashes (the
+/// inverse of [`encode_series`]).
+///
+/// # Errors
+///
+/// Returns an error if the magic header is wrong, the buffer is truncated, or
+/// there are trailing bytes after the declared version count.
+pub fn decode_series(bytes: &[u8]) -> Result<Vec<ObjectHash>, String> {
+    let mut cur = Cursor::new(bytes);
+    cur.expect_tag(SERIES_MAGIC)?;
+    let count = cur.take_u32()? as usize;
+    let mut hashes = Vec::with_capacity(count);
+    for _ in 0..count {
+        hashes.push(cur.take_hash()?);
+    }
+    if !cur.is_empty() {
+        return Err(format!("{} trailing byte(s) after series", cur.remaining()));
+    }
+    Ok(hashes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +287,53 @@ mod tests {
         let v1 = h("v1");
         // A one-version series must not collide with the raw blob hash.
         assert_ne!(series_hash(&[v1]), v1);
+    }
+
+    #[test]
+    fn decode_tree_round_trips_encode() {
+        let entries = vec![
+            file("b", "2"),
+            file("a", "1"),
+            TreeEntry::new("d", EntryType::DirectoryPhysical, h("dir")),
+            TreeEntry::new("c", EntryType::Symlink, h("target")),
+        ];
+        let bytes = encode_tree(&entries).unwrap();
+        let decoded = decode_tree(&bytes).unwrap();
+        // Decoded entries come back in canonical sorted-by-name order.
+        let mut expected = entries.clone();
+        expected.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        assert_eq!(decoded, expected);
+        // And re-encoding the decoded entries reproduces the same bytes.
+        assert_eq!(encode_tree(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn decode_tree_handles_empty() {
+        let bytes = encode_tree(&[]).unwrap();
+        assert!(decode_tree(&bytes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_tree_rejects_bad_magic_and_trailing() {
+        let mut bytes = encode_tree(&[file("a", "1")]).unwrap();
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] ^= 0xff;
+        assert!(decode_tree(&bad_magic).is_err());
+        bytes.push(0);
+        assert!(decode_tree(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_series_round_trips_encode() {
+        let versions = [h("v1"), h("v2"), h("v3")];
+        let bytes = encode_series(&versions);
+        assert_eq!(decode_series(&bytes).unwrap(), versions);
+    }
+
+    #[test]
+    fn decode_series_rejects_truncation() {
+        let bytes = encode_series(&[h("v1"), h("v2")]);
+        assert!(decode_series(&bytes[..bytes.len() - 4]).is_err());
     }
 
     #[test]

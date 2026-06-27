@@ -8,7 +8,7 @@
 //! provenance is isolated here so subtree hashes stay comparable across ponds.
 //! See `docs/content-addressed-pond-design.md` Sections 4.3 and 5.3.
 
-use super::{ObjectHash, push_len_prefixed};
+use super::{Cursor, ObjectHash, push_len_prefixed};
 
 /// Magic header distinguishing a serialized commit from a raw blob (D2).
 const COMMIT_MAGIC: &[u8] = b"dp.commit.1\n";
@@ -117,15 +117,15 @@ impl Commit {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut cur = Cursor::new(bytes);
         cur.expect_tag(COMMIT_MAGIC)?;
-        let root_tree_hash = ObjectHash::from_bytes(cur.take_array()?);
+        let root_tree_hash = cur.take_hash()?;
         let parent_commit_hash = match cur.take_u8()? {
             0 => None,
-            1 => Some(ObjectHash::from_bytes(cur.take_array()?)),
+            1 => Some(cur.take_hash()?),
             other => return Err(format!("invalid parent flag {other}")),
         };
         let pond_id = cur.take_len_prefixed_string()?;
-        let seq = i64::from_le_bytes(cur.take_array8()?);
-        let time_micros = i64::from_le_bytes(cur.take_array8()?);
+        let seq = cur.take_i64()?;
+        let time_micros = cur.take_i64()?;
         let author = cur.take_len_prefixed_string()?;
         let request = cur.take_len_prefixed_string()?;
         if !cur.is_empty() {
@@ -142,77 +142,6 @@ impl Commit {
                 request,
             },
         })
-    }
-}
-
-/// A minimal forward cursor over a commit byte buffer.
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    fn is_empty(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        if self.remaining() < n {
-            return Err(format!(
-                "truncated: need {n} byte(s), have {}",
-                self.remaining()
-            ));
-        }
-        let out = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(out)
-    }
-
-    fn expect_tag(&mut self, tag: &[u8]) -> Result<(), String> {
-        let got = self.take(tag.len())?;
-        if got != tag {
-            return Err("bad magic header".to_string());
-        }
-        Ok(())
-    }
-
-    fn take_u8(&mut self) -> Result<u8, String> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn take_array(&mut self) -> Result<[u8; 32], String> {
-        let slice = self.take(32)?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(slice);
-        Ok(arr)
-    }
-
-    fn take_array8(&mut self) -> Result<[u8; 8], String> {
-        let slice = self.take(8)?;
-        let mut arr = [0u8; 8];
-        arr.copy_from_slice(slice);
-        Ok(arr)
-    }
-
-    fn take_len_prefixed_string(&mut self) -> Result<String, String> {
-        let len = u32::from_le_bytes(self.take_array4()?) as usize;
-        let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec()).map_err(|e| format!("invalid utf-8: {e}"))
-    }
-
-    fn take_array4(&mut self) -> Result<[u8; 4], String> {
-        let slice = self.take(4)?;
-        let mut arr = [0u8; 4];
-        arr.copy_from_slice(slice);
-        Ok(arr)
     }
 }
 

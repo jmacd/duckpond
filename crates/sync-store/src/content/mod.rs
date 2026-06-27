@@ -35,7 +35,9 @@ mod commit;
 mod tree;
 
 pub use commit::{Commit, Provenance};
-pub use tree::{TreeEntry, encode_series, encode_tree, series_hash, tree_hash};
+pub use tree::{
+    TreeEntry, decode_series, decode_tree, encode_series, encode_tree, series_hash, tree_hash,
+};
 
 use std::fmt;
 
@@ -125,6 +127,85 @@ pub(crate) fn push_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
     let len = u32::try_from(bytes.len()).expect("field length exceeds u32::MAX");
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(bytes);
+}
+
+/// A minimal forward cursor for decoding the content wire formats.
+///
+/// Shared by the tree, series, and commit decoders so the framing logic
+/// (length-prefixed fields, fixed-width hashes, trailing-byte rejection) lives
+/// in exactly one place, mirroring the shared [`push_len_prefixed`] encoder.
+pub(crate) struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    pub(crate) fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        if self.remaining() < n {
+            return Err(format!(
+                "truncated: need {n} byte(s), have {}",
+                self.remaining()
+            ));
+        }
+        let out = &self.buf[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(out)
+    }
+
+    pub(crate) fn expect_tag(&mut self, tag: &[u8]) -> Result<(), String> {
+        let got = self.take(tag.len())?;
+        if got != tag {
+            return Err("bad magic header".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    pub(crate) fn take_hash(&mut self) -> Result<ObjectHash, String> {
+        let slice = self.take(32)?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(slice);
+        Ok(ObjectHash::from_bytes(arr))
+    }
+
+    pub(crate) fn take_u32(&mut self) -> Result<u32, String> {
+        let slice = self.take(4)?;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(slice);
+        Ok(u32::from_le_bytes(arr))
+    }
+
+    pub(crate) fn take_i64(&mut self) -> Result<i64, String> {
+        let slice = self.take(8)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(slice);
+        Ok(i64::from_le_bytes(arr))
+    }
+
+    pub(crate) fn take_len_prefixed(&mut self) -> Result<&'a [u8], String> {
+        let len = self.take_u32()? as usize;
+        self.take(len)
+    }
+
+    pub(crate) fn take_len_prefixed_string(&mut self) -> Result<String, String> {
+        let bytes = self.take_len_prefixed()?;
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("invalid utf-8: {e}"))
+    }
 }
 
 #[cfg(test)]
