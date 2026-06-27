@@ -281,6 +281,12 @@ check_contains "${OUTDIR}/vega-shared.js" "shared spec builder" 'export function
 check_contains "${OUTDIR}/explore.js" "editable spec panel" 'explore-spec-editor'
 check_contains "${OUTDIR}/explore.js" "spec apply control" 'Apply spec'
 check_contains "${OUTDIR}/explore.js" "spec reset control" 'Reset to auto'
+# Stage 3 S3.4: the shareable hash round-trips the chart view and a hand-edited
+# Vega-Lite spec (params view= and spec=), restored on load before the first run.
+check_contains "${OUTDIR}/explore.js" "share view param" 'params.set("view", "chart")'
+check_contains "${OUTDIR}/explore.js" "share spec param" 'params.set("spec", specEditor.value)'
+check_contains "${OUTDIR}/explore.js" "restore chart view from hash" 'initHash.view === "chart"'
+check_contains "${OUTDIR}/explore.js" "restore spec from hash" 'initHash.spec'
 check '[ -f "${OUTDIR}/vendor/vega-bundle.mjs" ]' "vega bundle vendored"
 check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
 

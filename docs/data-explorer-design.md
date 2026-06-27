@@ -194,6 +194,11 @@ Done:
   `sanitizeRows`); explore.js imports it; the Chart view has an editable
   Vega-Lite spec textarea with "Apply spec" / "Reset to auto" (data is injected
   from the live query at render time).
+- **Stage 3 S3.4 (shareable URL round-trip)** — the explorer hash now carries
+  `&view=chart` and, when the spec is hand-edited, `&spec=<encoded>`; on load
+  both are restored before the first run so a shared link reopens the same
+  visualization (auto-inferred specs are omitted to keep links short). View
+  toggles and Apply/Reset spec rewrite the hash live.
 
 Remaining:
 
@@ -202,9 +207,11 @@ Remaining:
   lazy-fetch data layer. Largest migration; in-browser Vega behavior is still
   untested headlessly, so a manual browser check or a headless render test is
   advisable before committing to the full chart.js migration.
-- **Stage 3 S3.4** — "view as chart" emits a Vega-Lite spec from the query
-  columns; "explore this data" round-trips back to SQL + spec; extend the
-  shareable URL to `&spec=` (deferred here from S3.2).
+- **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip above is done;
+  what remains is for the chart pages' "Explore this data" link to hand over a
+  Vega-Lite spec (and "view as chart" to emit one back to the chart), which is
+  blocked on the S3.3 chart.js Vega migration since chart.js still renders with
+  Observable Plot and has no spec to pass.
 - **Optional embedded SQL editor** (syntax highlight / completion) — explicitly
   deferred; the plain `<textarea>` stands.
 

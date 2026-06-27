@@ -624,12 +624,14 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
     viewMode = "table";
     updateViewButtons();
     renderCurrentView();
+    writeHash();
   });
   chartViewBtn.addEventListener("click", () => {
     if (viewMode === "chart") return;
     viewMode = "chart";
     updateViewButtons();
     renderCurrentView();
+    writeHash();
   });
 
   // ── Full-screen toggle ───────────────────────────────────────────────────────
@@ -757,11 +759,15 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
   specApplyBtn.addEventListener("click", () => {
     specEdited = true;
     renderChart();
+    // Persist the hand-edited spec so the shared link reproduces it (S3.4).
+    writeHash();
   });
   specResetBtn.addEventListener("click", () => {
     specEdited = false;
     clearSpecError();
     renderChart();
+    // Drop the spec from the link; it reverts to the auto-inferred spec.
+    writeHash();
   });
 
   prevBtn.addEventListener("click", () => {
@@ -852,6 +858,16 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
         params.set("files", urls.join(","));
       }
     }
+    // Persist the chart view and, when the spec has been hand-edited, the
+    // Vega-Lite spec itself, so a shared link reopens the same visualization
+    // (the Stage 3 S3.4 round-trip). The auto-inferred spec is not stored: it
+    // is regenerated from the result columns, so omitting it keeps links short.
+    if (viewMode === "chart") {
+      params.set("view", "chart");
+      if (specEdited && specEditor.value.trim()) {
+        params.set("spec", specEditor.value);
+      }
+    }
     history.replaceState(null, "", `#${params.toString()}`);
   }
 
@@ -859,7 +875,12 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
     const h = location.hash.replace(/^#/, "");
     if (!h) return null;
     const params = new URLSearchParams(h);
-    return { dataset: params.get("dataset"), sql: params.get("sql") };
+    return {
+      dataset: params.get("dataset"),
+      sql: params.get("sql"),
+      view: params.get("view"),
+      spec: params.get("spec"),
+    };
   }
 
   // ── Wiring ──────────────────────────────────────────────────────────────────
@@ -927,12 +948,23 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
   });
 
   // Initial state: an ad-hoc chart dataset (index 0) wins; else honor a
-  // shareable hash; else select the first dataset.
+  // shareable hash; else select the first dataset. A persisted chart view and
+  // hand-edited Vega-Lite spec (S3.4) are restored before the first run so the
+  // result renders straight into the shared visualization.
+  const initHash = readHash();
+  if (initHash && initHash.view === "chart") {
+    viewMode = "chart";
+    if (initHash.spec) {
+      specEditor.value = initHash.spec;
+      specEdited = true;
+    }
+    updateViewButtons();
+  }
   if (adhocSql !== null) {
     if (adhocSql) editor.value = adhocSql;
     await selectDataset(0, { run: Boolean(adhocSql) });
   } else {
-    const hash = readHash();
+    const hash = initHash;
     if (hash && hash.dataset) {
       const idx = datasets.findIndex((d, i) => datasetTable(d, i) === hash.dataset);
       const i = idx >= 0 ? idx : 0;
