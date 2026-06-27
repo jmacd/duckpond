@@ -13,7 +13,7 @@
 // DuckDB-WASM init, parquet registration, and CSV serialization are shared
 // with chart.js via duckdb-shared.js so the two assets do not diverge.
 
-import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
+import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-shared.js";
 
 (async function () {
   "use strict";
@@ -42,6 +42,11 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   // Default row cap applied when a query has no explicit LIMIT, to protect the
   // tab from accidentally materializing a multi-million-row result.
   const DEFAULT_LIMIT = 1000;
+
+  // Result grid page size: large results are materialized once (bounded by
+  // DEFAULT_LIMIT) and paged client-side so the DOM never holds thousands of
+  // rows at once.
+  const PAGE_SIZE = 100;
 
   // ── DuckDB-WASM init ────────────────────────────────────────────────────────
 
@@ -79,6 +84,15 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
 
   controls.append(datasetLabel, schemaInfo);
 
+  // Clickable column browser: chips are populated per dataset and insert the
+  // column name into the SQL editor at the cursor when clicked.
+  const columnBar = document.createElement("div");
+  columnBar.className = "explore-columns";
+
+  // Canned example queries for the current dataset (Preview / Count / Schema).
+  const exampleBar = document.createElement("div");
+  exampleBar.className = "explore-examples";
+
   const editor = document.createElement("textarea");
   editor.className = "explore-sql";
   editor.rows = 6;
@@ -99,21 +113,45 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   downloadBtn.className = "explore-download";
   downloadBtn.disabled = true;
 
+  const downloadJsonBtn = document.createElement("button");
+  downloadJsonBtn.type = "button";
+  downloadJsonBtn.textContent = "Download JSON";
+  downloadJsonBtn.className = "explore-download-json";
+  downloadJsonBtn.disabled = true;
+
   const status = document.createElement("span");
   status.className = "explore-status";
 
-  buttonBar.append(runBtn, downloadBtn, status);
+  buttonBar.append(runBtn, downloadBtn, downloadJsonBtn, status);
 
   const results = document.createElement("div");
   results.className = "explore-results";
 
-  container.append(controls, editor, buttonBar, results);
+  // Pager: prev/next + "rows X–Y of N" for the materialized result set.
+  const pager = document.createElement("div");
+  pager.className = "explore-pager";
+  pager.hidden = true;
+  const prevBtn = document.createElement("button");
+  prevBtn.type = "button";
+  prevBtn.textContent = "‹ Prev";
+  prevBtn.className = "explore-prev";
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.textContent = "Next ›";
+  nextBtn.className = "explore-next";
+  const pageInfo = document.createElement("span");
+  pageInfo.className = "explore-page-info";
+  pager.append(prevBtn, pageInfo, nextBtn);
+
+  container.append(controls, columnBar, exampleBar, editor, buttonBar, results, pager);
 
   // ── Dataset registration ────────────────────────────────────────────────────
 
   // Tracks which dataset indices have had their files registered + view created.
   const registeredDatasets = new Set();
   let lastRows = null;
+  let lastFields = null;
+  let pageIndex = 0;
 
   function datasetTable(d, i) {
     // Prefer the manifest-provided table name; fall back to a safe identifier.
@@ -146,12 +184,17 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     return table;
   }
 
-  // Show the column list for a dataset's view via DESCRIBE.
+  // Show the column list for a dataset's view via DESCRIBE. Renders the typed
+  // schema text and refreshes the clickable column chips with type tooltips.
   async function showSchema(table) {
     try {
       const res = await conn.query(`DESCRIBE ${table}`);
-      const cols = res.toArray().map((r) => `${r.column_name} ${r.column_type}`);
+      const rows = res.toArray();
+      const cols = rows.map((r) => `${r.column_name} ${r.column_type}`);
       schemaInfo.textContent = `${table}: ${cols.join(", ")}`;
+      renderColumnChips(
+        rows.map((r) => ({ name: r.column_name, type: r.column_type }))
+      );
     } catch (e) {
       schemaInfo.textContent = "";
     }
@@ -164,9 +207,73 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     const cols = Array.isArray(d.columns) ? d.columns : [];
     if (cols.length === 0) {
       schemaInfo.textContent = "";
+      renderColumnChips([]);
       return;
     }
     schemaInfo.textContent = `${table}: ${cols.join(", ")}`;
+    renderColumnChips(cols.map((name) => ({ name, type: null })));
+  }
+
+  // Render the clickable column browser. Each chip inserts its column name into
+  // the SQL editor at the cursor, so a visitor can compose a query by clicking.
+  function renderColumnChips(columns) {
+    columnBar.innerHTML = "";
+    if (!columns.length) {
+      columnBar.hidden = true;
+      return;
+    }
+    columnBar.hidden = false;
+    for (const c of columns) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "explore-col-chip";
+      chip.textContent = c.name;
+      if (c.type) chip.title = `${c.name} ${c.type}`;
+      chip.addEventListener("click", () => insertAtCursor(editor, quoteIdent(c.name)));
+      columnBar.appendChild(chip);
+    }
+  }
+
+  // Quote a column identifier for SQL only when it is not a plain identifier
+  // (DuckDB accepts double-quoted identifiers for names with dots/spaces).
+  function quoteIdent(name) {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
+  }
+
+  // Insert text at the textarea's caret, preserving selection semantics.
+  function insertAtCursor(ta, text) {
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+    const caret = start + text.length;
+    ta.selectionStart = ta.selectionEnd = caret;
+    ta.focus();
+  }
+
+  // Populate the canned example-query bar for the given table name.
+  function renderExamples(table) {
+    exampleBar.innerHTML = "";
+    if (!table) {
+      exampleBar.hidden = true;
+      return;
+    }
+    exampleBar.hidden = false;
+    const examples = [
+      ["Preview", `SELECT * FROM ${table} LIMIT 100`],
+      ["Row count", `SELECT count(*) AS rows FROM ${table}`],
+      ["Schema", `DESCRIBE ${table}`],
+    ];
+    for (const [labelText, sql] of examples) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "explore-example";
+      btn.textContent = labelText;
+      btn.addEventListener("click", () => {
+        editor.value = sql;
+        runQuery();
+      });
+      exampleBar.appendChild(btn);
+    }
   }
 
   // ── Query execution ─────────────────────────────────────────────────────────
@@ -178,10 +285,8 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     return `SELECT * FROM (\n${trimmed}\n) AS _explore_q LIMIT ${DEFAULT_LIMIT}`;
   }
 
-  function renderTable(arrowResult) {
-    const fields = arrowResult.schema.fields.map((f) => f.name);
-    const rows = arrowResult.toArray();
-
+  // Build a results table element for a slice of rows.
+  function buildTable(fields, rows) {
     const table = document.createElement("table");
     table.className = "explore-grid";
     const thead = document.createElement("thead");
@@ -206,10 +311,34 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
+    return table;
+  }
+
+  // Render the current page of `lastRows` into the results grid and update the
+  // pager controls. Hides the pager when the result fits on a single page.
+  function renderPage() {
+    if (!lastRows || !lastFields) {
+      results.innerHTML = "";
+      pager.hidden = true;
+      return;
+    }
+    const total = lastRows.length;
+    const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    pageIndex = Math.min(Math.max(0, pageIndex), pageCount - 1);
+    const start = pageIndex * PAGE_SIZE;
+    const end = Math.min(start + PAGE_SIZE, total);
 
     results.innerHTML = "";
-    results.appendChild(table);
-    return rows;
+    results.appendChild(buildTable(lastFields, lastRows.slice(start, end)));
+
+    if (total > PAGE_SIZE) {
+      pager.hidden = false;
+      pageInfo.textContent = `rows ${start + 1}–${end} of ${total}`;
+      prevBtn.disabled = pageIndex === 0;
+      nextBtn.disabled = pageIndex >= pageCount - 1;
+    } else {
+      pager.hidden = true;
+    }
   }
 
   let running = false;
@@ -220,26 +349,41 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     running = true;
     runBtn.disabled = true;
     downloadBtn.disabled = true;
+    downloadJsonBtn.disabled = true;
     status.textContent = "Running…";
     results.innerHTML = "";
 
     try {
       const sql = withDefaultLimit(raw);
       const result = await conn.query(sql);
-      const rows = renderTable(result);
-      lastRows = rows;
-      status.textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
-      downloadBtn.disabled = rows.length === 0;
+      lastFields = result.schema.fields.map((f) => f.name);
+      lastRows = result.toArray();
+      pageIndex = 0;
+      renderPage();
+      status.textContent = `${lastRows.length} row${lastRows.length === 1 ? "" : "s"}`;
+      downloadBtn.disabled = lastRows.length === 0;
+      downloadJsonBtn.disabled = lastRows.length === 0;
       writeHash();
     } catch (e) {
       results.innerHTML = `<div class="explore-error">${escapeHtml(String(e.message || e))}</div>`;
       status.textContent = "Error";
       lastRows = null;
+      lastFields = null;
+      pager.hidden = true;
     } finally {
       running = false;
       runBtn.disabled = false;
     }
   }
+
+  prevBtn.addEventListener("click", () => {
+    pageIndex -= 1;
+    renderPage();
+  });
+  nextBtn.addEventListener("click", () => {
+    pageIndex += 1;
+    renderPage();
+  });
 
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) =>
@@ -247,20 +391,28 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     );
   }
 
-  // ── CSV download ────────────────────────────────────────────────────────────
+  // ── Downloads (CSV / JSON) ───────────────────────────────────────────────────
 
-  downloadBtn.addEventListener("click", () => {
-    if (!lastRows || !lastRows.length) return;
-    const csv = rowsToCsv(lastRows);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  function triggerDownload(content, mime, ext) {
+    const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `query_${Date.now()}.csv`;
+    a.download = `query_${Date.now()}.${ext}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  downloadBtn.addEventListener("click", () => {
+    if (!lastRows || !lastRows.length) return;
+    triggerDownload(rowsToCsv(lastRows), "text/csv;charset=utf-8", "csv");
+  });
+
+  downloadJsonBtn.addEventListener("click", () => {
+    if (!lastRows || !lastRows.length) return;
+    triggerDownload(rowsToJson(lastRows), "application/json;charset=utf-8", "json");
   });
 
   // ── Shareable URL state (#dataset=<table>&sql=<encoded>) ─────────────────────
@@ -285,12 +437,15 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   async function selectDataset(i, { run = false } = {}) {
     datasetSelect.value = String(i);
     status.textContent = "Loading dataset…";
+    const tableName = datasetTable(datasets[i], i);
     // Show the manifest column list immediately so the schema is visible while
     // the parquet files download; DESCRIBE refines it with types afterward.
-    showManifestSchema(datasets[i], datasetTable(datasets[i], i));
+    showManifestSchema(datasets[i], tableName);
+    renderExamples(tableName);
     try {
       const table = await ensureDataset(i);
       await showSchema(table);
+      renderExamples(table);
       if (!editor.value.trim() || !run) {
         if (!editor.value.trim()) editor.value = `SELECT * FROM ${table} LIMIT 100`;
       }

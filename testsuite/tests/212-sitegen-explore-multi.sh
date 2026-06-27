@@ -244,6 +244,14 @@ check_contains "${EXPLORE_HTML}" "datasets manifest has parquet urls" '.parquet'
 # Explore page must NOT load chart.js (it is not a chart page).
 check_not_contains "${EXPLORE_HTML}" "explore page (no chart.js)" 'chart.js'
 
+# Stage 2 ergonomics ship in the explorer assets (client-side features).
+check_contains "${OUTDIR}/explore.js" "column browser" 'renderColumnChips'
+check_contains "${OUTDIR}/explore.js" "canned example queries" 'renderExamples'
+check_contains "${OUTDIR}/explore.js" "result paging" 'renderPage'
+check_contains "${OUTDIR}/explore.js" "json download button" 'Download JSON'
+check_contains "${OUTDIR}/explore.js" "json serializer import" 'rowsToJson'
+check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
+
 echo ""
 echo "=== Data explorer Stage 1 (multi-dataset) verified ==="
 

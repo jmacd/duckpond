@@ -1317,7 +1317,8 @@ h3:hover .anchor {
 }
 
 .explore-run,
-.explore-download {
+.explore-download,
+.explore-download-json {
   padding: 0.35rem 0.8rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1327,9 +1328,85 @@ h3:hover .anchor {
 }
 
 .explore-run:disabled,
-.explore-download:disabled {
+.explore-download:disabled,
+.explore-download-json:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Clickable column browser: chips that insert a column name into the editor. */
+.explore-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0;
+}
+
+.explore-col-chip {
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.explore-col-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Canned example queries for the current dataset. */
+.explore-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.explore-example {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.explore-example:hover {
+  background: var(--accent-wash);
+}
+
+/* Result pager. */
+.explore-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.explore-prev,
+.explore-next {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.explore-prev:disabled,
+.explore-next:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.explore-page-info {
+  color: var(--fg-muted);
+  font-size: 0.82rem;
 }
 
 .explore-status {

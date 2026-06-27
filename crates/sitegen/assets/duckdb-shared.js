@@ -103,3 +103,22 @@ export function rowsToCsv(rows, opts = {}) {
   }
   return lines.join("\n");
 }
+
+// Serialize an array of row objects to a pretty-printed JSON array string.
+//
+// DuckDB returns 64-bit integers as JS BigInt, which `JSON.stringify` cannot
+// serialize. We coerce BigInt to a JS number when it is exactly representable
+// (<= 2^53) and to a decimal string otherwise, so large counts/ids survive as
+// strings rather than throwing or losing precision silently.
+export function rowsToJson(rows) {
+  if (!rows || !rows.length) return "[]";
+  const replacer = (_key, value) => {
+    if (typeof value === "bigint") {
+      return value >= -9007199254740991n && value <= 9007199254740991n
+        ? Number(value)
+        : value.toString();
+    }
+    return value;
+  };
+  return JSON.stringify(rows, replacer, 2);
+}
