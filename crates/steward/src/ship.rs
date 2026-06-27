@@ -133,6 +133,7 @@ impl Ship {
                 root_version,
                 0, // Duration unknown/not tracked
                 root_checksums,
+                None, // genesis spine not stamped on this path (see guard::compute_commit_spine)
             )
             .await?;
 
@@ -1173,6 +1174,7 @@ impl Ship {
                 0,
                 0,
                 sync_steward::PartitionChecksums::new(),
+                None,
             )
             .await?;
 

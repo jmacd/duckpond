@@ -149,6 +149,21 @@ pub struct DataCommittedMetadata {
     /// to `0`; treat that as "unknown".
     #[serde(default)]
     pub data_delta_version: i64,
+    /// Hex BLAKE3 of this commit's root directory tree (the SPACE root).
+    /// `None` on records written before the content-graph spine existed,
+    /// and on commits that do not stamp a spine (compaction, factory
+    /// sub-transactions, control rebuilds).  See
+    /// `docs/content-addressed-pond-design.md` Section 5.3.
+    #[serde(default)]
+    pub root_tree_hash: Option<String>,
+    /// Hex BLAKE3 of the previous commit on this pond's linear chain, or
+    /// `None` for the genesis commit or an unstamped record.
+    #[serde(default)]
+    pub parent_commit_hash: Option<String>,
+    /// Hex BLAKE3 of this commit object (root_tree_hash + parent + provenance);
+    /// the TIME-log leaf identity.  `None` on unstamped records.
+    #[serde(default)]
+    pub commit_hash: Option<String>,
 }
 
 /// Serialized form of [`Checksum`].
@@ -705,6 +720,56 @@ impl ControlTable {
         };
         let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
         Ok(Some(meta.data_delta_version))
+    }
+
+    /// Resolve the content-graph commit hash recorded at `(pond_id, txn_seq)`.
+    /// Returns the `metadata.commit_hash` of the `DataCommitted` record at that
+    /// seq, or `None` if no such commit exists or it did not stamp a spine.
+    pub async fn commit_hash_at(&self, pond_id: Uuid, txn_seq: i64) -> Result<Option<String>> {
+        let all = self.all_records_for(pond_id).await?;
+        let rec = all
+            .iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
+        let Some(rec) = rec else {
+            return Ok(None);
+        };
+        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+        Ok(meta.commit_hash)
+    }
+
+    /// Resolve the content-graph root tree hash recorded at `(pond_id, txn_seq)`.
+    /// Returns the `metadata.root_tree_hash` of the `DataCommitted` record at
+    /// that seq, or `None` if no such commit exists or it did not stamp a spine.
+    pub async fn root_tree_hash_at(&self, pond_id: Uuid, txn_seq: i64) -> Result<Option<String>> {
+        let all = self.all_records_for(pond_id).await?;
+        let rec = all
+            .iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
+        let Some(rec) = rec else {
+            return Ok(None);
+        };
+        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+        Ok(meta.root_tree_hash)
+    }
+
+    /// Resolve the content-graph parent commit hash recorded at
+    /// `(pond_id, txn_seq)`.  Returns the `metadata.parent_commit_hash` of the
+    /// `DataCommitted` record at that seq, or `None` if no such commit exists,
+    /// it did not stamp a spine, or it is the genesis commit.
+    pub async fn parent_commit_hash_at(
+        &self,
+        pond_id: Uuid,
+        txn_seq: i64,
+    ) -> Result<Option<String>> {
+        let all = self.all_records_for(pond_id).await?;
+        let rec = all
+            .iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
+        let Some(rec) = rec else {
+            return Ok(None);
+        };
+        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+        Ok(meta.parent_commit_hash)
     }
 
     /// Set a configuration key/value scoped to `pond_id`.  Records a

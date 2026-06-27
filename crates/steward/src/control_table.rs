@@ -86,6 +86,22 @@ struct PostCommitMetadata {
 /// Thin wrapper over [`sync_steward::ControlTable`] exposing the
 /// duckpond-flavored `record_*` API and caching pond identity, factory
 /// modes and settings on top of the lean `config_*` primitives.
+/// The content-graph spine recorded alongside a `DataCommitted` control
+/// record: the root tree hash this commit produced, the previous commit on
+/// the pond's linear chain (`None` at genesis), and this commit object's own
+/// hash.  Computed by [`crate::compute_content_tree_for_table`] plus a
+/// [`sync_store::content::Commit`] fold in the commit path.  See
+/// `docs/content-addressed-pond-design.md` Section 5.3.
+#[derive(Debug, Clone)]
+pub struct CommitSpine {
+    /// Hex BLAKE3 of the commit's root directory tree.
+    pub root_tree_hash: String,
+    /// Hex BLAKE3 of the parent commit, or `None` for the genesis commit.
+    pub parent_commit_hash: Option<String>,
+    /// Hex BLAKE3 of this commit object (the TIME-log leaf identity).
+    pub commit_hash: String,
+}
+
 pub struct ControlTable {
     inner: InnerControlTable,
     pond_metadata: PondMetadata,
@@ -302,6 +318,7 @@ impl ControlTable {
         data_fs_version: i64,
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> Result<(), StewardError> {
         self.record_committed_inner(
             txn_meta,
@@ -309,6 +326,7 @@ impl ControlTable {
             data_fs_version,
             duration_ms,
             partition_checksums,
+            commit_spine,
         )
         .await
     }
@@ -337,6 +355,7 @@ impl ControlTable {
             data_fs_version,
             duration_ms,
             partition_checksums,
+            None,
         )
         .await
     }
@@ -348,6 +367,7 @@ impl ControlTable {
         data_fs_version: i64,
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> Result<(), StewardError> {
         let record = self.data_committed_record(
             txn_meta,
@@ -355,6 +375,7 @@ impl ControlTable {
             data_fs_version,
             duration_ms,
             partition_checksums,
+            commit_spine,
         );
         self.inner.write_record(record).await.map_err(map_err)
     }
@@ -369,13 +390,25 @@ impl ControlTable {
         data_fs_version: i64,
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> ControlRecord {
+        let (root_tree_hash, parent_commit_hash, commit_hash) = match commit_spine {
+            Some(spine) => (
+                Some(spine.root_tree_hash),
+                spine.parent_commit_hash,
+                Some(spine.commit_hash),
+            ),
+            None => (None, None, None),
+        };
         let metadata = DataCommittedMetadata {
             partition_checksums: partition_checksums
                 .iter()
                 .map(|(k, v)| (k.clone(), sync_steward::ChecksumValue::from(v)))
                 .collect(),
             data_delta_version: data_fs_version,
+            root_tree_hash,
+            parent_commit_hash,
+            commit_hash,
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut record = self.base_record(RecordKind::DataCommitted, txn_meta);
@@ -442,6 +475,7 @@ impl ControlTable {
         let metadata = DataCommittedMetadata {
             partition_checksums: HashMap::new(),
             data_delta_version,
+            ..Default::default()
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut committed = self.base_record(RecordKind::DataCommitted, txn_meta);
@@ -540,6 +574,7 @@ impl ControlTable {
                 version,
                 duration_ms,
                 partition_checksums,
+                None,
             ));
         }
         let mut completed = self.base_record(RecordKind::Completed, factory_meta);
@@ -637,6 +672,39 @@ impl ControlTable {
     #[must_use]
     pub fn inner(&self) -> &sync_steward::ControlTable {
         &self.inner
+    }
+
+    /// Resolve the content-graph commit hash recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn commit_hash_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .commit_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the content-graph root tree hash recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn root_tree_hash_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .root_tree_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the content-graph parent commit hash recorded at the local
+    /// pond's `txn_seq`.  Returns `None` for the genesis commit, an unstamped
+    /// record, or when no `DataCommitted` record exists at that seq.
+    pub async fn parent_commit_hash_at(
+        &self,
+        txn_seq: i64,
+    ) -> Result<Option<String>, StewardError> {
+        self.inner
+            .parent_commit_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
     }
 
     /// Mutable view of the underlying `sync_steward::ControlTable`.
@@ -1032,6 +1100,7 @@ mod tests {
                 7,
                 12,
                 PartitionChecksums::new(),
+                None,
             )
             .await
             .unwrap();

@@ -740,6 +740,7 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
                 .map(|(k, v)| (k.clone(), sync_steward::ChecksumValue::from(v)))
                 .collect(),
             data_delta_version: new_version,
+            ..Default::default()
         };
         let metadata_json = serde_json::to_string(&metadata).map_err(adapt_err)?;
         let now_micros = Utc::now().timestamp_micros();

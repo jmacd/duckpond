@@ -83,7 +83,25 @@ struct NodeFacts {
 pub async fn compute_content_tree(ship: &Ship) -> Result<ContentTreeReport, StewardError> {
     let local_pond_id = ship.data_persistence().pond_id().to_string();
     let table = ship.data_persistence().table().clone();
+    compute_content_tree_for_table(table, &local_pond_id).await
+}
 
+/// Compute a pond's `root_tree_hash` directly from a `DeltaTable` handle.
+///
+/// This is the table-level entry point used by the commit path, where no
+/// active transaction is held: it opens a fresh `SessionContext`, reads the
+/// data table once, reconstructs the current tree, and folds it bottom-up.
+/// Pure and side-effect free.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read, if the named pond has no
+/// root directory row, if a referenced child node is missing, or if directory
+/// content cannot be decoded.
+pub async fn compute_content_tree_for_table(
+    table: deltalake::DeltaTable,
+    local_pond_id: &str,
+) -> Result<ContentTreeReport, StewardError> {
     let ctx = SessionContext::new();
     let _previous = ctx
         .register_table("content_live", Arc::new(table))
@@ -130,7 +148,7 @@ pub async fn compute_content_tree(ship: &Ship) -> Result<ContentTreeReport, Stew
         }
     }
 
-    let root_key = (local_pond_id, ROOT_UUID.to_string());
+    let root_key = (local_pond_id.to_string(), ROOT_UUID.to_string());
     if !latest.contains_key(&root_key) {
         return Err(StewardError::DeltaLake(
             "local pond has no root directory row".to_string(),

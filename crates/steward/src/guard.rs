@@ -332,6 +332,13 @@ impl<'a> StewardTransactionGuard<'a> {
                     ))
                 })?;
 
+                // Content-graph spine (design Section 5.3): fold the live tree
+                // into a root_tree_hash, chain it to the previous commit, and
+                // record the resulting commit object's hash.  Computed from the
+                // post-commit Delta state through a fresh SessionContext, so no
+                // active transaction on `persistence` is required.
+                let commit_spine = self.compute_commit_spine(persistence, pond_id).await?;
+
                 self.control_table
                     .record_data_committed(
                         &self.txn_meta,
@@ -339,6 +346,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         new_version,
                         duration_ms,
                         partition_checksums,
+                        commit_spine,
                     )
                     .await
                     .map_err(|e| {
@@ -411,6 +419,48 @@ impl<'a> StewardTransactionGuard<'a> {
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
+    }
+
+    /// Compute the content-graph commit spine for a just-landed write.
+    ///
+    /// Folds the post-commit live tree into a `root_tree_hash`, looks up the
+    /// previous commit on this pond's chain (the `DataCommitted` record at
+    /// `txn_seq - 1`), builds the [`sync_store::content::Commit`] object, and
+    /// returns its hex spine.  The parent is `None` at genesis or wherever an
+    /// earlier seq did not stamp a spine (compaction, factory sub-commits, or
+    /// records written before the spine existed); such gaps break the chain
+    /// for that link but leave each commit's own hash well-defined.
+    async fn compute_commit_spine(
+        &self,
+        persistence: &tlogfs::OpLogPersistence,
+        pond_id: uuid::Uuid,
+    ) -> Result<Option<crate::control_table::CommitSpine>, StewardError> {
+        let pond_id_str = pond_id.to_string();
+        let table = persistence.table().clone();
+        let report = crate::compute_content_tree_for_table(table, &pond_id_str).await?;
+        let root_tree_hash = report.root_tree_hash;
+
+        let parent_commit_hash = self
+            .control_table
+            .commit_hash_at(self.txn_meta.txn_seq - 1)
+            .await?
+            .and_then(|hex| sync_store::content::ObjectHash::from_hex(&hex).ok());
+
+        let provenance = sync_store::content::Provenance {
+            pond_id: pond_id_str,
+            seq: self.txn_meta.txn_seq,
+            time_micros: chrono::Utc::now().timestamp_micros(),
+            author: String::new(),
+            request: self.txn_meta.user.args.join(" "),
+        };
+        let commit =
+            sync_store::content::Commit::new(root_tree_hash, parent_commit_hash, provenance);
+
+        Ok(Some(crate::control_table::CommitSpine {
+            root_tree_hash: root_tree_hash.to_hex(),
+            parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
+            commit_hash: commit.hash().to_hex(),
+        }))
     }
 
     /// Run post-commit factories after a successful write transaction

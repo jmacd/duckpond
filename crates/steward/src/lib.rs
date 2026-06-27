@@ -25,8 +25,8 @@ mod remote_config;
 mod ship;
 mod write_lock;
 
-pub use content_tree::{ContentTreeReport, compute_content_tree};
-pub use control_table::ControlTable;
+pub use content_tree::{ContentTreeReport, compute_content_tree, compute_content_tree_for_table};
+pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
 pub use guard::StewardTransactionGuard;

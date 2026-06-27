@@ -527,6 +527,7 @@ impl Steward {
                 .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
                 .collect(),
             data_delta_version: new_version,
+            ..Default::default()
         };
         let metadata_json = serde_json::to_string(&metadata)?;
         let now_micros = Utc::now().timestamp_micros();
@@ -736,6 +737,7 @@ impl Steward {
                 .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
                 .collect(),
             data_delta_version: self.store.delta_version(),
+            ..Default::default()
         };
         let metadata_json = serde_json::to_string(&metadata)?;
 
@@ -942,6 +944,7 @@ impl Steward {
                 .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
                 .collect(),
             data_delta_version: self.store.delta_version(),
+            ..Default::default()
         };
         let metadata_json = serde_json::to_string(&metadata)?;
         let now = Utc::now().timestamp_micros();
