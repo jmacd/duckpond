@@ -1265,3 +1265,106 @@ h3:hover .anchor {
   font-style: italic;
   font-size: 0.85rem;
 }
+
+/* ── Data explorer (explore.js) ─────────────────────────────────────────── */
+
+#explore {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.explore-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.explore-dataset {
+  margin-left: 0.25rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+}
+
+.explore-schema {
+  color: var(--fg-muted);
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.explore-sql {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  resize: vertical;
+}
+
+.explore-buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.explore-run,
+.explore-download {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.explore-run:disabled,
+.explore-download:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.explore-status {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.explore-error {
+  color: #b91c1c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.explore-results {
+  overflow-x: auto;
+}
+
+table.explore-grid {
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  width: 100%;
+}
+
+table.explore-grid th,
+table.explore-grid td {
+  border: 1px solid var(--border-light);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+table.explore-grid th {
+  background: var(--bg-card);
+  color: var(--accent);
+  position: sticky;
+  top: 0;
+}

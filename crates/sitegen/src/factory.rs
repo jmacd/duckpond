@@ -1266,6 +1266,8 @@ fn copy_static_assets(
 fn write_shared_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     static STYLE_CSS: &str = include_str!("../assets/style.css");
     static CHART_JS: &str = include_str!("../assets/chart.js");
+    static DUCKDB_SHARED_JS: &str = include_str!("../assets/duckdb-shared.js");
+    static EXPLORE_JS: &str = include_str!("../assets/explore.js");
     static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
     static LOG_VIEWER_JS: &str = include_str!("../assets/log-viewer.js");
     static RELATIVE_TIME_JS: &str = include_str!("../assets/relative-time.js");
@@ -1273,6 +1275,8 @@ fn write_shared_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     for (name, content) in [
         ("style.css", STYLE_CSS),
         ("chart.js", CHART_JS),
+        ("duckdb-shared.js", DUCKDB_SHARED_JS),
+        ("explore.js", EXPLORE_JS),
         ("overlay.js", OVERLAY_JS),
         ("log-viewer.js", LOG_VIEWER_JS),
         ("relative-time.js", RELATIVE_TIME_JS),

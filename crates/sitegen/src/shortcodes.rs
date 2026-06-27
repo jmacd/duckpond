@@ -322,6 +322,19 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ explore table="reduced" label="Reduced tiers" /}} -- emit the data
+    // explorer container with a `datasets` manifest built from this page's
+    // exported files. Client-side explore.js registers the parquet as a DuckDB
+    // view and offers a SQL playground over it.
+    {
+        let c = ctx.clone();
+        shortcodes.register("explore", move |args: &ShortcodeArgs| {
+            let table = args.get_str("table").unwrap_or("data");
+            let label = args.get_str("label").unwrap_or(table);
+            render_explore(&c.datafiles, table, label)
+        });
+    }
+
     // {{ nav_list collection="params" base="/params" /}} -- link list for a collection
     {
         let c = ctx.clone();
@@ -597,6 +610,42 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
     format!(
         "<div id=\"log-viewer\">\
          <script type=\"application/json\" class=\"log-data\">{}</script>\
+         </div>",
+        json
+    )
+}
+
+/// Render the data explorer container with a `datasets` manifest.
+///
+/// Emits a `<div id="explore">` carrying a `<script class="datasets">` JSON
+/// block. The manifest is a single dataset (Stage 0) listing this page's
+/// exported parquet files. Client-side explore.js registers them as a DuckDB
+/// view named `table` and offers a SQL playground. The `url` field carries the
+/// relative parquet URL (the `file` of each ExportedFile), matching the key
+/// explore.js reads.
+fn render_explore(datafiles: &[ExportedFile], table: &str, label: &str) -> String {
+    let files_json: Vec<serde_json::Value> = datafiles
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "url": f.file,
+                "captures": f.captures,
+                "start_time": f.start_time,
+                "end_time": f.end_time,
+            })
+        })
+        .collect();
+
+    let datasets = serde_json::json!([{
+        "table": table,
+        "label": label,
+        "files": files_json,
+    }]);
+    let json = serde_json::to_string(&datasets).unwrap_or_else(|_| "[]".to_string());
+
+    format!(
+        "<div id=\"explore\">\
+         <script type=\"application/json\" class=\"datasets\">{}</script>\
          </div>",
         json
     )
@@ -1359,6 +1408,39 @@ mod tests {
     fn test_render_chart_empty() {
         let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None);
         assert!(html.contains("No data files"));
+    }
+
+    #[test]
+    fn test_render_explore_emits_datasets_manifest() {
+        let files = vec![ExportedFile {
+            path: "/reduced/Temp.series".to_string(),
+            file: "/noyo/data/Temp/res=1h.parquet".to_string(),
+            captures: vec!["Temp".to_string(), "res=1h".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_explore(&files, "reduced", "Reduced tiers");
+        assert!(html.contains("id=\"explore\""), "explore container: {html}");
+        assert!(
+            html.contains("class=\"datasets\""),
+            "datasets manifest script: {html}"
+        );
+        // The url field carries the ExportedFile.file value (what explore.js reads).
+        assert!(html.contains("/noyo/data/Temp/res=1h.parquet"));
+        assert!(html.contains("\"table\":\"reduced\""));
+        assert!(html.contains("\"label\":\"Reduced tiers\""));
+        // start/end times are carried through for lazy fetch.
+        assert!(html.contains("\"start_time\":100"));
+        assert!(html.contains("\"end_time\":200"));
+    }
+
+    #[test]
+    fn test_render_explore_empty_files() {
+        let html = render_explore(&[], "data", "Data");
+        // Still emits a valid (empty) manifest so explore.js shows its own state.
+        assert!(html.contains("class=\"datasets\""));
+        assert!(html.contains("\"files\":[]"));
     }
 
     #[test]

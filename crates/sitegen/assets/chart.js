@@ -12,6 +12,8 @@
 // resolution tier is designed so that a typical screen view spans at most
 // one partition boundary, meaning at most 2 files are fetched per render.
 
+import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
+
 (async function () {
   "use strict";
 
@@ -301,30 +303,11 @@
   // Serialize the queried rows to CSV: a `timestamp` column (ISO 8601 / UTC)
   // followed by every non-partition data column, sorted for stable output.
   function buildCsv(rows) {
-    if (!rows || !rows.length) return "";
-    const cols = new Set();
-    for (const r of rows) {
-      for (const k of Object.keys(r)) {
-        if (k === "timestamp" || PARTITION_COLS.has(k)) continue;
-        cols.add(k);
-      }
-    }
-    const valueCols = Array.from(cols).sort();
-    const header = ["timestamp", ...valueCols];
-    const esc = (s) => {
-      const str = String(s);
-      return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-    };
-    const lines = [header.map(esc).join(",")];
-    for (const r of rows) {
-      const cells = [toDate(r.timestamp).toISOString()];
-      for (const c of valueCols) {
-        const v = r[c];
-        cells.push(v == null ? "" : (typeof v === "bigint" ? v.toString() : String(v)));
-      }
-      lines.push(cells.map(esc).join(","));
-    }
-    return lines.join("\n");
+    return rowsToCsv(rows, {
+      timestampCol: "timestamp",
+      excludeCols: [...PARTITION_COLS],
+      timestampToIso: (v) => toDate(v).toISOString(),
+    });
   }
 
   downloadBtn.addEventListener("click", () => {
@@ -400,16 +383,7 @@
 
   let db, conn;
   try {
-    const duckdb = await import(/* @vite-ignore */ "./vendor/duckdb-browser.mjs");
-    const bundle = {
-      mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
-      mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
-    };
-    const worker = new Worker(bundle.mainWorker);
-    const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
-    db = new duckdb.AsyncDuckDB(logger, worker);
-    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-    conn = await db.connect();
+    ({ db, conn } = await initDuckdb());
   } catch (e) {
     container.innerHTML = `<div class="empty-state">DuckDB-WASM failed to load: ${e.message}</div>`;
     return;
@@ -428,28 +402,8 @@
     return;
   }
 
-  // Cache: file URL → DuckDB registered name (populated lazily)
-  const registeredNames = new Map();
-  let fileIdx = 0;
-
-  // Fetch a single parquet file, register it with DuckDB, return its name.
-  // Returns null if the fetch fails. Results are cached.
-  async function ensureFile(url) {
-    if (registeredNames.has(url)) return registeredNames.get(url);
-    const duckdbName = `f${fileIdx++}.parquet`;
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-      const buf = await resp.arrayBuffer();
-      await db.registerFileBuffer(duckdbName, new Uint8Array(buf));
-      registeredNames.set(url, duckdbName);
-      return duckdbName;
-    } catch (e) {
-      console.error("chart.js: failed to load parquet file", url, e);
-      registeredNames.set(url, null); // cache failure to avoid retries
-      return null;
-    }
-  }
+  // Cache: file URL → DuckDB registered name (populated lazily by ensureFile)
+  const { ensureFile } = createFileRegistry(db);
 
   // ── Resolution detection ────────────────────────────────────────────────
   //
