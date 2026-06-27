@@ -33,12 +33,12 @@
 //! Dynamic nodes hash their stored definition, not their computed output, and
 //! their generated children are not folded in.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datafusion::execution::context::SessionContext;
 
-use sync_store::content::{ObjectHash, TreeEntry, series_hash, tree_hash};
+use sync_store::content::{ObjectHash, TreeEntry, encode_series, encode_tree, series_hash};
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
 
@@ -52,6 +52,49 @@ pub struct ContentTreeReport {
     pub root_tree_hash: ObjectHash,
     /// Number of distinct nodes folded into the root.
     pub nodes_hashed: usize,
+}
+
+/// The materialized content objects reachable from a pond's root tree.
+///
+/// Produced by [`materialize_content_objects`].  Per Decision D7 the objects
+/// split by where their bytes live: small objects (trees, series manifests,
+/// symlinks, recipes, and small blobs) carry their bytes inline and become
+/// `objects` rows in a push; large blobs carry only their hash and transfer
+/// via the external `_large_files` path.  Both are keyed by the same BLAKE3
+/// hash, so reachability and dedup are uniform.
+///
+/// Commit objects are NOT included here -- they are produced by the commit
+/// path and added by the push layer on top of the tree closure.
+#[derive(Debug, Clone, Default)]
+pub struct MaterializedObjects {
+    /// Objects whose bytes are carried inline, keyed by content hash.
+    pub inline: BTreeMap<ObjectHash, Vec<u8>>,
+    /// Large-blob hashes whose bytes transfer via the external path.
+    pub external_blobs: BTreeSet<ObjectHash>,
+}
+
+impl MaterializedObjects {
+    /// Record an inline object (idempotent: re-recording a hash is a no-op).
+    fn put_inline(&mut self, hash: ObjectHash, bytes: Vec<u8>) {
+        let _ = self.inline.entry(hash).or_insert(bytes);
+    }
+
+    /// Record a large blob to transfer externally by hash.
+    fn put_external(&mut self, hash: ObjectHash) {
+        let _ = self.external_blobs.insert(hash);
+    }
+
+    /// Total number of distinct objects (inline plus external).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inline.len() + self.external_blobs.len()
+    }
+
+    /// True when no objects were materialized.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inline.is_empty() && self.external_blobs.is_empty()
+    }
 }
 
 /// One child entry of a directory, captured during the fold so that a later
@@ -100,6 +143,14 @@ struct NodeFacts {
     content: Option<Vec<u8>>,
     /// The recorded `blake3` of this version, if any.
     blake3: Option<String>,
+}
+
+/// One version of a series: its blob hash plus the inline bytes when the
+/// version is small enough to be stored in-row.  `content` is `None` for an
+/// externalized (large) version, whose bytes transfer via the external path.
+struct VersionBlob {
+    hash: ObjectHash,
+    content: Option<Vec<u8>>,
 }
 
 /// Compute the local pond's `root_tree_hash` from its live filesystem state.
@@ -156,6 +207,41 @@ pub(crate) async fn build_content_tree_for_table(
     table: deltalake::DeltaTable,
     local_pond_id: &str,
 ) -> Result<ContentTreeIndex, StewardError> {
+    scan_and_fold(table, local_pond_id, None).await
+}
+
+/// Materialize the content objects reachable from a pond's root tree.
+///
+/// Reads the data table once and folds it exactly like the hash path, but also
+/// captures each object's bytes: encoded tree objects, series manifests, and
+/// small blob/symlink/recipe bytes inline, with large blobs recorded by hash
+/// for external transfer (Decision D7).  Commit objects are added separately by
+/// the push layer.  Pure and side-effect free.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read, if the named pond has no
+/// root directory row, if a referenced child node is missing, or if directory
+/// content cannot be decoded.
+pub async fn materialize_content_objects(ship: &Ship) -> Result<MaterializedObjects, StewardError> {
+    let local_pond_id = ship.data_persistence().pond_id().to_string();
+    let table = ship.data_persistence().table().clone();
+    let mut materialized = MaterializedObjects::default();
+    let _index = scan_and_fold(table, &local_pond_id, Some(&mut materialized)).await?;
+    Ok(materialized)
+}
+
+/// Shared scan-and-fold core for the hash, index, and materialization paths.
+///
+/// When `sink` is `Some`, every folded object's bytes are recorded into it
+/// (split inline vs external per Decision D7); when `None`, only hashes are
+/// computed.  Either way the returned [`ContentTreeIndex`] is identical, so the
+/// child-hash rules live in exactly one implementation.
+async fn scan_and_fold(
+    table: deltalake::DeltaTable,
+    local_pond_id: &str,
+    sink: Option<&mut MaterializedObjects>,
+) -> Result<ContentTreeIndex, StewardError> {
     let ctx = SessionContext::new();
     let _previous = ctx
         .register_table("content_live", Arc::new(table))
@@ -169,11 +255,11 @@ pub(crate) async fn build_content_tree_for_table(
         .await
         .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
 
-    // Latest-version facts per node, and per-version blob hashes for series.
+    // Latest-version facts per node, and per-version blobs for series.
     // Rows arrive in ascending version order, so later rows overwrite earlier
     // ones for the latest-version snapshot.
     let mut latest: HashMap<NodeKey, NodeFacts> = HashMap::new();
-    let mut series_versions: HashMap<NodeKey, BTreeMap<i64, ObjectHash>> = HashMap::new();
+    let mut series_versions: HashMap<NodeKey, BTreeMap<i64, VersionBlob>> = HashMap::new();
 
     for batch in &batches {
         let rows: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)
@@ -185,11 +271,14 @@ pub(crate) async fn build_content_tree_for_table(
                 row.file_type,
                 EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries
             ) {
-                let blob = row_blob_hash(&row.blake3, row.content.as_deref());
-                let _ = series_versions
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(row.version, blob);
+                let hash = row_blob_hash(&row.blake3, row.content.as_deref());
+                let _ = series_versions.entry(key.clone()).or_default().insert(
+                    row.version,
+                    VersionBlob {
+                        hash,
+                        content: row.content.clone(),
+                    },
+                );
             }
 
             let _ = latest.insert(
@@ -219,6 +308,7 @@ pub(crate) async fn build_content_tree_for_table(
         &mut memo,
         &mut in_progress,
         &mut dirs,
+        sink,
     )?;
 
     Ok(ContentTreeIndex {
@@ -241,14 +331,18 @@ fn row_blob_hash(blake3: &Option<String>, content: Option<&[u8]>) -> ObjectHash 
 }
 
 /// Fold one directory (by key) into its recursive [`tree_hash`], recording its
-/// child list into `dirs` for later comparison.
+/// child list into `dirs` for later comparison.  When `sink` is `Some`, the
+/// encoded tree object bytes (and, via `hash_child`, descendant object bytes)
+/// are recorded for materialization.
+#[allow(clippy::too_many_arguments)]
 fn hash_directory(
     key: &NodeKey,
     latest: &HashMap<NodeKey, NodeFacts>,
-    series_versions: &HashMap<NodeKey, BTreeMap<i64, ObjectHash>>,
+    series_versions: &HashMap<NodeKey, BTreeMap<i64, VersionBlob>>,
     memo: &mut HashMap<NodeKey, ObjectHash>,
     in_progress: &mut Vec<NodeKey>,
     dirs: &mut HashMap<NodeKey, Vec<ChildRef>>,
+    mut sink: Option<&mut MaterializedObjects>,
 ) -> Result<ObjectHash, StewardError> {
     if let Some(h) = memo.get(key) {
         return Ok(*h);
@@ -283,6 +377,7 @@ fn hash_directory(
             memo,
             in_progress,
             dirs,
+            sink.as_deref_mut(),
         )?;
         let child_dir_key = if entry.entry_type == EntryType::DirectoryPhysical {
             Some(child_key)
@@ -300,34 +395,49 @@ fn hash_directory(
 
     let _ = in_progress.pop();
 
-    let hash = tree_hash(&tree_entries).map_err(StewardError::DeltaLake)?;
+    let encoded = encode_tree(&tree_entries).map_err(StewardError::DeltaLake)?;
+    let hash = ObjectHash::of_bytes(&encoded);
+    if let Some(sink) = sink {
+        sink.put_inline(hash, encoded);
+    }
     let _ = memo.insert(key.clone(), hash);
     let _ = dirs.insert(key.clone(), children);
     Ok(hash)
 }
 
 /// Compute the `child_hash` an entry of the given kind contributes to its
-/// parent, dispatching on the entry type per design Section 9.
+/// parent, dispatching on the entry type per design Section 9.  When `sink` is
+/// `Some`, the child's object bytes are recorded for materialization.
 #[allow(clippy::too_many_arguments)]
 fn hash_child(
     key: &NodeKey,
     entry_type: EntryType,
     latest: &HashMap<NodeKey, NodeFacts>,
-    series_versions: &HashMap<NodeKey, BTreeMap<i64, ObjectHash>>,
+    series_versions: &HashMap<NodeKey, BTreeMap<i64, VersionBlob>>,
     memo: &mut HashMap<NodeKey, ObjectHash>,
     in_progress: &mut Vec<NodeKey>,
     dirs: &mut HashMap<NodeKey, Vec<ChildRef>>,
+    sink: Option<&mut MaterializedObjects>,
 ) -> Result<ObjectHash, StewardError> {
     match entry_type {
         EntryType::DirectoryPhysical => {
-            hash_directory(key, latest, series_versions, memo, in_progress, dirs)
+            hash_directory(key, latest, series_versions, memo, in_progress, dirs, sink)
         }
         EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
             let versions = series_versions.get(key).ok_or_else(|| {
                 StewardError::DeltaLake(format!("missing series node {}/{}", key.0, key.1))
             })?;
-            let ordered: Vec<ObjectHash> = versions.values().copied().collect();
-            Ok(series_hash(&ordered))
+            let ordered: Vec<ObjectHash> = versions.values().map(|v| v.hash).collect();
+            let series = series_hash(&ordered);
+            if let Some(sink) = sink {
+                // The series manifest object, plus each version blob: small
+                // versions inline, large (externalized) versions by hash (D7).
+                sink.put_inline(series, encode_series(&ordered));
+                for v in versions.values() {
+                    record_blob(sink, v.hash, v.content.as_deref());
+                }
+            }
+            Ok(series)
         }
         // Dynamic nodes hash their stored definition (recipe), and symlinks
         // hash their target bytes; both are the node's content bytes.
@@ -336,15 +446,33 @@ fn hash_child(
         | EntryType::TableDynamic
         | EntryType::Symlink => {
             let facts = leaf_facts(key, latest)?;
-            Ok(ObjectHash::of_bytes(
-                facts.content.as_deref().unwrap_or(&[]),
-            ))
+            let bytes = facts.content.as_deref().unwrap_or(&[]);
+            let hash = ObjectHash::of_bytes(bytes);
+            if let Some(sink) = sink {
+                // Recipes and symlink targets are small; always inline.
+                sink.put_inline(hash, bytes.to_vec());
+            }
+            Ok(hash)
         }
         // Single-version physical file or table: the version blob hash.
         EntryType::FilePhysicalVersion | EntryType::TablePhysicalVersion => {
             let facts = leaf_facts(key, latest)?;
-            Ok(row_blob_hash(&facts.blake3, facts.content.as_deref()))
+            let hash = row_blob_hash(&facts.blake3, facts.content.as_deref());
+            if let Some(sink) = sink {
+                record_blob(sink, hash, facts.content.as_deref());
+            }
+            Ok(hash)
         }
+    }
+}
+
+/// Record a file/version blob into the materialization sink: inline when the
+/// bytes are in-row (small), external by hash when the content is `None`
+/// (an externalized large file -- Decision D7).
+fn record_blob(sink: &mut MaterializedObjects, hash: ObjectHash, content: Option<&[u8]>) {
+    match content {
+        Some(bytes) => sink.put_inline(hash, bytes.to_vec()),
+        None => sink.put_external(hash),
     }
 }
 

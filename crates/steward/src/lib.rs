@@ -29,7 +29,10 @@ mod write_lock;
 
 pub use content_diff::{ContentComparison, ContentDiff, DiffKind, compare_content_trees};
 pub use content_objects::{ObjectInventory, ObjectKind, inventory_content_objects};
-pub use content_tree::{ContentTreeReport, compute_content_tree, compute_content_tree_for_table};
+pub use content_tree::{
+    ContentTreeReport, MaterializedObjects, compute_content_tree, compute_content_tree_for_table,
+    materialize_content_objects,
+};
 pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
