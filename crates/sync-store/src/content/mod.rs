@@ -35,7 +35,7 @@ mod commit;
 mod tree;
 
 pub use commit::{Commit, Provenance};
-pub use tree::{TreeEntry, encode_tree, series_hash, tree_hash};
+pub use tree::{TreeEntry, encode_series, encode_tree, series_hash, tree_hash};
 
 use std::fmt;
 

@@ -121,7 +121,7 @@ pub fn tree_hash(entries: &[TreeEntry]) -> Result<ObjectHash, String> {
     Ok(ObjectHash::of_bytes(&encode_tree(entries)?))
 }
 
-/// Compute the cumulative content-and-history hash of a multi-version series.
+/// Encode a multi-version series into its content-object bytes.
 ///
 /// A series entry must commit to its *whole* history so the hash is stable
 /// across appends: appending a version extends the input deterministically.
@@ -133,10 +133,11 @@ pub fn tree_hash(entries: &[TreeEntry]) -> Result<ObjectHash, String> {
 /// repeated: 32 bytes per version blob hash, in order
 /// ```
 ///
-/// This is the simple-start encoding of the "stable bao root over all
-/// versions" the design calls for (D2, not frozen).
+/// The returned bytes *are* the series object; its [`series_hash`] is
+/// `blake3` of these bytes.  This is the simple-start encoding of the "stable
+/// bao root over all versions" the design calls for (D2, not frozen).
 #[must_use]
-pub fn series_hash(version_hashes: &[ObjectHash]) -> ObjectHash {
+pub fn encode_series(version_hashes: &[ObjectHash]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(SERIES_MAGIC.len() + 4 + version_hashes.len() * 32);
     buf.extend_from_slice(SERIES_MAGIC);
     let count = u32::try_from(version_hashes.len()).expect("version count exceeds u32::MAX");
@@ -144,7 +145,15 @@ pub fn series_hash(version_hashes: &[ObjectHash]) -> ObjectHash {
     for h in version_hashes {
         buf.extend_from_slice(h.as_bytes());
     }
-    ObjectHash::of_bytes(&buf)
+    buf
+}
+
+/// Compute the cumulative content-and-history hash of a multi-version series.
+///
+/// This is `blake3` over the [`encode_series`] serialization.
+#[must_use]
+pub fn series_hash(version_hashes: &[ObjectHash]) -> ObjectHash {
+    ObjectHash::of_bytes(&encode_series(version_hashes))
 }
 
 #[cfg(test)]
@@ -230,5 +239,19 @@ mod tests {
         let v1 = h("v1");
         // A one-version series must not collide with the raw blob hash.
         assert_ne!(series_hash(&[v1]), v1);
+    }
+
+    #[test]
+    fn series_hash_is_blake3_of_encode_series() {
+        // The encoded bytes ARE the series object; its hash is blake3 of them.
+        let versions = [h("v1"), h("v2"), h("v3")];
+        assert_eq!(
+            series_hash(&versions),
+            ObjectHash::of_bytes(&encode_series(&versions))
+        );
+        // The encoding round-trips structurally: magic + count + 32B per hash.
+        let bytes = encode_series(&versions);
+        assert_eq!(&bytes[..SERIES_MAGIC.len()], SERIES_MAGIC);
+        assert_eq!(bytes.len(), SERIES_MAGIC.len() + 4 + versions.len() * 32);
     }
 }
