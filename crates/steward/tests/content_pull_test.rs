@@ -141,3 +141,56 @@ async fn fetched_closure_matches_pushed_objects() {
         );
     }
 }
+
+/// The full round trip: push a pond, fetch its graph, rebuild into a fresh
+/// empty pond, and confirm the rebuilt pond is content-equal to the source
+/// (its read-side fold equals the source's root tree hash).
+#[tokio::test]
+async fn rebuild_reproduces_source_content() {
+    let (_t, mut src) = new_pond("src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_file(&mut src, "/b.txt", b"beta").await;
+    mkdir_and_file(&mut src, "/sub", "/sub/c.txt", b"gamma").await;
+    mkdir_and_file(&mut src, "/sub/deep", "/sub/deep/d.txt", b"delta").await;
+
+    let src_root = steward::compute_content_tree(&src)
+        .await
+        .expect("source fold")
+        .root_tree_hash;
+
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "dst")
+        .await
+        .expect("create dst pond");
+
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    assert_eq!(outcome.root_tree_hash, Some(src_root));
+    assert_eq!(outcome.files, 4);
+    assert_eq!(outcome.dirs, 2);
+
+    let dst_root = steward::compute_content_tree(&dst)
+        .await
+        .expect("dst fold")
+        .root_tree_hash;
+    assert_eq!(
+        dst_root, src_root,
+        "rebuilt pond must be content-equal to the source"
+    );
+}
+
+/// Rebuilding from an empty graph is a hard error, not a silent no-op.
+#[tokio::test]
+async fn rebuild_empty_graph_errors() {
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "dst")
+        .await
+        .expect("create dst pond");
+    let empty = steward::FetchedGraph::default();
+    assert!(steward::rebuild_pond(&mut dst, &empty).await.is_err());
+}
