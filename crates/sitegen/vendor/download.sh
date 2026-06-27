@@ -34,6 +34,9 @@ npm install --save \
     @duckdb/duckdb-wasm@1.29.0 \
     @observablehq/plot@0.6 \
     d3@7 \
+    vega@5 \
+    vega-lite@5 \
+    vega-embed@6 \
     esbuild \
     > /dev/null 2>&1
 
@@ -55,6 +58,16 @@ export * as Plot from "@observablehq/plot";
 export * as d3 from "d3";
 EOF
 npx esbuild _plot.mjs --bundle --format=esm --outfile="${DIST_DIR}/plot-d3-bundle.mjs" --minify 2>&1
+
+# -- Vega / Vega-Lite / Vega-Embed: bundle for the explorer "Chart" view --
+# vega-embed pulls in vega + vega-lite. The explorer lazy-imports this bundle
+# only when a visitor switches a query result to the chart view, so it never
+# affects initial page load. This backs the Stage 3 Vega-Lite migration spike.
+echo "Bundling Vega-Lite (vega-embed)..."
+cat > _vega.mjs << 'EOF'
+export { default as vegaEmbed } from "vega-embed";
+EOF
+npx esbuild _vega.mjs --bundle --format=esm --outfile="${DIST_DIR}/vega-bundle.mjs" --minify 2>&1
 
 # -- Cleanup work directory --
 cd "${SCRIPT_DIR}"

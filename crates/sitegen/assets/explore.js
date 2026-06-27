@@ -130,8 +130,28 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
 
   buttonBar.append(runBtn, downloadBtn, downloadJsonBtn, downloadParquetBtn, status);
 
+  // View switcher: Table (grid) vs Chart (Vega-Lite). The chart view is part of
+  // the Stage 3 Vega-Lite spike and lazy-loads the vega bundle on first use.
+  const viewBar = document.createElement("div");
+  viewBar.className = "explore-views";
+  const tableViewBtn = document.createElement("button");
+  tableViewBtn.type = "button";
+  tableViewBtn.textContent = "Table";
+  tableViewBtn.className = "explore-view-table";
+  const chartViewBtn = document.createElement("button");
+  chartViewBtn.type = "button";
+  chartViewBtn.textContent = "Chart";
+  chartViewBtn.className = "explore-view-chart";
+  viewBar.append(tableViewBtn, chartViewBtn);
+  viewBar.hidden = true;
+
   const results = document.createElement("div");
   results.className = "explore-results";
+
+  // Vega-Lite render target; shown only in chart view.
+  const chartContainer = document.createElement("div");
+  chartContainer.className = "explore-chart";
+  chartContainer.hidden = true;
 
   // Pager: prev/next + "rows X–Y of N" for the materialized result set.
   const pager = document.createElement("div");
@@ -149,7 +169,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   pageInfo.className = "explore-page-info";
   pager.append(prevBtn, pageInfo, nextBtn);
 
-  container.append(controls, columnBar, exampleBar, editor, buttonBar, results, pager);
+  container.append(controls, columnBar, exampleBar, editor, buttonBar, viewBar, results, chartContainer, pager);
 
   // ── Dataset registration ────────────────────────────────────────────────────
 
@@ -161,6 +181,10 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   // Wrapped SQL of the last successful run, replayed by the Parquet export so
   // the downloaded file matches the displayed result set.
   let lastSql = null;
+  // Current result view: "table" or "chart".
+  let viewMode = "table";
+  // Lazily-imported vega-embed function (loaded on first chart render).
+  let vegaEmbedFn = null;
 
   function datasetTable(d, i) {
     // Prefer the manifest-provided table name; fall back to a safe identifier.
@@ -370,11 +394,14 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
       lastRows = result.toArray();
       lastSql = sql;
       pageIndex = 0;
-      renderPage();
+      const hasRows = lastRows.length > 0;
+      viewBar.hidden = !hasRows;
+      updateViewButtons();
+      renderCurrentView();
       status.textContent = `${lastRows.length} row${lastRows.length === 1 ? "" : "s"}`;
-      downloadBtn.disabled = lastRows.length === 0;
-      downloadJsonBtn.disabled = lastRows.length === 0;
-      downloadParquetBtn.disabled = lastRows.length === 0;
+      downloadBtn.disabled = !hasRows;
+      downloadJsonBtn.disabled = !hasRows;
+      downloadParquetBtn.disabled = !hasRows;
       writeHash();
     } catch (e) {
       results.innerHTML = `<div class="explore-error">${escapeHtml(String(e.message || e))}</div>`;
@@ -383,9 +410,137 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
       lastFields = null;
       lastSql = null;
       pager.hidden = true;
+      viewBar.hidden = true;
+      chartContainer.hidden = true;
     } finally {
       running = false;
       runBtn.disabled = false;
+    }
+  }
+
+  // ── Result views (table / Vega-Lite chart) ───────────────────────────────────
+
+  function updateViewButtons() {
+    tableViewBtn.classList.toggle("active", viewMode === "table");
+    chartViewBtn.classList.toggle("active", viewMode === "chart");
+  }
+
+  function renderCurrentView() {
+    if (viewMode === "chart") {
+      results.hidden = true;
+      pager.hidden = true;
+      chartContainer.hidden = false;
+      renderChart();
+    } else {
+      chartContainer.hidden = true;
+      results.hidden = false;
+      renderPage();
+    }
+  }
+
+  tableViewBtn.addEventListener("click", () => {
+    if (viewMode === "table") return;
+    viewMode = "table";
+    updateViewButtons();
+    renderCurrentView();
+  });
+  chartViewBtn.addEventListener("click", () => {
+    if (viewMode === "chart") return;
+    viewMode = "chart";
+    updateViewButtons();
+    renderCurrentView();
+  });
+
+  // Lazily import the vendored vega-embed bundle (only when first needed).
+  async function ensureVega() {
+    if (vegaEmbedFn) return vegaEmbedFn;
+    const mod = await import(/* @vite-ignore */ new URL("./vendor/vega-bundle.mjs", import.meta.url).href);
+    vegaEmbedFn = mod.vegaEmbed;
+    return vegaEmbedFn;
+  }
+
+  // Detect whether a column is numeric / temporal by sampling its first
+  // non-null value across the materialized rows.
+  function detectKind(field) {
+    for (const r of lastRows) {
+      const v = r[field];
+      if (v == null) continue;
+      if (v instanceof Date) return "temporal";
+      if (typeof v === "number" || typeof v === "bigint") return "quantitative";
+      return "nominal";
+    }
+    return "nominal";
+  }
+
+  // Choose an x column (first temporal, else first column) and the numeric y
+  // columns (all quantitative columns except x).
+  function inferChartEncoding() {
+    const kinds = {};
+    for (const f of lastFields) kinds[f] = detectKind(f);
+    let xCol = lastFields.find((f) => kinds[f] === "temporal");
+    if (!xCol) xCol = lastFields[0];
+    const yCols = lastFields.filter((f) => f !== xCol && kinds[f] === "quantitative");
+    return { xCol, xKind: kinds[xCol], yCols };
+  }
+
+  // Coerce rows to Vega-friendly plain objects: BigInt -> Number, keep Date.
+  function sanitizeChartRows(cols) {
+    return lastRows.map((r) => {
+      const o = {};
+      for (const c of cols) {
+        const v = r[c];
+        o[c] = typeof v === "bigint" ? Number(v) : v;
+      }
+      return o;
+    });
+  }
+
+  async function renderChart() {
+    if (!lastRows || !lastFields || !lastRows.length) {
+      chartContainer.innerHTML = '<div class="empty-state">Run a query to chart its result.</div>';
+      return;
+    }
+    const { xCol, xKind, yCols } = inferChartEncoding();
+    if (!yCols.length) {
+      chartContainer.innerHTML =
+        '<div class="empty-state">No numeric column to plot. The chart view needs at least one numeric column.</div>';
+      return;
+    }
+    chartContainer.innerHTML = '<div class="empty-state">Rendering chart…</div>';
+    let embed;
+    try {
+      embed = await ensureVega();
+    } catch (e) {
+      chartContainer.innerHTML = `<div class="explore-error">Vega failed to load: ${escapeHtml(String(e.message || e))}</div>`;
+      return;
+    }
+
+    const cols = [xCol, ...yCols];
+    const values = sanitizeChartRows(cols);
+    const multi = yCols.length > 1;
+    const spec = {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      height: 340,
+      data: { values },
+      transform: multi ? [{ fold: yCols, as: ["series", "value"] }] : [],
+      mark: { type: "line", clip: true, tooltip: true },
+      encoding: {
+        x: { field: xCol, type: xKind === "temporal" ? "temporal" : "quantitative", title: xCol },
+        y: multi
+          ? { field: "value", type: "quantitative" }
+          : { field: yCols[0], type: "quantitative", title: yCols[0] },
+        ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
+      },
+      // Interval selection bound to scales gives pan + zoom (brush-zoom parity
+      // with the Observable Plot chart path -- a key spike comparison point).
+      params: [{ name: "grid", select: "interval", bind: "scales" }],
+    };
+
+    try {
+      await embed(chartContainer, spec, { actions: false, renderer: "canvas" });
+    } catch (e) {
+      chartContainer.innerHTML = `<div class="explore-error">Chart render failed: ${escapeHtml(String(e.message || e))}</div>`;
     }
   }
 

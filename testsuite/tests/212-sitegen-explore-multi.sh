@@ -252,6 +252,10 @@ check_contains "${OUTDIR}/explore.js" "json download button" 'Download JSON'
 check_contains "${OUTDIR}/explore.js" "json serializer import" 'rowsToJson'
 check_contains "${OUTDIR}/explore.js" "parquet download button" 'Download Parquet'
 check_contains "${OUTDIR}/explore.js" "parquet copy writer" 'FORMAT PARQUET'
+check_contains "${OUTDIR}/explore.js" "vega chart view" 'renderChart'
+check_contains "${OUTDIR}/explore.js" "vega lazy import" 'vega-bundle.mjs'
+check_contains "${OUTDIR}/explore.js" "vega-lite spec" 'vega-lite/v5'
+check '[ -f "${OUTDIR}/vendor/vega-bundle.mjs" ]' "vega bundle vendored"
 check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
 
 echo ""

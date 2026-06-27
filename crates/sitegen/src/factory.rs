@@ -1374,6 +1374,7 @@ const VENDOR_FILES: &[&str] = &[
     "duckdb-browser-eh.worker.js",
     "duckdb-eh.wasm",
     "plot-d3-bundle.mjs",
+    "vega-bundle.mjs",
 ];
 
 /// Pre-compressed variants of vendor files (brotli + gzip).
@@ -1389,6 +1390,8 @@ const VENDOR_FILES_COMPRESSED: &[&str] = &[
     "duckdb-eh.wasm.gz",
     "plot-d3-bundle.mjs.br",
     "plot-d3-bundle.mjs.gz",
+    "vega-bundle.mjs.br",
+    "vega-bundle.mjs.gz",
 ];
 
 /// Copy vendor files from the vendor/dist/ directory to the output site.
