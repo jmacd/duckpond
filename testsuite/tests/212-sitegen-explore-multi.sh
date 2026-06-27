@@ -287,6 +287,8 @@ check_contains "${OUTDIR}/chart.js" "chart explore button" 'Explore this data'
 check_contains "${OUTDIR}/chart.js" "chart reads explore url" 'exploreUrl'
 check_contains "${OUTDIR}/explore.js" "explorer accepts handed-over files" 'chart_data'
 check_contains "${OUTDIR}/explore.js" "explorer full-screen toggle" 'explore-fullscreen'
+check_contains "${OUTDIR}/explore.js" "per-partition lazy fetch window" 'explore-window'
+check_contains "${OUTDIR}/explore.js" "partition overlap pruning" 'overlappingFiles'
 
 echo ""
 echo "=== Data explorer Stage 1 (multi-dataset) verified ==="

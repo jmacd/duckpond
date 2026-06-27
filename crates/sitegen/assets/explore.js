@@ -107,6 +107,34 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
 
   controls.append(datasetLabel, schemaInfo);
 
+  // Time-window control for per-partition lazy fetch. Shown only for temporal
+  // datasets (files carry start_time/end_time). Narrowing the window means only
+  // the parquet partitions overlapping it are fetched and scanned on the next
+  // run, so browsing a large dataset never downloads every partition up front.
+  const windowBar = document.createElement("div");
+  windowBar.className = "explore-window";
+  windowBar.hidden = true;
+  const windowLabel = document.createElement("span");
+  windowLabel.className = "explore-window-label";
+  windowLabel.textContent = "Window";
+  const startInput = document.createElement("input");
+  startInput.type = "datetime-local";
+  startInput.className = "explore-window-input";
+  startInput.setAttribute("aria-label", "Window start");
+  const windowArrow = document.createElement("span");
+  windowArrow.textContent = "→";
+  const endInput = document.createElement("input");
+  endInput.type = "datetime-local";
+  endInput.className = "explore-window-input";
+  endInput.setAttribute("aria-label", "Window end");
+  const fullRangeBtn = document.createElement("button");
+  fullRangeBtn.type = "button";
+  fullRangeBtn.className = "explore-window-full";
+  fullRangeBtn.textContent = "Full range";
+  const windowHint = document.createElement("span");
+  windowHint.className = "explore-window-hint";
+  windowBar.append(windowLabel, startInput, windowArrow, endInput, fullRangeBtn, windowHint);
+
   // Clickable column browser: chips are populated per dataset and insert the
   // column name into the SQL editor at the cursor when clicked.
   const columnBar = document.createElement("div");
@@ -192,12 +220,13 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   pageInfo.className = "explore-page-info";
   pager.append(prevBtn, pageInfo, nextBtn);
 
-  container.append(controls, columnBar, exampleBar, editor, buttonBar, viewBar, results, chartContainer, pager);
+  container.append(controls, windowBar, columnBar, exampleBar, editor, buttonBar, viewBar, results, chartContainer, pager);
 
   // ── Dataset registration ────────────────────────────────────────────────────
 
-  // Tracks which dataset indices have had their files registered + view created.
-  const registeredDatasets = new Set();
+  // Tracks the file-set key currently registered as each dataset's view, so a
+  // re-run with an unchanged window can skip rebuilding the view.
+  const registeredKey = new Map();
   let lastRows = null;
   let lastFields = null;
   let pageIndex = 0;
@@ -215,16 +244,94 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     return /^[A-Za-z_]/.test(raw) ? raw : `t_${raw}`;
   }
 
-  // Register every parquet file for a dataset and (re)create its view. Returns
-  // the view's table name, or throws if no files could be loaded.
+  // A dataset is temporal if any of its files declares a real time range. Files
+  // with start_time === 0 are treated as "spans everything" (always included),
+  // matching the chart's overlap rule.
+  function datasetFiles(d) {
+    return Array.isArray(d.files) ? d.files : [];
+  }
+  function datasetIsTemporal(d) {
+    return datasetFiles(d).some((f) => (f.start_time || 0) > 0);
+  }
+  // Full data span [minStartMs, maxEndMs] across a dataset's temporal files,
+  // or null when the dataset carries no time ranges.
+  function datasetSpanMs(d) {
+    let lo = Infinity;
+    let hi = 0;
+    for (const f of datasetFiles(d)) {
+      if ((f.start_time || 0) > 0) lo = Math.min(lo, f.start_time * 1000);
+      if ((f.end_time || 0) > 0) hi = Math.max(hi, f.end_time * 1000);
+    }
+    return lo === Infinity ? null : { lo, hi: hi || Date.now() };
+  }
+  // Files overlapping a window [beginMs, endMs]; start_time === 0 always
+  // overlaps. With no window, every file is returned.
+  function overlappingFiles(d, win) {
+    const files = datasetFiles(d);
+    if (!win) return files;
+    return files.filter(
+      (f) =>
+        (f.start_time || 0) === 0 ||
+        (f.start_time * 1000 <= win.endMs && f.end_time * 1000 >= win.beginMs)
+    );
+  }
+
+  function parseLocalInput(v) {
+    const ms = new Date(v).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+  function toLocalInput(ms) {
+    const d = new Date(ms);
+    return (
+      `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+      `T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    );
+  }
+
+  // The window the user has set for the selected dataset, or null for full
+  // range. A window that covers the dataset's whole span is treated as null
+  // (no pruning), which also avoids dropping boundary partitions to the
+  // minute-resolution datetime inputs.
+  function currentWindow() {
+    if (windowBar.hidden) return null;
+    const beginMs = parseLocalInput(startInput.value);
+    const endRaw = parseLocalInput(endInput.value);
+    if (beginMs == null || endRaw == null || beginMs >= endRaw) return null;
+    // Inputs are minute-resolution; extend the end to cover the whole minute.
+    const endMs = endRaw + 60000;
+    const span = datasetSpanMs(datasets[Number(datasetSelect.value)]);
+    if (span && beginMs <= span.lo && endMs >= span.hi) return null;
+    return { beginMs, endMs };
+  }
+
+  // Register the parquet files for a dataset that overlap the current window and
+  // (re)create its view over exactly those files. Fetches are cached, so a
+  // wider window only fetches the newly-needed partitions. Returns the view's
+  // table name, or throws if no file could be loaded.
   async function ensureDataset(i) {
     const d = datasets[i];
     const table = datasetTable(d, i);
-    if (registeredDatasets.has(i)) return table;
+    const win = currentWindow();
+    const selected = overlappingFiles(d, win);
+    const urls = selected.map((f) => f.url).filter(Boolean);
+    const total = datasetFiles(d).length;
+    if (urls.length === 0) {
+      throw new Error(
+        win
+          ? "no parquet partitions overlap the selected window"
+          : "dataset has no exported parquet files"
+      );
+    }
 
-    const files = Array.isArray(d.files) ? d.files : [];
-    const urls = files.map((f) => f.url).filter(Boolean);
-    if (urls.length === 0) throw new Error("dataset has no exported parquet files");
+    // Skip the rebuild when the exact same file set is already the view.
+    const key = urls.slice().sort().join("|");
+    if (registeredKey.get(i) === key) {
+      updateWindowHint(urls.length, total);
+      return table;
+    }
 
     const names = (await Promise.all(urls.map((u) => ensureFile(u)))).filter(Boolean);
     if (names.length === 0) throw new Error("failed to fetch any parquet file for this dataset");
@@ -236,8 +343,17 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
       `CREATE OR REPLACE VIEW ${table} AS ` +
         `SELECT * FROM read_parquet([${list}], union_by_name=true)`
     );
-    registeredDatasets.add(i);
+    registeredKey.set(i, key);
+    updateWindowHint(names.length, total);
     return table;
+  }
+
+  function updateWindowHint(loaded, total) {
+    if (windowBar.hidden) {
+      windowHint.textContent = "";
+      return;
+    }
+    windowHint.textContent = `Loaded ${loaded} of ${total} partition${total === 1 ? "" : "s"}`;
   }
 
   // Show the column list for a dataset's view via DESCRIBE. Renders the typed
@@ -407,10 +523,16 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     downloadBtn.disabled = true;
     downloadJsonBtn.disabled = true;
     downloadParquetBtn.disabled = true;
-    status.textContent = "Running…";
+    status.textContent = "Loading data…";
     results.innerHTML = "";
 
     try {
+      // Register the selected dataset's partitions overlapping the current
+      // window and refine the typed schema before querying.
+      const i = Number(datasetSelect.value);
+      const table = await ensureDataset(i);
+      await showSchema(table);
+      status.textContent = "Running…";
       const sql = withDefaultLimit(raw);
       const result = await conn.query(sql);
       lastFields = result.schema.fields.map((f) => f.name);
@@ -717,29 +839,58 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
 
   async function selectDataset(i, { run = false } = {}) {
     datasetSelect.value = String(i);
-    status.textContent = "Loading dataset…";
-    const tableName = datasetTable(datasets[i], i);
-    // Show the manifest column list immediately so the schema is visible while
-    // the parquet files download; DESCRIBE refines it with types afterward.
-    showManifestSchema(datasets[i], tableName);
+    const d = datasets[i];
+    const tableName = datasetTable(d, i);
+    // Show the manifest column list immediately; types are refined by a DESCRIBE
+    // after the first run, once the dataset's view exists. No parquet is fetched
+    // here — registration is deferred to run time and pruned to the window, so
+    // browsing datasets never downloads every partition up front.
+    showManifestSchema(d, tableName);
     renderExamples(tableName);
-    try {
-      const table = await ensureDataset(i);
-      await showSchema(table);
-      renderExamples(table);
-      if (!editor.value.trim() || !run) {
-        if (!editor.value.trim()) editor.value = `SELECT * FROM ${table} LIMIT 100`;
-      }
-      status.textContent = "";
-    } catch (e) {
-      schemaInfo.textContent = "";
-      status.textContent = `Dataset error: ${e.message}`;
+
+    // Configure the time-window control for temporal datasets; hide it for
+    // non-temporal ones (the whole dataset is registered on run).
+    const span = datasetSpanMs(d);
+    if (datasetIsTemporal(d) && span) {
+      windowBar.hidden = false;
+      startInput.min = toLocalInput(span.lo);
+      startInput.max = toLocalInput(span.hi);
+      endInput.min = toLocalInput(span.lo);
+      endInput.max = toLocalInput(span.hi);
+      // Default to the full range so a first query returns all data; narrowing
+      // the window then prunes which partitions are fetched.
+      startInput.value = toLocalInput(span.lo);
+      endInput.value = toLocalInput(span.hi);
+      windowHint.textContent = "";
+    } else {
+      windowBar.hidden = true;
+      windowHint.textContent = "";
     }
+
+    if (!editor.value.trim()) editor.value = `SELECT * FROM ${tableName} LIMIT 100`;
+    status.textContent = "";
     if (run) await runQuery();
   }
 
   datasetSelect.addEventListener("change", () => selectDataset(Number(datasetSelect.value)));
   runBtn.addEventListener("click", runQuery);
+
+  // Narrowing/widening the window re-runs the current query over the pruned set
+  // of partitions; "Full range" restores the dataset's whole span.
+  function onWindowChange() {
+    if (lastRows !== null || editor.value.trim()) runQuery();
+  }
+  startInput.addEventListener("change", onWindowChange);
+  endInput.addEventListener("change", onWindowChange);
+  fullRangeBtn.addEventListener("click", () => {
+    const span = datasetSpanMs(datasets[Number(datasetSelect.value)]);
+    if (span) {
+      startInput.value = toLocalInput(span.lo);
+      endInput.value = toLocalInput(span.hi);
+    }
+    onWindowChange();
+  });
+
   editor.addEventListener("keydown", (e) => {
     // Ctrl/Cmd+Enter runs the query.
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
