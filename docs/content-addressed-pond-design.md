@@ -338,6 +338,24 @@ already requires on S3) -- makes that commit atomic. Therefore:
 The passive remote needs only Delta's ordinary read/append; no server-side
 compute, consistent with the single-writer, git-shaped model above.
 
+### 8.4 Large-file blobs stay external (D7)
+
+A file larger than the large-file threshold is stored out-of-row in the
+content-addressed large-file store (`_large_files/blake3=<hash>.parquet`)
+precisely so it is never loaded into a row. Object materialization preserves
+this: a **small** blob's bytes become an inline `objects` row, but a **large**
+blob is *not* inlined. It transfers by hash through the existing external-blob
+path, which already replicates `_large_files/blake3=*` content-addressed.
+
+So materialization yields two sets: inline objects (trees, commits, series
+manifests, symlinks, recipes, and small blobs) written as `objects` rows in
+the atomic push commit, and a set of large-blob hashes transferred externally.
+Both are addressed by the same BLAKE3 hash, so reachability, dedup, and the
+consumer's "fetch only what I lack" walk are identical regardless of where a
+blob's bytes physically live. This keeps the streaming, do-not-collect
+discipline: multi-gigabyte files never materialize into memory or into the
+remote's row table.
+
 ---
 
 ## 9. Special cases to pin
@@ -432,6 +450,13 @@ the node kind:
   objects-before-ref ordering. A backup is reconstructible from the
   single-writer source, so the switch is a clean re-push to a freshly-formatted
   remote (Section 8.1-8.3).
+- **D7 -- Large-file blobs stay external; only small blobs become object
+  rows.** Object materialization does not inline a file above the large-file
+  threshold; it transfers by hash through the existing external-blob path
+  (`_large_files/blake3=*`), while small blobs, trees, commits, series
+  manifests, symlinks, and recipes are inline `objects` rows. Same BLAKE3 hash
+  either way, so reachability/dedup/walk are uniform and large files never load
+  into memory or the remote row table (Section 8.4).
 
 ### Open
 
