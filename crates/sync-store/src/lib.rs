@@ -28,7 +28,9 @@ pub mod content;
 mod error;
 pub mod schema;
 mod store;
+pub mod tlog;
 
 pub use content::{Commit, ObjectHash, Provenance, TreeEntry, series_hash, tree_hash};
 pub use error::{Result, StoreError};
 pub use store::{AddPath, CompactMetrics, Op, RemovePath, Store};
+pub use tlog::{LogHash, TransparencyLog, commit_leaf_hash, verify_consistency, verify_inclusion};
