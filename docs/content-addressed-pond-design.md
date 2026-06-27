@@ -287,6 +287,57 @@ needs no merge engine:
 The sync frontier is a **single commit hash**, not a per-partition checksum
 list and not a `(pond_id, seq)` pair; reachability replaces both.
 
+### 8.1 One system, not two: the remote is a delta-managed object table
+
+This replaces the prior bundle/frontier remote outright. There is no
+coexistence period and no backwards compatibility: `(pond_id, seq)` frontiers,
+per-bundle manifests, and per-partition checksum lists are **deleted**, not
+wrapped. A backup is reconstructible -- the source pond is the single writer
+and holds all content -- so the migration is a clean reset: re-push the full
+object graph to a freshly-formatted remote.
+
+The remote stays **delta-managed**; content-addressing is expressed *inside*
+Delta, not as a hand-rolled object store beside it. The remote is one Delta
+table whose rows are content objects:
+
+```
+( object_hash, object_kind, value, value_blake3, ... )   -- one row per object
+( ref_name, tip_commit_hash )                            -- the pond's tip ref
+```
+
+Object rows are keyed by their content hash, so identical blobs, trees, and
+commits dedup naturally; `value_blake3` already exists in the store schema and
+*is* the object id. The tip ref is a distinguished row.
+
+### 8.2 Atomicity comes from Delta, not from object ordering
+
+A push is **one Delta commit** that writes the new object rows *and* advances
+the tip ref together. Delta's transaction-log commit -- backed by
+`object_store`'s S3 support (the conditional-put / lock the Delta protocol
+already requires on S3) -- makes that commit atomic. Therefore:
+
+- The tip ref can never advance without its reachable object closure, because
+  both land in the same Delta commit. No "objects-before-ref" two-phase write
+  is needed; Delta provides the invariant.
+- No separate compare-and-swap, lock service, or ref-pointer file is
+  introduced. The single storage abstraction (delta-rs over object_store) is
+  the only thing the remote relies on.
+
+### 8.3 Push and pull computation
+
+- **Push (producer):** the single writer knows the tip it last pushed.
+  Everything reachable from that tip is already on the remote, so the new-object
+  set is computed **locally** -- the current commit's reachable inventory minus
+  the last-pushed tip's reachable inventory (the `missing_from` set). It writes
+  those object rows and the new tip in one Delta commit. No remote listing.
+- **Pull (consumer):** read the remote tip ref; if it equals the local tip,
+  done. Otherwise walk the object graph from the remote tip by child hash,
+  fetching only object rows whose hash is absent locally, and pruning subtrees
+  whose `child_hash` already matches. Apply, then set the local tip.
+
+The passive remote needs only Delta's ordinary read/append; no server-side
+compute, consistent with the single-writer, git-shaped model above.
+
 ---
 
 ## 9. Special cases to pin
@@ -371,6 +422,16 @@ the node kind:
   sync, and any one pond across a format change, must share the same encoding
   version, since hashes do not match across versions; a format change is a
   coordinated reset of all participating ponds.
+- **D6 -- One delta-managed remote; no bundle/frontier coexistence.** The
+  content-addressed remote is a single system that replaces bundle/frontier and
+  `(pond_id, seq)` outright -- no backwards compatibility, no dual-path
+  migration window. The remote stays delta-managed: content objects are rows in
+  one Delta table keyed by content hash, and the tip ref advances in the **same
+  atomic Delta commit** that writes the object rows. Atomicity comes from
+  delta-rs over `object_store` S3 support, not a hand-rolled CAS or an
+  objects-before-ref ordering. A backup is reconstructible from the
+  single-writer source, so the switch is a clean re-push to a freshly-formatted
+  remote (Section 8.1-8.3).
 
 ### Open
 
