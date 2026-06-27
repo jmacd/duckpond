@@ -333,7 +333,8 @@ already requires on S3) -- makes that commit atomic. Therefore:
 - **Pull (consumer):** read the remote tip ref; if it equals the local tip,
   done. Otherwise walk the object graph from the remote tip by child hash,
   fetching only object rows whose hash is absent locally, and pruning subtrees
-  whose `child_hash` already matches. Apply, then set the local tip.
+  whose `child_hash` already matches. Apply by **rebuilding** the working pond
+  from the fetched objects (Section 8.5), then set the local tip.
 
 The passive remote needs only Delta's ordinary read/append; no server-side
 compute, consistent with the single-writer, git-shaped model above.
@@ -355,6 +356,103 @@ consumer's "fetch only what I lack" walk are identical regardless of where a
 blob's bytes physically live. This keeps the streaming, do-not-collect
 discipline: multi-gigabyte files never materialize into memory or into the
 remote's row table.
+
+### 8.5 Pull and consumer rebuild (Fork 2)
+
+Push (Section 8.3) is the easy half: the producer already holds every object
+and re-expresses it. The hard half is the **consumer**, which holds a remote
+object graph -- commits, trees, blobs, series manifests, recipes -- and must
+turn it into a *working tlogfs pond*. The object graph deliberately throws away
+everything tlogfs needs at rest: a tree object lists `(name, entry_type,
+child_hash)` but carries **no node_ids, no partitions, no versions, no
+timestamps, no txn_seq**. Rebuild is the inverse of the read-side fold: walk the
+graph top-down and synthesize the `OplogEntry` rows the fold originally read.
+
+#### 8.5.1 The fetch walk
+
+Reading the remote tip ref gives a commit hash. If it equals the local tip, the
+pull is a no-op. Otherwise:
+
+1. Fetch the tip commit object; decode it (`Commit::decode`) to get
+   `root_tree_hash` and `parent_commit_hash`.
+2. Walk the commit chain back along `parent_commit_hash` until reaching a commit
+   the consumer already has (or the genesis commit on first pull).
+3. For the resulting set of commits, walk each `root_tree_hash` by `child_hash`,
+   fetching only objects whose hash is absent locally and **pruning any subtree
+   whose `child_hash` already matches** a tree the consumer holds. This is the
+   `missing_from` walk in reverse: work is proportional to the difference, not
+   the pond size.
+
+The fetch walk is pure content addressing and needs no identity decisions: it
+moves bytes keyed by hash. Identity enters only at materialization.
+
+#### 8.5.2 The identity problem
+
+To write `OplogEntry` rows the consumer must assign each node a `node_id` and a
+`part_id` (its parent directory's node_id). The object graph supplies neither.
+Two stances:
+
+- **Fresh random node_ids.** Mint a new `NodeID` per node on each consumer.
+  Simple, but two consumers of the same graph get different ids, so their ponds
+  differ at the row level and at the fsck Merkle (which keys on node_id) even
+  though they are content-identical. More seriously, a *second* pull into the
+  same consumer cannot match a graph position to the node_id it minted last
+  time, so it cannot update a node in place or preserve its version history --
+  it would re-mint and orphan the old node.
+- **Deterministic node_ids.** Derive `node_id` from the node's stable position
+  or content, so the same node always maps to the same id across consumers and
+  across pulls. The root keeps `ROOT_UUID`. A non-root id is derived (for
+  example, `node_id = H(parent_node_id, name)` with byte[6] overwritten to
+  encode the entry type, matching the existing NodeID layout), or alternatively
+  from the child's content hash. This makes a second pull a natural in-place
+  update: the same path resolves to the same node_id, so a changed `child_hash`
+  becomes a new *version* of an existing node, exactly as a local edit would.
+
+The content tree hash is independent of node_id, so **content comparison and the
+transparency log work under either choice**; the difference is whether rebuilt
+ponds are reproducible and incrementally updatable. Path-derived identity is the
+strong recommendation: it is the only option that makes incremental pull and
+version history work without a separately persisted position-to-node_id map.
+This is **Decision D8 (open)**.
+
+#### 8.5.3 Versions, series, and provenance
+
+- **Single-version files.** One blob object becomes one `FilePhysicalVersion`
+  row: `content` = blob bytes (or external reference for large blobs), `blake3`
+  = the blob hash, `version` = the node's current version on the consumer.
+- **Series.** A series manifest references an ordered list of version blob
+  hashes. Rebuild recreates one row per version. The series object's cumulative
+  `series_hash` is *not* the tlogfs series `blake3` (a bao root); the consumer
+  must recompute the bao outboard from the concatenated version bytes, the same
+  computation a local series append performs. So a faithful series rebuild costs
+  a re-bao over the versions, not just a row copy.
+- **Provenance and txn_seq.** Each commit object carries `Provenance{pond_id,
+  seq, time_micros, author, request}`. The consumer is a mirror of the source,
+  so it adopts the **source pond_id** and stamps each rebuilt row's `txn_seq`
+  from the commit's `seq`, walking commit-by-commit oldest-first. This mirrors
+  today's cross-pond import semantics under the foreign pond_id, and keeps the
+  consumer's view of the source's history faithful rather than re-sequencing it
+  locally. Whether a consumer may also be a *writable fork* (its own pond_id,
+  its own new commits on top of a pulled base) is **Decision D9 (open)**; the
+  first cut is a read-only mirror.
+
+#### 8.5.4 Dynamic nodes and large blobs
+
+A dynamic node's `child_hash` is its recipe hash (Section 9), and its generated
+children are not in the graph. Rebuild writes the recipe back as a dynamic-node
+row (`factory` + config bytes) and stops -- the consumer recomputes downstream
+on read, exactly as the producer would. Large blobs are referenced by hash and
+fetched through the external `_large_files` path (Section 8.4); the rebuilt row
+is a large-file row whose `blake3` names the external object.
+
+#### 8.5.5 What rebuild establishes
+
+After a pull the consumer holds: the fetched object closure (verifiable by
+re-hashing each object against its key), a set of `OplogEntry` rows whose live
+tree folds back to the remote `root_tree_hash` (the rebuild is correct iff the
+read-side fold of the rebuilt pond equals the tip's `root_tree_hash`), and a
+local tip ref equal to the remote tip. That fold-equals-tip check is the
+rebuild's acceptance test and the natural first integration test.
 
 ---
 
@@ -463,6 +561,18 @@ the node kind:
 - **D5 -- Checkpoint cadence and the SHA-256 publish format.** When the log
   materializes tiles and emits checkpoints; deferred together with signing
   (Section 10).
+- **D8 -- Consumer node identity on rebuild.** How a pulled object graph is
+  assigned `node_id`s (Section 8.5.2). Recommendation: deterministic
+  path-derived ids (`H(parent_node_id, name)` with the entry-type nibble in
+  byte[6]), because it is the only choice that makes a second pull an in-place
+  update with preserved version history and makes rebuilt ponds reproducible
+  across consumers. The alternative -- fresh random ids -- is simpler but
+  breaks incremental pull. Content comparison and the transparency log are
+  unaffected either way.
+- **D9 -- Mirror vs writable fork.** Whether a consumer is only a read-only
+  mirror of the source (adopts the source pond_id, replays its commits) or may
+  also be a writable fork that lands its own commits on a pulled base
+  (Section 8.5.3). First cut: read-only mirror.
 
 ---
 
