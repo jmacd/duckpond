@@ -242,7 +242,22 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   downloadBtn.textContent = "Download CSV";
   downloadBtn.disabled = true;
 
+  // "Explore this data" cross-link — only when sitegen emitted an explorer URL
+  // (data-explore-url) on the chart container. Hands the current view's
+  // overlapping files + time window to the explorer so the user can query
+  // exactly what the chart shows, then edit the SQL freely.
+  const exploreUrl = container.dataset.exploreUrl || "";
+  let exploreBtn = null;
+  if (exploreUrl) {
+    exploreBtn = document.createElement("button");
+    exploreBtn.type = "button";
+    exploreBtn.className = "explore-data";
+    exploreBtn.textContent = "Explore this data";
+    exploreBtn.disabled = true;
+  }
+
   windowBar.append(winLabel, startInput, arrow, endInput, copyBtn, downloadBtn);
+  if (exploreBtn) windowBar.append(exploreBtn);
   toolbar.after(windowBar);
 
   function pad2(n) { return String(n).padStart(2, "0"); }
@@ -325,6 +340,33 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
+
+  if (exploreBtn) {
+    exploreBtn.addEventListener("click", () => {
+      if (curBegin == null || curEnd == null) return;
+      const begin = Math.round(curBegin);
+      const end = Math.round(curEnd);
+      // The exact files backing the current view, as absolute URLs so the
+      // explorer (served from a different path) can fetch them unchanged.
+      const urls = overlappingEntries(begin, end)
+        .map(e => new URL(e.url, location.href).href)
+        .filter(Boolean);
+      if (urls.length === 0) return;
+      // The explorer registers the handed files as a view named `chart_data`;
+      // this query reproduces the chart's window byte-for-byte, then the user
+      // can edit it freely.
+      const sql =
+        `SELECT * FROM chart_data ` +
+        `WHERE epoch_ms(timestamp) BETWEEN ${begin} AND ${end} ` +
+        `ORDER BY timestamp`;
+      const label = (document.title || "Chart data").trim() || "Chart data";
+      const params = new URLSearchParams();
+      params.set("label", label);
+      params.set("files", urls.join(","));
+      params.set("sql", sql);
+      location.assign(`${exploreUrl}#${params.toString()}`);
+    });
+  }
 
   // If the page opened with a shared (custom) range, reflect that state:
   // no duration button is active and Reset is available.
@@ -496,17 +538,24 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   // For monitoring: the time axis always extends to now.
   const nowMs = Date.now();
 
+  // Resolve the files overlapping a window at the auto-picked resolution.
+  // Shared by queryData (which fetches them) and the "Explore this data"
+  // cross-link (which hands their URLs to the explorer) so both see exactly
+  // the same file set for a given window.
+  function overlappingEntries(beginMs, endMs) {
+    const res = pickResolution(beginMs, endMs);
+    const entries = byResolution.get(res) || [];
+    return entries.filter(f =>
+      f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
+    );
+  }
+
   // Query data for a time window [beginMs, endMs].
   // Resolution is chosen automatically based on window width.
   // Only the parquet files that overlap the window are fetched (lazy).
   async function queryData(beginMs, endMs) {
-    const res = pickResolution(beginMs, endMs);
-    const entries = byResolution.get(res) || [];
-
     // Filter to files whose time range overlaps the query window.
-    const overlapping = entries.filter(f =>
-      f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
-    );
+    const overlapping = overlappingEntries(beginMs, endMs);
 
     // Lazily fetch only the overlapping files (parallel).
     const loaded = await Promise.all(overlapping.map(f => ensureFile(f.url)));
@@ -816,6 +865,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
     // Keep the raw rows for CSV export; disable the button when empty.
     lastData = data;
     downloadBtn.disabled = data.length === 0;
+    if (exploreBtn) exploreBtn.disabled = data.length === 0;
 
     container.innerHTML = "";
 

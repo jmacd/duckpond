@@ -277,6 +277,12 @@ pub struct ShortcodeContext {
     /// picker); when empty the shortcode falls back to a single dataset built
     /// from the page's `datafiles`.
     pub explore_datasets: Vec<ResolvedExploreDataset>,
+
+    /// Site-relative URL of the explorer page (already `base_url`-prefixed),
+    /// from `SiteConfig.explore.url`. When `Some`, the `chart` shortcode emits
+    /// it as `data-explore-url` so chart.js can offer an "Explore this data"
+    /// cross-link that hands the current files + window to the explorer.
+    pub explore_url: Option<String>,
 }
 
 /// A data-explorer dataset resolved from `SiteConfig.explore` against an
@@ -327,6 +333,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                 &c.metric_registry,
                 &c.metric_captions,
                 c.default_range.as_deref(),
+                c.explore_url.as_deref(),
             )
         });
     }
@@ -521,6 +528,7 @@ fn render_chart(
     registry: &BTreeMap<String, String>,
     captions: &BTreeMap<String, String>,
     default_range: Option<&str>,
+    explore_url: Option<&str>,
 ) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
@@ -569,13 +577,20 @@ fn render_chart(
         _ => String::new(),
     };
 
+    let explore_url_attr = match explore_url {
+        Some(u) if !u.is_empty() => {
+            format!(" data-explore-url=\"{}\"", html_escape(u))
+        }
+        _ => String::new(),
+    };
+
     format!(
-        "<div class=\"chart-container\" id=\"chart\"{}>\
+        "<div class=\"chart-container\" id=\"chart\"{}{}>\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
          {}\
          {}\
          </div>",
-        default_range_attr, json, registry_block, captions_block
+        default_range_attr, explore_url_attr, json, registry_block, captions_block
     )
 }
 
@@ -1462,6 +1477,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1473,7 +1489,7 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None);
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None, None);
         assert!(html.contains("No data files"));
     }
 
@@ -1555,7 +1571,7 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None);
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None, None);
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
         // Empty registry -> no chart-registry script element.
@@ -1574,8 +1590,30 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"));
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"), None);
         assert!(html.contains("data-default-range=\"1M\""));
+        // No explore url configured -> no cross-link attribute.
+        assert!(!html.contains("data-explore-url"));
+    }
+
+    #[test]
+    fn test_render_chart_with_explore_url() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_chart(
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            Some("/explore/"),
+        );
+        assert!(html.contains("data-explore-url=\"/explore/\""));
     }
 
     #[test]
@@ -1592,7 +1630,7 @@ mod tests {
             ("committed.txn_ids".to_string(), "counter".to_string()),
             ("size.bytes".to_string(), "updowncounter".to_string()),
         ]);
-        let html = render_chart(&files, &registry, &BTreeMap::new(), None);
+        let html = render_chart(&files, &registry, &BTreeMap::new(), None, None);
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
@@ -1632,6 +1670,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1706,6 +1745,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1796,6 +1836,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1941,6 +1982,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -2004,6 +2046,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -2085,6 +2128,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -2159,6 +2203,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -2254,6 +2299,7 @@ mod tests {
             default_range: None,
             labels: BTreeMap::new(),
             explore_datasets: vec![],
+            explore_url: None,
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");

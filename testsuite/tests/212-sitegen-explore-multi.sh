@@ -139,8 +139,22 @@ layout: explore
 {{ explore /}}
 MD
 
+# A chart page bound to an export stage; with `explore.url` set it should emit
+# the "Explore this data" cross-link (data-explore-url) for chart.js to use.
+cat > /tmp/chart.md << 'MD'
+---
+title: "Chart Page"
+layout: data
+---
+
+# Chart Page
+
+{{ chart /}}
+MD
+
 pond copy host:///tmp/index.md   /site/index.md
 pond copy host:///tmp/explore.md /site/explore.md
+pond copy host:///tmp/chart.md   /site/chart.md
 echo "✓ Pages loaded"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -168,6 +182,7 @@ exports:
     target_points: 1500
 
 explore:
+  url: "/explore/"
   datasets:
     - export: "reduced_params"
       table: "reduced"
@@ -188,6 +203,11 @@ routes:
     type: static
     slug: "explore"
     page: "/site/explore.md"
+  - name: "chart"
+    type: static
+    slug: "chart"
+    page: "/site/chart.md"
+    export: "reduced_params"
 
 YAML
 
@@ -257,6 +277,15 @@ check_contains "${OUTDIR}/explore.js" "vega lazy import" 'vega-bundle.mjs'
 check_contains "${OUTDIR}/explore.js" "vega-lite spec" 'vega-lite/v5'
 check '[ -f "${OUTDIR}/vendor/vega-bundle.mjs" ]' "vega bundle vendored"
 check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
+
+# Stage 2 cross-link: chart pages emit an "Explore this data" link when
+# `explore.url` is configured, and the explorer accepts the handed-over files.
+CHART_HTML="${OUTDIR}/chart/index.html"
+check '[ -f "${CHART_HTML}" ]'                "chart/index.html"
+check_contains "${CHART_HTML}" "chart cross-link url" 'data-explore-url="/explore/"'
+check_contains "${OUTDIR}/chart.js" "chart explore button" 'Explore this data'
+check_contains "${OUTDIR}/chart.js" "chart reads explore url" 'exploreUrl'
+check_contains "${OUTDIR}/explore.js" "explorer accepts handed-over files" 'chart_data'
 
 echo ""
 echo "=== Data explorer Stage 1 (multi-dataset) verified ==="

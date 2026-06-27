@@ -335,6 +335,12 @@ fn default_timestamp_column() -> String {
 pub struct ExploreConfig {
     /// Datasets exposed in the explorer, in display order.
     pub datasets: Vec<ExploreDataset>,
+    /// URL of the explorer page, joined relative to `base_url` (e.g.
+    /// `explore/`; a leading slash is tolerated). When set, chart pages render
+    /// an "Explore this data" button that opens this page pre-loaded with the
+    /// chart's current files and time window. Absent means no cross-link.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// One explorer dataset: an export stage surfaced as a named DuckDB view.

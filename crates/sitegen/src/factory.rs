@@ -1592,6 +1592,21 @@ fn generate_site(
     // pages (the explore shortcode picks them up via ShortcodeContext).
     let explore_datasets = resolve_explore_datasets(config, exports);
 
+    // Site-relative explorer page URL (base_url-prefixed) for the chart
+    // cross-link. Emitted on chart pages as `data-explore-url`.
+    let explore_url: Option<String> = config
+        .explore
+        .as_ref()
+        .and_then(|e| e.url.as_deref())
+        .filter(|u| !u.is_empty())
+        .map(|u| {
+            // Follow the asset-path convention: base_url ends with "/" and the
+            // configured value is joined relative to it. Tolerate a leading
+            // slash on the config value so "/explore/" and "explore/" both work.
+            let rel = u.strip_prefix('/').unwrap_or(u);
+            format!("{}{}", config.site.base_url, rel)
+        });
+
     // Build content_pages map for content_nav shortcode.
     // Includes both explicit content pages and synthetic entries from
     // template routes so that export-based pages are navigable.
@@ -1690,6 +1705,7 @@ fn generate_site(
             default_range: config.site.default_range.clone(),
             labels: config.labels.clone(),
             explore_datasets: explore_datasets.clone(),
+            explore_url: explore_url.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1914,6 +1930,7 @@ fn render_partial(
                 default_range: config.site.default_range.clone(),
                 labels: config.labels.clone(),
                 explore_datasets: vec![],
+                explore_url: None,
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);

@@ -532,7 +532,8 @@ tr:hover td {
   color: #ffffff;
 }
 
-.download-csv {
+.download-csv,
+.explore-data {
   padding: 0.4rem 0.9rem;
   border: 1px solid var(--accent-light);
   background: transparent;
@@ -544,13 +545,15 @@ tr:hover td {
   transition: all 0.15s;
 }
 
-.download-csv:hover:not(:disabled) {
+.download-csv:hover:not(:disabled),
+.explore-data:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
 }
 
-.download-csv:disabled {
+.download-csv:disabled,
+.explore-data:disabled {
   opacity: 0.3;
   cursor: default;
   border-color: var(--border);

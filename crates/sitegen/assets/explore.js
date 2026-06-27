@@ -39,6 +39,29 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     return;
   }
 
+  // ── Ad-hoc dataset handed over by a chart "Explore this data" link ───────────
+  // chart.js navigates here with `#label=...&files=<url1,url2,...>&sql=...`. We
+  // register those exact parquet files as a `chart_data` view and prepend it to
+  // the picker so the visitor lands on the chart's data + window, then can edit
+  // the SQL or switch to a configured dataset.
+  let adhocSql = null;
+  {
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const filesParam = params.get("files");
+    if (filesParam) {
+      const urls = filesParam.split(",").map((u) => u.trim()).filter(Boolean);
+      if (urls.length > 0) {
+        datasets.unshift({
+          table: "chart_data",
+          label: params.get("label") || "Chart data",
+          files: urls.map((u) => ({ url: u })),
+          columns: [],
+        });
+        adhocSql = params.get("sql") || "";
+      }
+    }
+  }
+
   // Default row cap applied when a query has no explicit LIMIT, to protect the
   // tab from accidentally materializing a multi-million-row result.
   const DEFAULT_LIMIT = 1000;
@@ -618,10 +641,20 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   // ── Shareable URL state (#dataset=<table>&sql=<encoded>) ─────────────────────
 
   function writeHash() {
-    const table = datasets[Number(datasetSelect.value)];
+    const i = Number(datasetSelect.value);
+    const d = datasets[i];
     const params = new URLSearchParams();
-    params.set("dataset", datasetTable(table, Number(datasetSelect.value)));
+    params.set("dataset", datasetTable(d, i));
     params.set("sql", editor.value);
+    // For the ad-hoc chart dataset, also keep its file list so the link
+    // survives a reload or share (the view is registered from these URLs).
+    if (adhocSql !== null && i === 0) {
+      const urls = (d.files || []).map((f) => f.url).filter(Boolean);
+      if (urls.length > 0) {
+        params.set("label", d.label || "Chart data");
+        params.set("files", urls.join(","));
+      }
+    }
     history.replaceState(null, "", `#${params.toString()}`);
   }
 
@@ -667,14 +700,20 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     }
   });
 
-  // Initial state: honor a shareable hash, else select the first dataset.
-  const hash = readHash();
-  if (hash && hash.dataset) {
-    const idx = datasets.findIndex((d, i) => datasetTable(d, i) === hash.dataset);
-    const i = idx >= 0 ? idx : 0;
-    if (hash.sql) editor.value = hash.sql;
-    await selectDataset(i, { run: Boolean(hash.sql) });
+  // Initial state: an ad-hoc chart dataset (index 0) wins; else honor a
+  // shareable hash; else select the first dataset.
+  if (adhocSql !== null) {
+    if (adhocSql) editor.value = adhocSql;
+    await selectDataset(0, { run: Boolean(adhocSql) });
   } else {
-    await selectDataset(0);
+    const hash = readHash();
+    if (hash && hash.dataset) {
+      const idx = datasets.findIndex((d, i) => datasetTable(d, i) === hash.dataset);
+      const i = idx >= 0 ? idx : 0;
+      if (hash.sql) editor.value = hash.sql;
+      await selectDataset(i, { run: Boolean(hash.sql) });
+    } else {
+      await selectDataset(0);
+    }
   }
 })();
