@@ -1522,6 +1522,48 @@ h3:hover .anchor {
   min-height: 360px;
 }
 
+/* Editable Vega-Lite spec panel, shown beneath the chart in chart view. */
+.explore-spec {
+  margin-top: 0.75rem;
+}
+
+.explore-spec-label {
+  font-size: 0.8rem;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+
+.explore-spec-editor {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  resize: vertical;
+}
+
+.explore-spec-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.explore-spec-apply,
+.explore-spec-reset {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
 table.explore-grid {
   border-collapse: collapse;
   font-size: 0.82rem;

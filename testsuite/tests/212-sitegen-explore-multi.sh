@@ -273,8 +273,14 @@ check_contains "${OUTDIR}/explore.js" "json serializer import" 'rowsToJson'
 check_contains "${OUTDIR}/explore.js" "parquet download button" 'Download Parquet'
 check_contains "${OUTDIR}/explore.js" "parquet copy writer" 'FORMAT PARQUET'
 check_contains "${OUTDIR}/explore.js" "vega chart view" 'renderChart'
-check_contains "${OUTDIR}/explore.js" "vega lazy import" 'vega-bundle.mjs'
-check_contains "${OUTDIR}/explore.js" "vega-lite spec" 'vega-lite/v5'
+check '[ -f "${OUTDIR}/vega-shared.js" ]' "vega-shared.js asset shipped"
+check_contains "${OUTDIR}/explore.js" "explorer imports shared vega module" './vega-shared.js'
+check_contains "${OUTDIR}/vega-shared.js" "vega lazy import" 'vega-bundle.mjs'
+check_contains "${OUTDIR}/vega-shared.js" "vega-lite spec" 'vega-lite/v5'
+check_contains "${OUTDIR}/vega-shared.js" "shared spec builder" 'export function buildLineSpec'
+check_contains "${OUTDIR}/explore.js" "editable spec panel" 'explore-spec-editor'
+check_contains "${OUTDIR}/explore.js" "spec apply control" 'Apply spec'
+check_contains "${OUTDIR}/explore.js" "spec reset control" 'Reset to auto'
 check '[ -f "${OUTDIR}/vendor/vega-bundle.mjs" ]' "vega bundle vendored"
 check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
 

@@ -14,6 +14,7 @@
 // with chart.js via duckdb-shared.js so the two assets do not diverge.
 
 import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-shared.js";
+import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -204,6 +205,37 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   chartContainer.className = "explore-chart";
   chartContainer.hidden = true;
 
+  // Editable Vega-Lite spec, shown beneath the chart in chart view. The textarea
+  // holds the data-less spec; the current query result is injected as the data
+  // at render time. "Apply spec" re-renders the edited spec; "Reset to auto"
+  // regenerates the spec inferred from the result columns.
+  const specPanel = document.createElement("div");
+  specPanel.className = "explore-spec";
+  specPanel.hidden = true;
+  const specLabel = document.createElement("div");
+  specLabel.className = "explore-spec-label";
+  specLabel.textContent = "Vega-Lite spec";
+  const specEditor = document.createElement("textarea");
+  specEditor.className = "explore-spec-editor";
+  specEditor.spellcheck = false;
+  specEditor.rows = 10;
+  specEditor.setAttribute("aria-label", "Vega-Lite spec");
+  const specButtons = document.createElement("div");
+  specButtons.className = "explore-spec-buttons";
+  const specApplyBtn = document.createElement("button");
+  specApplyBtn.type = "button";
+  specApplyBtn.textContent = "Apply spec";
+  specApplyBtn.className = "explore-spec-apply";
+  const specResetBtn = document.createElement("button");
+  specResetBtn.type = "button";
+  specResetBtn.textContent = "Reset to auto";
+  specResetBtn.className = "explore-spec-reset";
+  const specError = document.createElement("div");
+  specError.className = "explore-error";
+  specError.hidden = true;
+  specButtons.append(specApplyBtn, specResetBtn);
+  specPanel.append(specLabel, specEditor, specButtons, specError);
+
   // Pager: prev/next + "rows X–Y of N" for the materialized result set.
   const pager = document.createElement("div");
   pager.className = "explore-pager";
@@ -220,7 +252,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   pageInfo.className = "explore-page-info";
   pager.append(prevBtn, pageInfo, nextBtn);
 
-  container.append(controls, windowBar, columnBar, exampleBar, editor, buttonBar, viewBar, results, chartContainer, pager);
+  container.append(controls, windowBar, columnBar, exampleBar, editor, buttonBar, viewBar, results, chartContainer, specPanel, pager);
 
   // ── Dataset registration ────────────────────────────────────────────────────
 
@@ -235,8 +267,10 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   let lastSql = null;
   // Current result view: "table" or "chart".
   let viewMode = "table";
-  // Lazily-imported vega-embed function (loaded on first chart render).
-  let vegaEmbedFn = null;
+  // Whether the user has hand-edited the Vega-Lite spec. While true, the editor
+  // contents are used verbatim; while false, the spec is auto-inferred from the
+  // result columns on each render.
+  let specEdited = false;
 
   function datasetTable(d, i) {
     // Prefer the manifest-provided table name; fall back to a safe identifier.
@@ -575,9 +609,11 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
       results.hidden = true;
       pager.hidden = true;
       chartContainer.hidden = false;
+      specPanel.hidden = false;
       renderChart();
     } else {
       chartContainer.hidden = true;
+      specPanel.hidden = true;
       results.hidden = false;
       renderPage();
     }
@@ -640,102 +676,93 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     });
   }
 
-  // Lazily import the vendored vega-embed bundle (only when first needed).
-  async function ensureVega() {
-    if (vegaEmbedFn) return vegaEmbedFn;
-    const mod = await import(/* @vite-ignore */ new URL("./vendor/vega-bundle.mjs", import.meta.url).href);
-    vegaEmbedFn = mod.vegaEmbed;
-    return vegaEmbedFn;
+  // Compute the inline / full-screen chart height.
+  function chartHeight() {
+    const fullscreen = document.body.classList.contains("explore-fullscreen");
+    return fullscreen ? Math.max(340, window.innerHeight - 320) : 340;
   }
 
-  // Detect whether a column is numeric / temporal by sampling its first
-  // non-null value across the materialized rows.
-  function detectKind(field) {
-    for (const r of lastRows) {
-      const v = r[field];
-      if (v == null) continue;
-      if (v instanceof Date) return "temporal";
-      if (typeof v === "number" || typeof v === "bigint") return "quantitative";
-      return "nominal";
-    }
-    return "nominal";
-  }
-
-  // Choose an x column (first temporal, else first column) and the numeric y
-  // columns (all quantitative columns except x).
-  function inferChartEncoding() {
-    const kinds = {};
-    for (const f of lastFields) kinds[f] = detectKind(f);
-    let xCol = lastFields.find((f) => kinds[f] === "temporal");
-    if (!xCol) xCol = lastFields[0];
-    const yCols = lastFields.filter((f) => f !== xCol && kinds[f] === "quantitative");
-    return { xCol, xKind: kinds[xCol], yCols };
-  }
-
-  // Coerce rows to Vega-friendly plain objects: BigInt -> Number, keep Date.
-  function sanitizeChartRows(cols) {
-    return lastRows.map((r) => {
-      const o = {};
-      for (const c of cols) {
-        const v = r[c];
-        o[c] = typeof v === "bigint" ? Number(v) : v;
-      }
-      return o;
-    });
-  }
-
+  // Render the current query result as a Vega-Lite chart. When the spec has not
+  // been hand-edited, it is auto-inferred from the result columns and the editor
+  // is refreshed to show it; otherwise the editor contents are parsed and used
+  // verbatim. In both cases the current result rows are injected as the spec's
+  // data so the visualization always reflects the latest query.
   async function renderChart() {
     if (!lastRows || !lastFields || !lastRows.length) {
-      chartContainer.innerHTML = '<div class="empty-state">Run a query to chart its result.</div>';
-      return;
-    }
-    const { xCol, xKind, yCols } = inferChartEncoding();
-    if (!yCols.length) {
       chartContainer.innerHTML =
-        '<div class="empty-state">No numeric column to plot. The chart view needs at least one numeric column.</div>';
+        '<div class="empty-state">Run a query to chart its result.</div>';
       return;
     }
+
+    let spec;
+    if (specEdited) {
+      try {
+        spec = JSON.parse(specEditor.value);
+      } catch (e) {
+        showSpecError(`Spec is not valid JSON: ${e.message || e}`);
+        chartContainer.innerHTML =
+          '<div class="empty-state">Fix the spec to render the chart.</div>';
+        return;
+      }
+    } else {
+      const built = buildLineSpec(lastFields, lastRows, { height: chartHeight() });
+      if (built.error) {
+        chartContainer.innerHTML = `<div class="empty-state">${escapeHtml(built.error)}</div>`;
+        specEditor.value = "";
+        return;
+      }
+      spec = built.spec;
+      // Reflect the auto spec in the editor (data-less, so it stays readable),
+      // unless the user is actively editing it.
+      if (document.activeElement !== specEditor) {
+        specEditor.value = JSON.stringify(spec, null, 2);
+      }
+    }
+    clearSpecError();
+
     chartContainer.innerHTML = '<div class="empty-state">Rendering chart…</div>';
     let embed;
     try {
-      embed = await ensureVega();
+      embed = await loadVega();
     } catch (e) {
       chartContainer.innerHTML = `<div class="explore-error">Vega failed to load: ${escapeHtml(String(e.message || e))}</div>`;
       return;
     }
 
-    const cols = [xCol, ...yCols];
-    const values = sanitizeChartRows(cols);
-    const multi = yCols.length > 1;
-    // In full screen, grow the chart to roughly fill the viewport height;
-    // otherwise keep the compact inline height.
-    const fullscreen = document.body.classList.contains("explore-fullscreen");
-    const chartHeight = fullscreen ? Math.max(340, window.innerHeight - 320) : 340;
-    const spec = {
-      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    // Inject the current result and force a responsive width. The data is kept
+    // out of the editor, so it is supplied here for both the auto and edited
+    // spec paths.
+    const renderSpec = {
+      ...spec,
       width: "container",
-      height: chartHeight,
-      data: { values },
-      transform: multi ? [{ fold: yCols, as: ["series", "value"] }] : [],
-      mark: { type: "line", clip: true, tooltip: true },
-      encoding: {
-        x: { field: xCol, type: xKind === "temporal" ? "temporal" : "quantitative", title: xCol },
-        y: multi
-          ? { field: "value", type: "quantitative" }
-          : { field: yCols[0], type: "quantitative", title: yCols[0] },
-        ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
-      },
-      // Interval selection bound to scales gives pan + zoom (brush-zoom parity
-      // with the Observable Plot chart path -- a key spike comparison point).
-      params: [{ name: "grid", select: "interval", bind: "scales" }],
+      data: { values: sanitizeRows(lastFields, lastRows) },
     };
 
     try {
-      await embed(chartContainer, spec, { actions: false, renderer: "canvas" });
+      await embed(chartContainer, renderSpec, { actions: false, renderer: "canvas" });
     } catch (e) {
       chartContainer.innerHTML = `<div class="explore-error">Chart render failed: ${escapeHtml(String(e.message || e))}</div>`;
     }
   }
+
+  function showSpecError(msg) {
+    specError.textContent = msg;
+    specError.hidden = false;
+  }
+  function clearSpecError() {
+    specError.hidden = true;
+    specError.textContent = "";
+  }
+
+  specApplyBtn.addEventListener("click", () => {
+    specEdited = true;
+    renderChart();
+  });
+  specResetBtn.addEventListener("click", () => {
+    specEdited = false;
+    clearSpecError();
+    renderChart();
+  });
 
   prevBtn.addEventListener("click", () => {
     pageIndex -= 1;
