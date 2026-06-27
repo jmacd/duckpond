@@ -1318,7 +1318,8 @@ h3:hover .anchor {
 
 .explore-run,
 .explore-download,
-.explore-download-json {
+.explore-download-json,
+.explore-download-parquet {
   padding: 0.35rem 0.8rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1329,7 +1330,8 @@ h3:hover .anchor {
 
 .explore-run:disabled,
 .explore-download:disabled,
-.explore-download-json:disabled {
+.explore-download-json:disabled,
+.explore-download-parquet:disabled {
   opacity: 0.5;
   cursor: default;
 }

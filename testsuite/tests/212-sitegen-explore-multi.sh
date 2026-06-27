@@ -250,6 +250,8 @@ check_contains "${OUTDIR}/explore.js" "canned example queries" 'renderExamples'
 check_contains "${OUTDIR}/explore.js" "result paging" 'renderPage'
 check_contains "${OUTDIR}/explore.js" "json download button" 'Download JSON'
 check_contains "${OUTDIR}/explore.js" "json serializer import" 'rowsToJson'
+check_contains "${OUTDIR}/explore.js" "parquet download button" 'Download Parquet'
+check_contains "${OUTDIR}/explore.js" "parquet copy writer" 'FORMAT PARQUET'
 check_contains "${OUTDIR}/duckdb-shared.js" "shared json helper" 'export function rowsToJson'
 
 echo ""

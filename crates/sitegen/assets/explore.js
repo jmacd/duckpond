@@ -119,10 +119,16 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   downloadJsonBtn.className = "explore-download-json";
   downloadJsonBtn.disabled = true;
 
+  const downloadParquetBtn = document.createElement("button");
+  downloadParquetBtn.type = "button";
+  downloadParquetBtn.textContent = "Download Parquet";
+  downloadParquetBtn.className = "explore-download-parquet";
+  downloadParquetBtn.disabled = true;
+
   const status = document.createElement("span");
   status.className = "explore-status";
 
-  buttonBar.append(runBtn, downloadBtn, downloadJsonBtn, status);
+  buttonBar.append(runBtn, downloadBtn, downloadJsonBtn, downloadParquetBtn, status);
 
   const results = document.createElement("div");
   results.className = "explore-results";
@@ -152,6 +158,9 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   let lastRows = null;
   let lastFields = null;
   let pageIndex = 0;
+  // Wrapped SQL of the last successful run, replayed by the Parquet export so
+  // the downloaded file matches the displayed result set.
+  let lastSql = null;
 
   function datasetTable(d, i) {
     // Prefer the manifest-provided table name; fall back to a safe identifier.
@@ -350,6 +359,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     runBtn.disabled = true;
     downloadBtn.disabled = true;
     downloadJsonBtn.disabled = true;
+    downloadParquetBtn.disabled = true;
     status.textContent = "Running…";
     results.innerHTML = "";
 
@@ -358,17 +368,20 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
       const result = await conn.query(sql);
       lastFields = result.schema.fields.map((f) => f.name);
       lastRows = result.toArray();
+      lastSql = sql;
       pageIndex = 0;
       renderPage();
       status.textContent = `${lastRows.length} row${lastRows.length === 1 ? "" : "s"}`;
       downloadBtn.disabled = lastRows.length === 0;
       downloadJsonBtn.disabled = lastRows.length === 0;
+      downloadParquetBtn.disabled = lastRows.length === 0;
       writeHash();
     } catch (e) {
       results.innerHTML = `<div class="explore-error">${escapeHtml(String(e.message || e))}</div>`;
       status.textContent = "Error";
       lastRows = null;
       lastFields = null;
+      lastSql = null;
       pager.hidden = true;
     } finally {
       running = false;
@@ -391,7 +404,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     );
   }
 
-  // ── Downloads (CSV / JSON) ───────────────────────────────────────────────────
+  // ── Downloads (CSV / JSON / Parquet) ─────────────────────────────────────────
 
   function triggerDownload(content, mime, ext) {
     const blob = new Blob([content], { type: mime });
@@ -413,6 +426,38 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
   downloadJsonBtn.addEventListener("click", () => {
     if (!lastRows || !lastRows.length) return;
     triggerDownload(rowsToJson(lastRows), "application/json;charset=utf-8", "json");
+  });
+
+  // Parquet export replays the last successful query through DuckDB's native
+  // COPY ... TO writer into a virtual file, then hands the bytes back to the
+  // browser. This preserves true column types (unlike the CSV/JSON text paths)
+  // and reuses the exact wrapped SQL so the file matches the displayed rows.
+  let exportingParquet = false;
+  downloadParquetBtn.addEventListener("click", async () => {
+    if (exportingParquet || !lastSql) return;
+    exportingParquet = true;
+    downloadParquetBtn.disabled = true;
+    const prevStatus = status.textContent;
+    status.textContent = "Exporting Parquet…";
+    const vname = `explore_export_${Date.now()}.parquet`;
+    try {
+      await conn.query(
+        `COPY (${lastSql}) TO '${vname}' (FORMAT PARQUET)`
+      );
+      const buf = await db.copyFileToBuffer(vname);
+      triggerDownload(buf, "application/vnd.apache.parquet", "parquet");
+      status.textContent = prevStatus;
+    } catch (e) {
+      status.textContent = `Parquet export failed: ${e.message || e}`;
+    } finally {
+      try {
+        await db.dropFile(vname);
+      } catch (e) {
+        // Best-effort cleanup; a leftover virtual file is harmless.
+      }
+      exportingParquet = false;
+      downloadParquetBtn.disabled = !lastRows || !lastRows.length;
+    }
   });
 
   // ── Shareable URL state (#dataset=<table>&sql=<encoded>) ─────────────────────
