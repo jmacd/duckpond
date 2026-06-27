@@ -144,10 +144,10 @@ The explorer is a natural generalization of work already shipped on chart pages:
 - **Full-screen view** — the explorer benefits from the same overlay treatment
   for a roomy editor + results pane.
 
-A nice closing of the loop (Stage 2): a "view as chart" affordance that hands a
-query's time/value columns to the existing chart renderer, and conversely an
+A nice closing of the loop (Stage 3 S3.4): a "view as chart" affordance that
+hands a query's time/value columns to the Vega-Lite renderer, and conversely an
 "explore this data" link from a chart that opens the explorer pre-pointed at the
-chart's dataset and window.
+chart's dataset and window (the cross-link shipped in Stage 2).
 
 ## Staging
 
@@ -165,6 +165,48 @@ chart's dataset and window.
 - **Stage 2 — ergonomics.** Schema/column browser, canned example queries,
   result paging and row counts, parquet/JSON export, and the chart ↔ explorer
   cross-links above.
+- **Stage 3 — Vega-Lite visualization.** Migrate the chart-rendering path from
+  Observable Plot to Vega-Lite, factor a single rendering module shared by chart
+  pages and the explorer, expose an editable Vega-Lite spec in the explorer, and
+  round-trip query + spec through the shareable URL and the chart ↔ explorer
+  cross-links.
+
+## Implementation status
+
+Tracked on branch `jmacd/66`. End-to-end coverage is the Docker testsuite
+`testsuite/tests/212-sitegen-explore-multi.sh` (asset-ships level: it asserts the
+emitted assets contain expected substrings; it does not headlessly exercise
+in-browser runtime behavior such as Vega rendering, lazy fetch, or full-screen
+resize). Client assets live in `crates/sitegen/assets/` and embed into the binary
+via `include_str!` in `crates/sitegen/src/factory.rs::write_shared_assets`.
+
+Done:
+
+- **Stage 0 / Stage 1 / Stage 2** — complete. Dataset picker over multiple
+  selectable datasets; deferred + window-pruned per-partition registration with a
+  window control; column-chip browser; canned examples; result paging + row
+  counts; CSV / JSON / Parquet export; Table/Chart view switcher; full-screen
+  toggle; chart → explorer "Explore this data" cross-link (ad-hoc `chart_data`
+  dataset); shareable `#dataset=&sql=` (+ `&files=&label=`) URL.
+- **Stage 3 S3.1** — Vega-Lite chart-view spike in the explorer.
+- **Stage 3 S3.2** — `assets/vega-shared.js` shared module (`loadVega`,
+  `detectKind`, `inferEncoding`, `buildLineSpec` returning a data-less spec,
+  `sanitizeRows`); explore.js imports it; the Chart view has an editable
+  Vega-Lite spec textarea with "Apply spec" / "Reset to auto" (data is injected
+  from the live query at render time).
+
+Remaining:
+
+- **Stage 3 S3.3** — port `chart.js` + `overlay.js` line/area/dot marks to
+  Vega-Lite specs (via `vega-shared.js`), preserving the auto-resolution +
+  lazy-fetch data layer. Largest migration; in-browser Vega behavior is still
+  untested headlessly, so a manual browser check or a headless render test is
+  advisable before committing to the full chart.js migration.
+- **Stage 3 S3.4** — "view as chart" emits a Vega-Lite spec from the query
+  columns; "explore this data" round-trips back to SQL + spec; extend the
+  shareable URL to `&spec=` (deferred here from S3.2).
+- **Optional embedded SQL editor** (syntax highlight / completion) — explicitly
+  deferred; the plain `<textarea>` stands.
 
 ## Open questions
 
