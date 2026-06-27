@@ -54,11 +54,43 @@ pub struct ContentTreeReport {
     pub nodes_hashed: usize,
 }
 
+/// One child entry of a directory, captured during the fold so that a later
+/// comparison can descend by `child_hash` without re-reading the data table.
+#[derive(Debug, Clone)]
+pub(crate) struct ChildRef {
+    /// The entry name within its parent directory.
+    pub name: String,
+    /// The entry kind (drives how the child contributes its `child_hash`).
+    pub entry_type: EntryType,
+    /// The content hash this child contributes to its parent's tree hash.
+    pub child_hash: ObjectHash,
+    /// The child directory's node key, present only when the child is a
+    /// physical directory (the only kind a diff can descend into).
+    pub child_dir_key: Option<NodeKey>,
+}
+
+/// An in-memory index of a pond's content tree: the root hash plus, for every
+/// physical directory node, its sorted child entries with their child hashes.
+///
+/// Built once per pond by [`build_content_tree_for_table`]; consumed by the
+/// content-tree comparison in [`crate::content_diff`], which walks two indices
+/// top-down and prunes any subtree whose `child_hash` already matches.
+pub(crate) struct ContentTreeIndex {
+    /// The local pond's root directory tree hash.
+    pub root_tree_hash: ObjectHash,
+    /// The node key of the local pond's root directory.
+    pub root_key: NodeKey,
+    /// Per physical-directory child lists, in name order.
+    pub dirs: HashMap<NodeKey, Vec<ChildRef>>,
+    /// Number of distinct nodes folded into the root.
+    pub nodes_hashed: usize,
+}
+
 /// Composite identity of a node within the data table: `(pond_id, node_id)`.
 ///
 /// Keying by both keeps cross-pond imports correct, because every pond's root
 /// shares the same well-known `node_id` and would otherwise collide.
-type NodeKey = (String, String);
+pub(crate) type NodeKey = (String, String);
 
 /// The latest-version facts about one node needed to hash it.
 struct NodeFacts {
@@ -102,6 +134,28 @@ pub async fn compute_content_tree_for_table(
     table: deltalake::DeltaTable,
     local_pond_id: &str,
 ) -> Result<ContentTreeReport, StewardError> {
+    let index = build_content_tree_for_table(table, local_pond_id).await?;
+    Ok(ContentTreeReport {
+        root_tree_hash: index.root_tree_hash,
+        nodes_hashed: index.nodes_hashed,
+    })
+}
+
+/// Build the full content-tree index for a pond from a `DeltaTable` handle.
+///
+/// Reads the data table once, reconstructs the current tree, and folds it
+/// bottom-up while capturing every physical directory's child list (so a later
+/// comparison can descend by `child_hash`).  Pure and side-effect free.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read, if the named pond has no
+/// root directory row, if a referenced child node is missing, or if directory
+/// content cannot be decoded.
+pub(crate) async fn build_content_tree_for_table(
+    table: deltalake::DeltaTable,
+    local_pond_id: &str,
+) -> Result<ContentTreeIndex, StewardError> {
     let ctx = SessionContext::new();
     let _previous = ctx
         .register_table("content_live", Arc::new(table))
@@ -157,16 +211,20 @@ pub async fn compute_content_tree_for_table(
 
     let mut memo: HashMap<NodeKey, ObjectHash> = HashMap::new();
     let mut in_progress: Vec<NodeKey> = Vec::new();
+    let mut dirs: HashMap<NodeKey, Vec<ChildRef>> = HashMap::new();
     let root_tree_hash = hash_directory(
         &root_key,
         &latest,
         &series_versions,
         &mut memo,
         &mut in_progress,
+        &mut dirs,
     )?;
 
-    Ok(ContentTreeReport {
+    Ok(ContentTreeIndex {
         root_tree_hash,
+        root_key,
+        dirs,
         nodes_hashed: memo.len(),
     })
 }
@@ -182,13 +240,15 @@ fn row_blob_hash(blake3: &Option<String>, content: Option<&[u8]>) -> ObjectHash 
     ObjectHash::of_bytes(content.unwrap_or(&[]))
 }
 
-/// Fold one directory (by key) into its recursive [`tree_hash`].
+/// Fold one directory (by key) into its recursive [`tree_hash`], recording its
+/// child list into `dirs` for later comparison.
 fn hash_directory(
     key: &NodeKey,
     latest: &HashMap<NodeKey, NodeFacts>,
     series_versions: &HashMap<NodeKey, BTreeMap<i64, ObjectHash>>,
     memo: &mut HashMap<NodeKey, ObjectHash>,
     in_progress: &mut Vec<NodeKey>,
+    dirs: &mut HashMap<NodeKey, Vec<ChildRef>>,
 ) -> Result<ObjectHash, StewardError> {
     if let Some(h) = memo.get(key) {
         return Ok(*h);
@@ -209,6 +269,7 @@ fn hash_directory(
     in_progress.push(key.clone());
 
     let mut tree_entries: Vec<TreeEntry> = Vec::with_capacity(entries.len());
+    let mut children: Vec<ChildRef> = Vec::with_capacity(entries.len());
     for entry in entries {
         // A child belongs to its parent's pond unless it carries an explicit
         // foreign pond_id (a cross-pond import mount point).
@@ -221,7 +282,19 @@ fn hash_directory(
             series_versions,
             memo,
             in_progress,
+            dirs,
         )?;
+        let child_dir_key = if entry.entry_type == EntryType::DirectoryPhysical {
+            Some(child_key)
+        } else {
+            None
+        };
+        children.push(ChildRef {
+            name: entry.name.clone(),
+            entry_type: entry.entry_type,
+            child_hash,
+            child_dir_key,
+        });
         tree_entries.push(TreeEntry::new(entry.name, entry.entry_type, child_hash));
     }
 
@@ -229,11 +302,13 @@ fn hash_directory(
 
     let hash = tree_hash(&tree_entries).map_err(StewardError::DeltaLake)?;
     let _ = memo.insert(key.clone(), hash);
+    let _ = dirs.insert(key.clone(), children);
     Ok(hash)
 }
 
 /// Compute the `child_hash` an entry of the given kind contributes to its
 /// parent, dispatching on the entry type per design Section 9.
+#[allow(clippy::too_many_arguments)]
 fn hash_child(
     key: &NodeKey,
     entry_type: EntryType,
@@ -241,10 +316,11 @@ fn hash_child(
     series_versions: &HashMap<NodeKey, BTreeMap<i64, ObjectHash>>,
     memo: &mut HashMap<NodeKey, ObjectHash>,
     in_progress: &mut Vec<NodeKey>,
+    dirs: &mut HashMap<NodeKey, Vec<ChildRef>>,
 ) -> Result<ObjectHash, StewardError> {
     match entry_type {
         EntryType::DirectoryPhysical => {
-            hash_directory(key, latest, series_versions, memo, in_progress)
+            hash_directory(key, latest, series_versions, memo, in_progress, dirs)
         }
         EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
             let versions = series_versions.get(key).ok_or_else(|| {

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod content_diff;
 mod content_tree;
 mod control_table;
 mod dispatch;
@@ -25,6 +26,7 @@ mod remote_config;
 mod ship;
 mod write_lock;
 
+pub use content_diff::{ContentComparison, ContentDiff, DiffKind, compare_content_trees};
 pub use content_tree::{ContentTreeReport, compute_content_tree, compute_content_tree_for_table};
 pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
