@@ -826,13 +826,16 @@ tr:hover td {
   line-height: 1;
 }
 
-/* While a chart is full screen, lift its <main> out of the grid and let it
-   cover the viewport (over the sidebar).  The chart re-renders to fit. */
-body.chart-fullscreen {
+/* While a chart or the explorer is full screen, lift its <main> out of the
+   grid and let it cover the viewport (over the sidebar).  The view re-renders
+   to fit. */
+body.chart-fullscreen,
+body.explore-fullscreen {
   overflow: hidden;
 }
 
-body.chart-fullscreen .content-page {
+body.chart-fullscreen .content-page,
+body.explore-fullscreen .content-page {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -853,8 +856,17 @@ body.chart-fullscreen .blog-post {
    full overlay so the chart can use the entire width (and, via its computed
    height, the entire height). */
 body.chart-fullscreen .blog-post,
-body.chart-fullscreen .blog-post-content {
+body.chart-fullscreen .blog-post-content,
+body.explore-fullscreen .blog-post,
+body.explore-fullscreen .blog-post-content {
   max-width: none;
+}
+
+/* In full screen, let the explorer's result grid use the available height
+   instead of its compact inline cap. */
+body.explore-fullscreen .explore-results {
+  max-height: calc(100vh - 18rem);
+  overflow-y: auto;
 }
 
 .blog-post {

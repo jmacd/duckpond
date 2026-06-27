@@ -474,6 +474,50 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     renderCurrentView();
   });
 
+  // ── Full-screen toggle ───────────────────────────────────────────────────────
+  // Mirror chart.js: inject a control into the top bar that expands the explorer
+  // to fill the viewport (the explore layout shares .content-page/.blog-post, so
+  // the same fixed-overlay CSS applies via the `explore-fullscreen` body class).
+  // Re-render the current view on toggle so the Vega chart resizes to fit.
+  const topBar = document.querySelector(".top-bar");
+  if (topBar) {
+    const fsToggle = document.createElement("button");
+    fsToggle.type = "button";
+    fsToggle.className = "fullscreen-toggle";
+
+    const syncFsLabel = () => {
+      const on = document.body.classList.contains("explore-fullscreen");
+      fsToggle.innerHTML = on
+        ? '<span class="fs-icon">\u00d7</span> Close'
+        : 'Full screen <span class="fs-icon">\u2192</span>';
+      fsToggle.setAttribute("aria-pressed", on ? "true" : "false");
+      fsToggle.title = on ? "Exit full screen (Esc)" : "Expand the explorer to full screen";
+    };
+
+    const setFullscreen = (on) => {
+      document.body.classList.toggle("explore-fullscreen", on);
+      syncFsLabel();
+      // The Vega chart sizes to its container width but a fixed height; re-render
+      // the current view so the chart picks up the taller full-screen height.
+      // The results table reflows via CSS, so re-rendering it is harmless.
+      if (lastRows && lastRows.length) renderCurrentView();
+    };
+
+    fsToggle.onclick = () =>
+      setFullscreen(!document.body.classList.contains("explore-fullscreen"));
+    syncFsLabel();
+
+    const backLink = topBar.querySelector(".top-bar-back");
+    if (backLink) backLink.insertAdjacentElement("afterend", fsToggle);
+    else topBar.insertAdjacentElement("afterbegin", fsToggle);
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && document.body.classList.contains("explore-fullscreen")) {
+        setFullscreen(false);
+      }
+    });
+  }
+
   // Lazily import the vendored vega-embed bundle (only when first needed).
   async function ensureVega() {
     if (vegaEmbedFn) return vegaEmbedFn;
@@ -541,10 +585,14 @@ import { initDuckdb, createFileRegistry, rowsToCsv, rowsToJson } from "./duckdb-
     const cols = [xCol, ...yCols];
     const values = sanitizeChartRows(cols);
     const multi = yCols.length > 1;
+    // In full screen, grow the chart to roughly fill the viewport height;
+    // otherwise keep the compact inline height.
+    const fullscreen = document.body.classList.contains("explore-fullscreen");
+    const chartHeight = fullscreen ? Math.max(340, window.innerHeight - 320) : 340;
     const spec = {
       $schema: "https://vega.github.io/schema/vega-lite/v5.json",
       width: "container",
-      height: 340,
+      height: chartHeight,
       data: { values },
       transform: multi ? [{ fold: yCols, as: ["series", "value"] }] : [],
       mark: { type: "line", clip: true, tooltip: true },

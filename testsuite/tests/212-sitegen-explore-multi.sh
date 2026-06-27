@@ -286,6 +286,7 @@ check_contains "${CHART_HTML}" "chart cross-link url" 'data-explore-url="/explor
 check_contains "${OUTDIR}/chart.js" "chart explore button" 'Explore this data'
 check_contains "${OUTDIR}/chart.js" "chart reads explore url" 'exploreUrl'
 check_contains "${OUTDIR}/explore.js" "explorer accepts handed-over files" 'chart_data'
+check_contains "${OUTDIR}/explore.js" "explorer full-screen toggle" 'explore-fullscreen'
 
 echo ""
 echo "=== Data explorer Stage 1 (multi-dataset) verified ==="
