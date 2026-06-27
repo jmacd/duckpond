@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod content_tree;
 mod control_table;
 mod dispatch;
 pub mod fsck;
@@ -24,6 +25,7 @@ mod remote_config;
 mod ship;
 mod write_lock;
 
+pub use content_tree::{ContentTreeReport, compute_content_tree};
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
