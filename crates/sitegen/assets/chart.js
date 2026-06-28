@@ -13,7 +13,7 @@
 // one partition boundary, meaning at most 2 files are fetched per render.
 
 import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
-import { loadVega, buildMetricChartSpec } from "./vega-shared.js";
+import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -342,6 +342,30 @@ import { loadVega, buildMetricChartSpec } from "./vega-shared.js";
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
 
+  // Build the data-less Vega-Lite spec handed to the explorer when the user
+  // clicks "Explore this data": fold the per-metric avg columns into one line
+  // series each over a temporal x axis. The explorer injects its own query
+  // result as the data, so this mirrors the shape of vega-shared's
+  // `buildLineSpec` (which the explorer's "Reset to auto" reproduces).
+  function buildExploreSpec(avgCols) {
+    const cols = avgCols.map(escapeField);
+    const multi = cols.length > 1;
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      height: 340,
+      transform: multi ? [{ fold: cols, as: ["series", "value"] }] : [],
+      mark: { type: "line", clip: true, tooltip: true },
+      encoding: {
+        x: { field: "timestamp", type: "temporal", title: "timestamp" },
+        y: multi
+          ? { field: "value", type: "quantitative" }
+          : { field: cols[0], type: "quantitative", title: avgCols[0] },
+        ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
+      },
+    };
+  }
+
   if (exploreBtn) {
     exploreBtn.addEventListener("click", () => {
       if (curBegin == null || curEnd == null) return;
@@ -365,6 +389,20 @@ import { loadVega, buildMetricChartSpec } from "./vega-shared.js";
       params.set("label", label);
       params.set("files", urls.join(","));
       params.set("sql", sql);
+      // Hand the explorer a clean default visualization: one avg line per metric
+      // (matching this page's chart, minus the min/max bands) so "Explore this
+      // data" opens straight into chart view instead of the raw query grid. The
+      // user can still edit the SQL/spec or switch to the table. Field names are
+      // dot-escaped because the temporal-reduce columns (`do.avg` etc.) contain
+      // dots, which Vega-Lite would otherwise read as nested-object access.
+      const avgCols = [];
+      for (const series of groupColumns(lastData).values()) {
+        for (const s of series) if (s.avg) avgCols.push(s.avg);
+      }
+      if (avgCols.length) {
+        params.set("view", "chart");
+        params.set("spec", JSON.stringify(buildExploreSpec(avgCols)));
+      }
       location.assign(`${exploreUrl}#${params.toString()}`);
     });
   }

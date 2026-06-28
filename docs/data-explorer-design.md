@@ -241,13 +241,26 @@ Done:
   `plot-d3-bundle.mjs` from `VENDOR_FILES`/`VENDOR_FILES_COMPRESSED`, and test
   `201` now asserts the bundle is absent and `vega-bundle.mjs` is present. Every
   sitegen chart asset (explorer, chart pages, overlay) is now all-in Vega-Lite.
+- **Stage 3 S3.4 (chart cross-link spec) — done** — the chart pages' "Explore
+  this data" link now hands the explorer `&view=chart` plus a `&spec=<encoded>`
+  data-less Vega-Lite spec (one avg line per metric, built by chart.js's
+  `buildExploreSpec`), so the cross-link opens straight into a chart that mirrors
+  the source page instead of the raw query grid. The explorer already restored
+  `view`/`spec` from the hash (S3.4 URL round-trip), so the result renders into
+  chart view with the handed spec; the user can still edit the SQL/spec, reset to
+  auto, or switch to the table.
+- **Dot-escaped field references (regression fix)** — Vega-Lite reads an
+  unescaped `.` in a `field` as nested-object access, so the temporal-reduce
+  columns (`do.avg`, `committed.txn_ids.max`, …) silently resolved to undefined
+  and the migrated charts drew axes but no data lines. `vega-shared.js` adds an
+  `escapeField` helper applied to every data-derived `field`/`fold` reference in
+  `buildLineSpec` and `buildMetricChartSpec` (and reused by chart.js's handed
+  spec). Browser test `210` now asserts `g.mark-line`/`g.mark-area` paths carry
+  real line-to geometry, and `213` adds a dotted-column render case — both would
+  have failed before the fix.
 
 Remaining:
 
-- **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip is done; what
-  remains is for the chart pages' "Explore this data" link to hand over a
-  Vega-Lite spec (and "view as chart" to emit one back). Now unblocked since
-  chart.js produces `buildMetricChartSpec` specs.
 - **Optional embedded SQL editor** (syntax highlight / completion) — explicitly
   deferred; the plain `<textarea>` stands.
 

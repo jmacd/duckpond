@@ -11,6 +11,17 @@
 
 let vegaEmbedFn = null;
 
+// Escape a data column name for use as a Vega-Lite field reference. Vega-Lite
+// interprets an unescaped `.` as nested-object access, so a flat column whose
+// name contains a dot -- e.g. the temporal-reduce `do.avg` / `committed.txn_ids.max`
+// columns -- must have its dots backslash-escaped or the encoding silently
+// resolves to undefined and the mark renders nothing. Brackets are escaped for
+// the same reason. Always pass column names through this before placing them in
+// a spec's `field`/`fold`; keep the raw name for human-facing `title` text.
+export function escapeField(name) {
+  return String(name).replace(/([.[\]])/g, "\\$1");
+}
+
 // Lazily import the vendored vega-embed bundle, resolved relative to this
 // module so any asset that imports it picks up the same vendor copy. The bundle
 // is large, so callers should invoke this only when a chart is first shown.
@@ -67,17 +78,17 @@ export function buildLineSpec(fields, rows, opts = {}) {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
     width: "container",
     height: opts.height || 340,
-    transform: multi ? [{ fold: yCols, as: ["series", "value"] }] : [],
+    transform: multi ? [{ fold: yCols.map(escapeField), as: ["series", "value"] }] : [],
     mark: { type: "line", clip: true, tooltip: true },
     encoding: {
       x: {
-        field: xCol,
+        field: escapeField(xCol),
         type: xKind === "temporal" ? "temporal" : "quantitative",
         title: xCol,
       },
       y: multi
         ? { field: "value", type: "quantitative" }
-        : { field: yCols[0], type: "quantitative", title: yCols[0] },
+        : { field: escapeField(yCols[0]), type: "quantitative", title: yCols[0] },
       ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
     },
     // Interval selection bound to scales gives pan + zoom out of the box --
@@ -113,8 +124,8 @@ export function buildMetricChartSpec(opts) {
       layers.push({
         mark: { type: "area", color: s.color, opacity: 0.15, clip: true, invalid: null },
         encoding: {
-          y: { field: s.min, type: "quantitative", axis: yAssigned ? null : yAxis },
-          y2: { field: s.max },
+          y: { field: escapeField(s.min), type: "quantitative", axis: yAssigned ? null : yAxis },
+          y2: { field: escapeField(s.max) },
         },
       });
       yAssigned = true;
@@ -123,7 +134,7 @@ export function buildMetricChartSpec(opts) {
       layers.push({
         mark: { type: "line", color: s.color, strokeWidth: 1.5, clip: true, invalid: null },
         encoding: {
-          y: { field: s.avg, type: "quantitative", axis: yAssigned ? null : yAxis },
+          y: { field: escapeField(s.avg), type: "quantitative", axis: yAssigned ? null : yAxis },
         },
       });
       yAssigned = true;

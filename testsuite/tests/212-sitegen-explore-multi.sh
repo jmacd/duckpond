@@ -298,6 +298,11 @@ check_contains "${CHART_HTML}" "chart cross-link url" 'data-explore-url="/explor
 check_contains "${OUTDIR}/chart.js" "chart explore button" 'Explore this data'
 check_contains "${OUTDIR}/chart.js" "chart reads explore url" 'exploreUrl'
 check_contains "${OUTDIR}/explore.js" "explorer accepts handed-over files" 'chart_data'
+# Stage 3 S3.4: the cross-link opens the explorer straight into chart view with a
+# handed Vega-Lite spec, and the explorer restores that view + spec from the hash.
+check_contains "${OUTDIR}/chart.js" "chart hands over chart view"   'buildExploreSpec'
+check_contains "${OUTDIR}/chart.js" "chart sets explorer view mode" '"view", "chart"'
+check_contains "${OUTDIR}/explore.js" "explorer restores chart view" 'view === "chart"'
 check_contains "${OUTDIR}/explore.js" "explorer full-screen toggle" 'explore-fullscreen'
 check_contains "${OUTDIR}/explore.js" "per-partition lazy fetch window" 'explore-window'
 check_contains "${OUTDIR}/explore.js" "partition overlap pruning" 'overlappingFiles'

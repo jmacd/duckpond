@@ -44,6 +44,7 @@ const FIXTURE_HTML = `<!DOCTYPE html>
 <body>
   <div id="single" style="width:600px"></div>
   <div id="multi" style="width:600px"></div>
+  <div id="dotted" style="width:600px"></div>
   <script type="module">
     import { loadVega, buildLineSpec, sanitizeRows } from "${BASE_PATH}vega-shared.js";
 
@@ -82,6 +83,17 @@ const FIXTURE_HTML = `<!DOCTYPE html>
         max: Math.sin(i) + 3,
       }));
       await render("multi", multiFields, multiRows);
+
+      // Dotted column names such as the temporal-reduce do.avg / do.max
+      // columns must be dot-escaped in field references, or Vega-Lite reads
+      // the dot as nested-object access and the line silently renders no data.
+      const dottedFields = ["timestamp", "do.avg", "do.max"];
+      const dottedRows = Array.from({ length: 6 }, (_, i) => ({
+        timestamp: new Date(t0 + i * hour),
+        "do.avg": Math.sin(i) + 2,
+        "do.max": Math.sin(i) + 3,
+      }));
+      await render("dotted", dottedFields, dottedRows);
 
       window.__vegaReady = true;
     })().catch((e) => {
@@ -153,6 +165,21 @@ try {
     () => document.querySelectorAll("#single svg path[stroke]").length
   );
   check(singlePaths > 0, `single-series drew a line path (${singlePaths})`);
+
+  // The dotted-column spec must draw real line geometry: count stroked line
+  // paths whose `d` carries line-to (`L`) commands. Before the dot-escape fix
+  // these resolved to undefined and only the axes drew.
+  const dottedPaths = await tab.evaluate(() => {
+    const paths = document.querySelectorAll(
+      "#dotted svg g.mark-line path, #dotted svg path[stroke]"
+    );
+    let withGeometry = 0;
+    paths.forEach((p) => {
+      if (/L/.test(p.getAttribute("d") || "")) withGeometry += 1;
+    });
+    return withGeometry;
+  });
+  check(dottedPaths > 0, `dotted-column spec drew line geometry (${dottedPaths})`);
 
   await tab.close();
 } finally {

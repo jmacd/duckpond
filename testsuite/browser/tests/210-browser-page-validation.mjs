@@ -220,6 +220,29 @@ async function testPage(browser, page) {
         );
         check(vegaRendered > 0, `chart rendered via Vega (${vegaRendered} svg.marks)`);
 
+        // Assert the avg line marks carry real geometry, not just empty axes.
+        // Vega groups data marks under `g.mark-line`/`g.mark-area` (axes use
+        // `role-axis`), and a multi-point line path's `d` contains line-to (`L`)
+        // commands. A regression where field references were not dot-escaped (so
+        // dotted columns like `do.avg` resolved to undefined) rendered axes but
+        // empty data paths -- this assertion catches that.
+        const dataMarks = await tab.evaluate(() => {
+          const paths = document.querySelectorAll(
+            ".chart-container svg g.mark-line path, .chart-container svg g.mark-area path"
+          );
+          let withGeometry = 0;
+          paths.forEach((p) => {
+            const d = p.getAttribute("d") || "";
+            if (/L/.test(d)) withGeometry += 1;
+          });
+          return { total: paths.length, withGeometry };
+        });
+        check(
+          dataMarks.withGeometry > 0,
+          `chart has data line/area marks with geometry ` +
+            `(${dataMarks.withGeometry}/${dataMarks.total} mark-line/mark-area paths)`
+        );
+
         // Check for multiple chart sections (min/max/avg grouping)
         const chartDivs = await tab.evaluate(
           () => document.querySelectorAll(".chart-container .chart").length
