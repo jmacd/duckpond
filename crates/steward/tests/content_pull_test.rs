@@ -9,8 +9,14 @@ use steward::{Ship, fetch_object_graph, push_content_to_remote};
 use sync_store::ContentRemote;
 use sync_store::content::ObjectHash;
 use tempfile::tempdir;
+use tinyfs::arrow::parquet::ParquetExt;
 use tinyfs::async_helpers::convenience::create_file_path;
 use tlogfs::PondUserMetadata;
+
+use std::sync::Arc;
+
+use arrow_array::{RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
 fn meta(label: &str) -> PondUserMetadata {
     PondUserMetadata::new(vec!["test".into(), label.into()])
@@ -47,6 +53,49 @@ async fn new_pond(label: &str) -> (tempfile::TempDir, Ship) {
         .await
         .expect("create pond");
     (tmp, ship)
+}
+
+/// A single-row parquet batch with a `timestamp` (microseconds) column and a
+/// string `label`, used to append series versions in tests.
+fn series_batch(ts_micros: i64, label: &str) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("label", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![ts_micros])),
+            Arc::new(StringArray::from(vec![label])),
+        ],
+    )
+    .expect("series batch")
+}
+
+/// Append `versions` to a `TablePhysicalSeries` at `path`, creating it on the
+/// first version and appending a new version for each subsequent one.
+async fn write_series(ship: &mut Ship, path: &str, versions: &[(i64, &str)]) {
+    let path = path.to_string();
+    let versions: Vec<(i64, String)> = versions
+        .iter()
+        .map(|(ts, label)| (*ts, (*label).to_string()))
+        .collect();
+    ship.write_transaction(&meta("series"), async move |fs| {
+        let root = fs.root().await?;
+        for (ts, label) in &versions {
+            let batch = series_batch(*ts, label);
+            let _ = root
+                .write_series_from_batch(&path, &batch, Some("timestamp"))
+                .await?;
+        }
+        Ok(())
+    })
+    .await
+    .expect("series transaction");
 }
 
 async fn push(ship: &Ship) -> (tempfile::TempDir, ContentRemote) {
@@ -181,6 +230,52 @@ async fn rebuild_reproduces_source_content() {
     assert_eq!(
         dst_root, src_root,
         "rebuilt pond must be content-equal to the source"
+    );
+}
+
+/// A multi-version `table:series` survives the full round trip: the rebuilt
+/// pond is content-equal to the source, which requires recreating every series
+/// version in order so the read-side fold's `series_hash` matches (Section
+/// 8.5.3).
+#[tokio::test]
+async fn rebuild_reproduces_multi_version_series() {
+    let (_t, mut src) = new_pond("series-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_series(
+        &mut src,
+        "/readings.series",
+        &[(1_000, "first"), (2_000, "second"), (3_000, "third")],
+    )
+    .await;
+
+    let src_root = steward::compute_content_tree(&src)
+        .await
+        .expect("source fold")
+        .root_tree_hash;
+
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "series-dst")
+        .await
+        .expect("create dst pond");
+
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    assert_eq!(outcome.root_tree_hash, Some(src_root));
+    assert_eq!(outcome.files, 1);
+    assert_eq!(outcome.series, 1);
+
+    let dst_root = steward::compute_content_tree(&dst)
+        .await
+        .expect("dst fold")
+        .root_tree_hash;
+    assert_eq!(
+        dst_root, src_root,
+        "rebuilt pond with a multi-version series must be content-equal to the source"
     );
 }
 

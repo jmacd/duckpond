@@ -25,6 +25,7 @@ use sync_store::content::{Commit, ObjectHash, TreeEntry, decode_series, decode_t
 use tinyfs::EntryType;
 use tinyfs::async_helpers::convenience::create_file_path_with_type;
 use tlogfs::PondUserMetadata;
+use tokio::io::AsyncWriteExt;
 
 use crate::{Ship, StewardError};
 
@@ -253,6 +254,16 @@ enum RebuildOp {
     },
     /// Create a symlink at this path pointing at this target.
     Symlink { path: String, target: String },
+    /// Recreate a multi-version series at this path, one version per element,
+    /// in ascending version order.  Each version's bytes are written as a new
+    /// series version, exactly reproducing the source's per-version blobs (and
+    /// therefore their `blake3` hashes) so the read-side fold's `series_hash`
+    /// matches the source (design Section 8.5.3).
+    Series {
+        path: String,
+        entry_type: EntryType,
+        versions: Vec<Vec<u8>>,
+    },
 }
 
 /// The result of rebuilding a pond from a fetched object graph.
@@ -266,6 +277,8 @@ pub struct RebuildOutcome {
     pub files: usize,
     /// Number of symlinks created.
     pub symlinks: usize,
+    /// Number of multi-version series recreated.
+    pub series: usize,
 }
 
 /// Rebuild a fresh tlogfs pond from a fetched object graph (design Section
@@ -285,9 +298,9 @@ pub struct RebuildOutcome {
 ///
 /// Returns an error if the graph is empty, if the graph references an object it
 /// does not contain, if a symlink target is not valid UTF-8, if the graph
-/// contains a series or dynamic node (not yet supported by rebuild), or if a
-/// write fails.  After a successful rebuild, the read-side fold of `target` is
-/// verified to equal the tip's root tree hash; a mismatch is an error.
+/// contains a dynamic node (not yet supported by rebuild), or if a write fails.
+/// After a successful rebuild, the read-side fold of `target` is verified to
+/// equal the tip's root tree hash; a mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
     graph: &FetchedGraph,
@@ -307,6 +320,7 @@ pub async fn rebuild_pond(
             RebuildOp::Dir(_) => outcome.dirs += 1,
             RebuildOp::File { .. } => outcome.files += 1,
             RebuildOp::Symlink { .. } => outcome.symlinks += 1,
+            RebuildOp::Series { .. } => outcome.series += 1,
         }
     }
 
@@ -331,6 +345,27 @@ pub async fn rebuild_pond(
                         }
                         RebuildOp::Symlink { path, target } => {
                             let _ = wd.create_symlink_path(&path, &target).await?;
+                        }
+                        RebuildOp::Series {
+                            path,
+                            entry_type,
+                            versions,
+                        } => {
+                            // Append each version in order; the first write
+                            // creates the series node, subsequent writes add
+                            // versions.  Table series re-infer temporal bounds
+                            // from the parquet footer (which also shuts the
+                            // writer down); raw-byte series just close.
+                            for version in versions {
+                                let mut writer =
+                                    wd.async_writer_path_with_type(&path, entry_type).await?;
+                                writer.write_all(&version).await?;
+                                if entry_type == EntryType::TablePhysicalSeries {
+                                    let _ = writer.infer_temporal_bounds().await?;
+                                } else {
+                                    writer.shutdown().await?;
+                                }
+                            }
                         }
                     }
                 }
@@ -396,11 +431,15 @@ fn plan_rebuild(graph: &FetchedGraph, root: ObjectHash) -> Result<Vec<RebuildOp>
                     })?;
                     ops.push(RebuildOp::Symlink { path, target });
                 }
-                EntryType::FilePhysicalSeries
-                | EntryType::TablePhysicalSeries
-                | EntryType::DirectoryDynamic
-                | EntryType::FileDynamic
-                | EntryType::TableDynamic => {
+                EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
+                    let versions = series_version_bytes(graph, entry.child_hash)?;
+                    ops.push(RebuildOp::Series {
+                        path,
+                        entry_type: entry.entry_type,
+                        versions,
+                    });
+                }
+                EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
                     return Err(StewardError::Content(format!(
                         "rebuild does not yet support entry type {:?} at {path}",
                         entry.entry_type
@@ -425,4 +464,32 @@ fn blob_bytes(graph: &FetchedGraph, hash: ObjectHash) -> Result<Vec<u8>, Steward
             hash.to_hex()
         ))),
     }
+}
+
+/// Resolve a series object to its ordered list of version blobs.  Looks up the
+/// series manifest at `series_hash`, then each version blob it references, in
+/// ascending version order (design Section 8.5.3).
+fn series_version_bytes(
+    graph: &FetchedGraph,
+    series_hash: ObjectHash,
+) -> Result<Vec<Vec<u8>>, StewardError> {
+    let versions = match graph.objects.get(&series_hash) {
+        Some(FetchedObject::Series(versions)) => versions,
+        Some(_) => {
+            return Err(StewardError::Content(format!(
+                "expected a series at {} but found a non-series object",
+                series_hash.to_hex()
+            )));
+        }
+        None => {
+            return Err(StewardError::Content(format!(
+                "series object {} missing from graph",
+                series_hash.to_hex()
+            )));
+        }
+    };
+    versions
+        .iter()
+        .map(|hash| blob_bytes(graph, *hash))
+        .collect()
 }
