@@ -53,6 +53,7 @@ mod tests {
         Commit::new(
             ObjectHash::of_bytes(&[root_byte]),
             None,
+            ObjectHash::of_bytes(b"manifest"),
             Provenance {
                 pond_id: "pond".to_string(),
                 seq,

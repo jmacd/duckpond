@@ -11,11 +11,12 @@
 //! the objects to send and the tip to point at.
 //!
 //! The objects are: the inline tree closure from
-//! [`materialize_content_objects`] plus the tip commit object, reproduced
-//! verbatim from the persisted commit spine.  Large blobs do not travel here;
-//! they transfer by hash through the external `_large_files` path, so a pond
-//! that references any large blob is rejected until that path is wired rather
-//! than pushed with a silently incomplete closure.
+//! [`materialize_content_objects`], the node manifest that commit references,
+//! plus the tip commit object reproduced verbatim from the persisted commit
+//! spine.  Large blobs do not travel here; they transfer by hash through the
+//! external `_large_files` path, so a pond that references any large blob is
+//! rejected until that path is wired rather than pushed with a silently
+//! incomplete closure.
 
 use std::collections::BTreeSet;
 
@@ -108,10 +109,27 @@ pub async fn push_content_to_remote(
         )));
     }
 
-    let mut objects: Vec<(ObjectHash, Vec<u8>)> = Vec::with_capacity(materialized.inline.len() + 1);
+    let mut objects: Vec<(ObjectHash, Vec<u8>)> = Vec::with_capacity(materialized.inline.len() + 2);
     for (hash, bytes) in materialized.inline {
         objects.push((hash, bytes));
     }
+    // The node manifest the commit references (Section 4.5); a consumer fetches
+    // it to adopt the source's node_ids.  Verify it hashes to the commit's
+    // recorded manifest hash so the tip can never name a manifest the remote
+    // lacks or disagrees with.
+    let (manifest_hash, manifest_bytes) = materialized.manifest.ok_or_else(|| {
+        StewardError::Content("materialized objects carry no node manifest".to_string())
+    })?;
+    let commit = sync_store::content::Commit::decode(&commit_bytes)
+        .map_err(|e| StewardError::Content(format!("decode commit object: {e}")))?;
+    if commit.node_manifest_hash != manifest_hash {
+        return Err(StewardError::Content(format!(
+            "node manifest hashes to {} but the commit names {}",
+            manifest_hash.to_hex(),
+            commit.node_manifest_hash.to_hex()
+        )));
+    }
+    objects.push((manifest_hash, manifest_bytes));
     objects.push((tip, commit_bytes));
 
     let remote_txn_seq = remote

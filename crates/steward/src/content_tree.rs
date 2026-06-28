@@ -39,7 +39,8 @@ use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
 
 use sync_store::content::{
-    ObjectHash, TreeEntry, encode_recipe, encode_series, encode_tree, recipe_hash, series_hash,
+    ManifestEntry, ObjectHash, TreeEntry, encode_manifest, encode_recipe, encode_series,
+    encode_tree, manifest_hash, recipe_hash, series_hash,
 };
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
@@ -65,14 +66,25 @@ pub struct ContentTreeReport {
 /// via the external `_large_files` path.  Both are keyed by the same BLAKE3
 /// hash, so reachability and dedup are uniform.
 ///
-/// Commit objects are NOT included here -- they are produced by the commit
-/// path and added by the push layer on top of the tree closure.
+/// The node manifest (Section 4.5) is also included inline, since the commit
+/// references it by hash and a consumer must fetch it to adopt the source's
+/// node_ids.  Commit objects are NOT included here -- they are produced by the
+/// commit path and added by the push layer on top of this closure.
 #[derive(Debug, Clone, Default)]
 pub struct MaterializedObjects {
-    /// Objects whose bytes are carried inline, keyed by content hash.
+    /// Objects whose bytes are carried inline, keyed by content hash.  These are
+    /// pure content (trees, series, symlinks, recipes, small blobs) and so
+    /// dedup across ponds; identity-bearing objects are kept out (see
+    /// `manifest`).
     pub inline: BTreeMap<ObjectHash, Vec<u8>>,
     /// Large-blob hashes whose bytes transfer via the external path.
     pub external_blobs: BTreeSet<ObjectHash>,
+    /// The node manifest object: its hash and bytes (Section 4.5).  Kept
+    /// separate from `inline` because it carries the source's node_ids, so it
+    /// is pond-specific and must not be counted as shareable content -- two
+    /// ponds with identical content still have different manifests.  `None`
+    /// only on a default-constructed value; a real fold always produces one.
+    pub manifest: Option<(ObjectHash, Vec<u8>)>,
 }
 
 impl MaterializedObjects {
@@ -86,16 +98,16 @@ impl MaterializedObjects {
         let _ = self.external_blobs.insert(hash);
     }
 
-    /// Total number of distinct objects (inline plus external).
+    /// Total number of distinct objects (inline, external, and the manifest).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inline.len() + self.external_blobs.len()
+        self.inline.len() + self.external_blobs.len() + usize::from(self.manifest.is_some())
     }
 
     /// True when no objects were materialized.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inline.is_empty() && self.external_blobs.is_empty()
+        self.inline.is_empty() && self.external_blobs.is_empty() && self.manifest.is_none()
     }
 }
 
@@ -109,6 +121,9 @@ pub(crate) struct ChildRef {
     pub entry_type: EntryType,
     /// The content hash this child contributes to its parent's tree hash.
     pub child_hash: ObjectHash,
+    /// The child node's own `node_id`, captured so the node manifest can record
+    /// identity alongside the content tree (Section 4.5).
+    pub child_node_id: String,
     /// The child directory's node key, present only when the child is a
     /// physical directory (the only kind a diff can descend into).
     pub child_dir_key: Option<NodeKey>,
@@ -216,6 +231,57 @@ pub(crate) async fn build_content_tree_for_table(
     scan_and_fold(table, local_pond_id, None).await
 }
 
+/// Build the node manifest for a pond's content tree from an already-built
+/// index: one [`ManifestEntry`] per node, recording the source's `node_id`
+/// alongside its parent, name, type, and content address (Section 4.5).
+///
+/// Every non-root node appears exactly once as a child of its parent directory;
+/// the root has no parent, so it is added explicitly with an empty parent and
+/// name.  The manifest is the one place node identity is recorded, so a
+/// consumer can adopt these ids and mirror the source row-for-row (Decision
+/// D8).
+pub(crate) fn node_manifest_entries(index: &ContentTreeIndex) -> Vec<ManifestEntry> {
+    let mut entries = Vec::with_capacity(index.nodes_hashed.max(1));
+    entries.push(ManifestEntry::new(
+        index.root_key.1.clone(),
+        String::new(),
+        String::new(),
+        EntryType::DirectoryPhysical,
+        index.root_tree_hash,
+    ));
+    for (dir_key, children) in &index.dirs {
+        let parent_node_id = &dir_key.1;
+        for child in children {
+            entries.push(ManifestEntry::new(
+                child.child_node_id.clone(),
+                parent_node_id.clone(),
+                child.name.clone(),
+                child.entry_type,
+                child.child_hash,
+            ));
+        }
+    }
+    entries
+}
+
+/// Compute the two content roots a commit references: the `root_tree_hash` and
+/// the `node_manifest_hash` (Section 4.3).  Both come from a single fold of the
+/// data table, so they are guaranteed consistent with each other.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read or folded, or if the
+/// manifest cannot be encoded (a duplicate `node_id`).
+pub(crate) async fn compute_commit_roots_for_table(
+    table: deltalake::DeltaTable,
+    local_pond_id: &str,
+) -> Result<(ObjectHash, ObjectHash), StewardError> {
+    let index = build_content_tree_for_table(table, local_pond_id).await?;
+    let manifest = node_manifest_entries(&index);
+    let manifest_root = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    Ok((index.root_tree_hash, manifest_root))
+}
+
 /// Materialize the content objects reachable from a pond's root tree.
 ///
 /// Reads the data table once and folds it exactly like the hash path, but also
@@ -233,7 +299,14 @@ pub async fn materialize_content_objects(ship: &Ship) -> Result<MaterializedObje
     let local_pond_id = ship.data_persistence().pond_id().to_string();
     let table = ship.data_persistence().table().clone();
     let mut materialized = MaterializedObjects::default();
-    let _index = scan_and_fold(table, &local_pond_id, Some(&mut materialized)).await?;
+    let index = scan_and_fold(table, &local_pond_id, Some(&mut materialized)).await?;
+    // The node manifest travels with the closure so a consumer can adopt the
+    // source's node_ids (Section 4.5).  It is kept separate from the pure
+    // content objects because it is pond-specific (it carries node_ids); the
+    // commit references it by hash.
+    let manifest = node_manifest_entries(&index);
+    let manifest_bytes = encode_manifest(&manifest).map_err(StewardError::Content)?;
+    materialized.manifest = Some((ObjectHash::of_bytes(&manifest_bytes), manifest_bytes));
     Ok(materialized)
 }
 
@@ -386,6 +459,7 @@ fn hash_directory(
             dirs,
             sink.as_deref_mut(),
         )?;
+        let child_node_id = child_key.1.clone();
         let child_dir_key = if entry.entry_type == EntryType::DirectoryPhysical {
             Some(child_key)
         } else {
@@ -395,6 +469,7 @@ fn hash_directory(
             name: entry.name.clone(),
             entry_type: entry.entry_type,
             child_hash,
+            child_node_id,
             child_dir_key,
         });
         tree_entries.push(TreeEntry::new(entry.name, entry.entry_type, child_hash));

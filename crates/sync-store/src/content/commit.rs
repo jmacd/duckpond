@@ -11,7 +11,11 @@
 use super::{Cursor, ObjectHash, push_len_prefixed};
 
 /// Magic header distinguishing a serialized commit from a raw blob (D2).
-const COMMIT_MAGIC: &[u8] = b"dp.commit.1\n";
+///
+/// Bumped to `.2` when the commit gained `node_manifest_hash`; a `.1` commit
+/// (no manifest) cannot be decoded by this version, which is intentional under
+/// the clean-reset encoding policy (D2).
+const COMMIT_MAGIC: &[u8] = b"dp.commit.2\n";
 
 /// The lineage and audit metadata recorded on a commit.
 ///
@@ -41,6 +45,10 @@ pub struct Commit {
     /// The previous commit on this pond's linear chain, or `None` for the
     /// genesis commit.
     pub parent_commit_hash: Option<ObjectHash>,
+    /// The hash of this commit's node manifest, the one place node identity is
+    /// recorded (Section 4.5).  A consumer adopts these ids to mirror the
+    /// source row-for-row (Decision D8).
+    pub node_manifest_hash: ObjectHash,
     /// Lineage and audit metadata.
     pub provenance: Provenance,
 }
@@ -51,11 +59,13 @@ impl Commit {
     pub fn new(
         root_tree_hash: ObjectHash,
         parent_commit_hash: Option<ObjectHash>,
+        node_manifest_hash: ObjectHash,
         provenance: Provenance,
     ) -> Self {
         Self {
             root_tree_hash,
             parent_commit_hash,
+            node_manifest_hash,
             provenance,
         }
     }
@@ -69,6 +79,7 @@ impl Commit {
     /// 32      root_tree_hash
     /// u8      parent present flag (0 or 1)
     /// 32      parent_commit_hash    (only if the flag is 1)
+    /// 32      node_manifest_hash
     /// u32 LE + bytes   pond_id
     /// i64 LE  seq
     /// i64 LE  time_micros
@@ -80,7 +91,7 @@ impl Commit {
     /// `blake3` of these bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(COMMIT_MAGIC.len() + 128);
+        let mut buf = Vec::with_capacity(COMMIT_MAGIC.len() + 160);
         buf.extend_from_slice(COMMIT_MAGIC);
         buf.extend_from_slice(self.root_tree_hash.as_bytes());
         match &self.parent_commit_hash {
@@ -90,6 +101,7 @@ impl Commit {
             }
             None => buf.push(0),
         }
+        buf.extend_from_slice(self.node_manifest_hash.as_bytes());
         push_len_prefixed(&mut buf, self.provenance.pond_id.as_bytes());
         buf.extend_from_slice(&self.provenance.seq.to_le_bytes());
         buf.extend_from_slice(&self.provenance.time_micros.to_le_bytes());
@@ -123,6 +135,7 @@ impl Commit {
             1 => Some(cur.take_hash()?),
             other => return Err(format!("invalid parent flag {other}")),
         };
+        let node_manifest_hash = cur.take_hash()?;
         let pond_id = cur.take_len_prefixed_string()?;
         let seq = cur.take_i64()?;
         let time_micros = cur.take_i64()?;
@@ -134,6 +147,7 @@ impl Commit {
         Ok(Self {
             root_tree_hash,
             parent_commit_hash,
+            node_manifest_hash,
             provenance: Provenance {
                 pond_id,
                 seq,
@@ -163,34 +177,48 @@ mod tests {
         ObjectHash::of_bytes(b"root-tree")
     }
 
+    fn manifest() -> ObjectHash {
+        ObjectHash::of_bytes(b"node-manifest")
+    }
+
     #[test]
     fn commit_hash_is_deterministic() {
-        let c1 = Commit::new(root(), None, prov());
-        let c2 = Commit::new(root(), None, prov());
+        let c1 = Commit::new(root(), None, manifest(), prov());
+        let c2 = Commit::new(root(), None, manifest(), prov());
         assert_eq!(c1.hash(), c2.hash());
     }
 
     #[test]
     fn parent_changes_hash() {
-        let no_parent = Commit::new(root(), None, prov());
+        let no_parent = Commit::new(root(), None, manifest(), prov());
         let parent = ObjectHash::of_bytes(b"parent-commit");
-        let with_parent = Commit::new(root(), Some(parent), prov());
+        let with_parent = Commit::new(root(), Some(parent), manifest(), prov());
         assert_ne!(no_parent.hash(), with_parent.hash());
     }
 
     #[test]
     fn provenance_changes_hash() {
-        let base = Commit::new(root(), None, prov());
+        let base = Commit::new(root(), None, manifest(), prov());
         let mut other = prov();
         other.seq = 8;
-        let changed = Commit::new(root(), None, other);
+        let changed = Commit::new(root(), None, manifest(), other);
         assert_ne!(base.hash(), changed.hash());
     }
 
     #[test]
     fn root_tree_changes_hash() {
-        let base = Commit::new(root(), None, prov());
-        let changed = Commit::new(ObjectHash::of_bytes(b"other-root"), None, prov());
+        let base = Commit::new(root(), None, manifest(), prov());
+        let changed = Commit::new(ObjectHash::of_bytes(b"other-root"), None, manifest(), prov());
+        assert_ne!(base.hash(), changed.hash());
+    }
+
+    #[test]
+    fn manifest_changes_hash() {
+        // The node manifest is part of lineage, so changing it (even with the
+        // same content tree) must change the commit hash.
+        let base = Commit::new(root(), None, manifest(), prov());
+        let changed =
+            Commit::new(root(), None, ObjectHash::of_bytes(b"other-manifest"), prov());
         assert_ne!(base.hash(), changed.hash());
     }
 
@@ -204,14 +232,14 @@ mod tests {
         let mut b = prov();
         b.author = "a".to_string();
         b.request = "bc".to_string();
-        let ca = Commit::new(root(), None, a);
-        let cb = Commit::new(root(), None, b);
+        let ca = Commit::new(root(), None, manifest(), a);
+        let cb = Commit::new(root(), None, manifest(), b);
         assert_ne!(ca.hash(), cb.hash());
     }
 
     #[test]
     fn commit_hash_differs_from_root_blob() {
-        let c = Commit::new(root(), None, prov());
+        let c = Commit::new(root(), None, manifest(), prov());
         assert_ne!(c.hash(), root());
     }
 
@@ -219,8 +247,8 @@ mod tests {
     fn decode_round_trips_encode() {
         let parent = ObjectHash::of_bytes(b"parent-commit");
         for c in [
-            Commit::new(root(), None, prov()),
-            Commit::new(root(), Some(parent), prov()),
+            Commit::new(root(), None, manifest(), prov()),
+            Commit::new(root(), Some(parent), manifest(), prov()),
         ] {
             let bytes = c.encode();
             let decoded = Commit::decode(&bytes).expect("decode");
@@ -231,21 +259,21 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_magic() {
-        let mut bytes = Commit::new(root(), None, prov()).encode();
+        let mut bytes = Commit::new(root(), None, manifest(), prov()).encode();
         bytes[0] ^= 0xff;
         assert!(Commit::decode(&bytes).is_err());
     }
 
     #[test]
     fn decode_rejects_trailing_bytes() {
-        let mut bytes = Commit::new(root(), None, prov()).encode();
+        let mut bytes = Commit::new(root(), None, manifest(), prov()).encode();
         bytes.push(0);
         assert!(Commit::decode(&bytes).is_err());
     }
 
     #[test]
     fn decode_rejects_truncation() {
-        let bytes = Commit::new(root(), None, prov()).encode();
+        let bytes = Commit::new(root(), None, manifest(), prov()).encode();
         assert!(Commit::decode(&bytes[..bytes.len() - 4]).is_err());
     }
 }

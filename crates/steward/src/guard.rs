@@ -437,8 +437,8 @@ impl<'a> StewardTransactionGuard<'a> {
     ) -> Result<Option<crate::control_table::CommitSpine>, StewardError> {
         let pond_id_str = pond_id.to_string();
         let table = persistence.table().clone();
-        let report = crate::compute_content_tree_for_table(table, &pond_id_str).await?;
-        let root_tree_hash = report.root_tree_hash;
+        let (root_tree_hash, node_manifest_hash) =
+            crate::content_tree::compute_commit_roots_for_table(table, &pond_id_str).await?;
 
         let parent_commit_hash = self
             .control_table
@@ -453,8 +453,12 @@ impl<'a> StewardTransactionGuard<'a> {
             author: String::new(),
             request: self.txn_meta.user.args.join(" "),
         };
-        let commit =
-            sync_store::content::Commit::new(root_tree_hash, parent_commit_hash, provenance);
+        let commit = sync_store::content::Commit::new(
+            root_tree_hash,
+            parent_commit_hash,
+            node_manifest_hash,
+            provenance,
+        );
 
         Ok(Some(crate::control_table::CommitSpine {
             root_tree_hash: root_tree_hash.to_hex(),
