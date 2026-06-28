@@ -17,7 +17,7 @@ Horner plot, duty-cycle charts. Documented in
 ```
 caspar.water/config/water.yaml           duckpond/crates/sitegen/assets/      caspar.water/config/site.yaml
   sql-derived-series factories      <->    overlay.js                    <->    /sources/water/analysis/*
-    pump-cycles                            (D3 + DuckDB-WASM)                    site/templates/analysis.md
+    pump-cycles                            (Vega-Lite + DuckDB-WASM)             site/templates/analysis.md
     cycle-summary                          knows pump_event_id,                  {{ overlay_chart }}
   (42m threshold, filter CTEs,             elapsed_s, static_depth,              nav entry
    20 min / 1.5m / 0.3m constants)         draw_duration_s, phase, ...

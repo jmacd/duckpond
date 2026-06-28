@@ -178,10 +178,11 @@ Tracked on branch `jmacd/66`. Coverage is two-tiered. The Docker testsuite
 the emitted assets contain expected substrings; it does not exercise in-browser
 runtime behavior. The Puppeteer harness `testsuite/browser/` does exercise real
 in-browser behavior headlessly; `tests/213-browser-vega-render.mjs` drives the
-shipped `vega-shared.js` through both the single-series and multi-series (fold)
-spec paths and asserts the vendored vega-embed bundle renders SVG with no JS
-errors -- the de-risking step S3.3 calls for, now satisfied. (Lazy fetch and
-full-screen resize remain unexercised headlessly.) Client assets live in
+shipped `vega-shared.js` through the single-series, multi-series (fold), and
+dotted-column spec paths and asserts the vendored vega-embed bundle renders SVG
+line geometry with no JS errors -- the de-risking step S3.3 calls for, now
+satisfied. (Lazy fetch and full-screen resize remain unexercised headlessly.)
+Client assets live in
 `crates/sitegen/assets/` and embed into the binary via `include_str!` in
 `crates/sitegen/src/factory.rs::write_shared_assets`.
 
