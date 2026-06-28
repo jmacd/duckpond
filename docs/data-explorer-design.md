@@ -173,12 +173,17 @@ chart's dataset and window (the cross-link shipped in Stage 2).
 
 ## Implementation status
 
-Tracked on branch `jmacd/66`. End-to-end coverage is the Docker testsuite
-`testsuite/tests/212-sitegen-explore-multi.sh` (asset-ships level: it asserts the
-emitted assets contain expected substrings; it does not headlessly exercise
-in-browser runtime behavior such as Vega rendering, lazy fetch, or full-screen
-resize). Client assets live in `crates/sitegen/assets/` and embed into the binary
-via `include_str!` in `crates/sitegen/src/factory.rs::write_shared_assets`.
+Tracked on branch `jmacd/66`. Coverage is two-tiered. The Docker testsuite
+`testsuite/tests/212-sitegen-explore-multi.sh` is asset-ships level: it asserts
+the emitted assets contain expected substrings; it does not exercise in-browser
+runtime behavior. The Puppeteer harness `testsuite/browser/` does exercise real
+in-browser behavior headlessly; `tests/213-browser-vega-render.mjs` drives the
+shipped `vega-shared.js` through both the single-series and multi-series (fold)
+spec paths and asserts the vendored vega-embed bundle renders SVG with no JS
+errors -- the de-risking step S3.3 calls for, now satisfied. (Lazy fetch and
+full-screen resize remain unexercised headlessly.) Client assets live in
+`crates/sitegen/assets/` and embed into the binary via `include_str!` in
+`crates/sitegen/src/factory.rs::write_shared_assets`.
 
 Done:
 
@@ -199,14 +204,21 @@ Done:
   both are restored before the first run so a shared link reopens the same
   visualization (auto-inferred specs are omitted to keep links short). View
   toggles and Apply/Reset spec rewrite the hash live.
+- **Stage 3 S3.3 prerequisite (headless render verification)** — a Puppeteer
+  test (`testsuite/browser/tests/213-browser-vega-render.mjs`) proves the
+  in-browser Vega path renders: the vendored vega-embed bundle imports, a
+  `buildLineSpec` spec compiles, and both single-series and folded multi-series
+  specs draw SVG line paths with no JS errors. This removes the "untested
+  headlessly" blocker noted below for the chart.js migration.
 
 Remaining:
 
 - **Stage 3 S3.3** — port `chart.js` + `overlay.js` line/area/dot marks to
   Vega-Lite specs (via `vega-shared.js`), preserving the auto-resolution +
-  lazy-fetch data layer. Largest migration; in-browser Vega behavior is still
-  untested headlessly, so a manual browser check or a headless render test is
-  advisable before committing to the full chart.js migration.
+  lazy-fetch data layer. Largest migration. The in-browser Vega render path is
+  now verified headlessly (test 213), so the migration can proceed; the work
+  itself (mapping the existing marks, brush-zoom, hover crosshair, and
+  counter-rate layer onto Vega-Lite specs) is still outstanding.
 - **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip above is done;
   what remains is for the chart pages' "Explore this data" link to hand over a
   Vega-Lite spec (and "view as chart" to emit one back to the chart), which is
