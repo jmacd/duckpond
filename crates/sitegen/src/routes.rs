@@ -151,11 +151,28 @@ fn expand_route(
             }
 
             if let Some(ref page) = route.page {
+                // A static route may optionally bind an export stage: its files
+                // (all $0 groups flattened) are attached to the single page so a
+                // site-wide page (e.g. the data explorer) can list every file.
+                let datafiles = match route.export.as_deref() {
+                    Some(export_name) => match exports.get(export_name) {
+                        Some(export_ctx) => export_ctx.by_key.values().flatten().cloned().collect(),
+                        None => {
+                            log::warn!(
+                                "Static route '{}' references export '{}' which has no results",
+                                route.name,
+                                export_name
+                            );
+                            vec![]
+                        }
+                    },
+                    None => vec![],
+                };
                 jobs.push(PageJob {
                     output_path,
                     page_source: page.clone(),
                     captures: vec![],
-                    datafiles: vec![],
+                    datafiles,
                     breadcrumbs: breadcrumbs.clone(),
                 });
             }
@@ -462,6 +479,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         }
     }
@@ -492,7 +510,13 @@ mod tests {
         );
 
         let mut exports = BTreeMap::new();
-        exports.insert("params".to_string(), ExportContext { by_key });
+        exports.insert(
+            "params".to_string(),
+            ExportContext {
+                by_key,
+                columns: vec![],
+            },
+        );
         exports
     }
 
@@ -629,6 +653,7 @@ mod tests {
             metric_registry: std::collections::BTreeMap::new(),
             metric_captions: std::collections::BTreeMap::new(),
             labels: std::collections::BTreeMap::new(),
+            explore: None,
             status_grid: None,
         };
 

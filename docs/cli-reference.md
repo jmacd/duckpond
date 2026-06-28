@@ -1337,7 +1337,7 @@ pond describe /reduce/weather/res=1h.series
 
 Static site generator using Maudit + Maud. Reads data from the pond,
 applies Markdown templates with shortcodes, and produces a complete
-static HTML site with interactive charts (DuckDB-WASM + Observable Plot).
+static HTML site with interactive charts (DuckDB-WASM + Vega-Lite).
 
 ```yaml
 factory: sitegen
@@ -1583,8 +1583,8 @@ pond mknod sitegen /system/etc/90-sitegen --overwrite --config-path /path/to/sit
 
 **Notes:**
 - The generated site uses DuckDB-WASM to load Parquet files client-side -- no server needed.
-- Charts use Observable Plot for rendering.
-- Vendor JS is loaded from CDN -- no Node.js build toolchain required.
+- Charts use Vega-Lite for rendering.
+- Vendor JS is bundled into the binary and written to the output `vendor/` directory -- no CDN and no Node.js build toolchain required at page load.
 - Built-in CSS (`style.css`) and JS (`chart.js`) are compiled into the binary via `include_str!()` and written to the output directory automatically.
 - Google Fonts (Inter) are loaded via preconnect links in all layouts.
 - The `static:` config copies text files from the pond to the output root (binary files like images must use filename-only paths; SVG works since it is text).

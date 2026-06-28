@@ -151,6 +151,7 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
         "logs" => logs_layout(ctx),
+        "explore" => explore_layout(ctx),
         "page" => page_layout(ctx),
         "blog" => blog_layout(ctx),
         other => {
@@ -244,6 +245,40 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                 }
                 (build_footer(ctx.footer))
                 script src=(format!("{}log-viewer.js", ctx.root_base_url)) type="module" {}
+            }
+        }
+    }
+}
+
+/// Layout for the browser data explorer page.
+///
+/// Similar to logs_layout but loads explore.js. The page content (from
+/// markdown + the `explore` shortcode) supplies the `<script class="datasets">`
+/// manifest and the `<div id="explore">` container that explore.js drives.
+fn explore_layout(ctx: &LayoutContext) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                (build_header(ctx.header, ctx.base_url))
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    (top_bar(Some("Home"), Some(ctx.base_url), ctx.feed_url, ctx.github_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+                (build_footer(ctx.footer))
+                script src=(format!("{}explore.js", ctx.root_base_url)) type="module" {}
             }
         }
     }
@@ -615,5 +650,32 @@ mod tests {
         assert!(html.contains("type=\"module\""), "Module script: {}", html);
         assert!(html.contains("class=\"sidebar\""), "Sidebar present");
         assert!(!html.contains("chart.js"), "No chart.js in logs layout");
+    }
+
+    #[test]
+    fn test_explore_layout_loads_explore_js() {
+        let ctx = LayoutContext {
+            title: "Data Explorer",
+            site_title: "Noyo Harbor",
+            base_url: "/noyo-harbor/",
+            root_base_url: "/",
+            content: "<div id=\"explore\"></div>",
+            sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
+            feed_url: None,
+            github_url: None,
+            footer: None,
+            header: None,
+        };
+        let html = apply_layout("explore", &ctx);
+        assert!(html.contains("/explore.js"), "explore.js present: {}", html);
+        assert!(
+            !html.contains("\"/noyo-harbor/explore.js\""),
+            "explore.js should use root_base_url, not base_url: {}",
+            html
+        );
+        assert!(html.contains("type=\"module\""), "Module script: {}", html);
+        assert!(html.contains("class=\"sidebar\""), "Sidebar present");
+        assert!(!html.contains("chart.js"), "No chart.js in explore layout");
     }
 }

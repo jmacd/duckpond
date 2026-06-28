@@ -144,10 +144,10 @@ The explorer is a natural generalization of work already shipped on chart pages:
 - **Full-screen view** — the explorer benefits from the same overlay treatment
   for a roomy editor + results pane.
 
-A nice closing of the loop (Stage 2): a "view as chart" affordance that hands a
-query's time/value columns to the existing chart renderer, and conversely an
+A nice closing of the loop (Stage 3 S3.4): a "view as chart" affordance that
+hands a query's time/value columns to the Vega-Lite renderer, and conversely an
 "explore this data" link from a chart that opens the explorer pre-pointed at the
-chart's dataset and window.
+chart's dataset and window (the cross-link shipped in Stage 2).
 
 ## Staging
 
@@ -165,6 +165,105 @@ chart's dataset and window.
 - **Stage 2 — ergonomics.** Schema/column browser, canned example queries,
   result paging and row counts, parquet/JSON export, and the chart ↔ explorer
   cross-links above.
+- **Stage 3 — Vega-Lite visualization.** Migrate the chart-rendering path from
+  Observable Plot to Vega-Lite, factor a single rendering module shared by chart
+  pages and the explorer, expose an editable Vega-Lite spec in the explorer, and
+  round-trip query + spec through the shareable URL and the chart ↔ explorer
+  cross-links.
+
+## Implementation status
+
+Tracked on branch `jmacd/66`. Coverage is two-tiered. The Docker testsuite
+`testsuite/tests/212-sitegen-explore-multi.sh` is asset-ships level: it asserts
+the emitted assets contain expected substrings; it does not exercise in-browser
+runtime behavior. The Puppeteer harness `testsuite/browser/` does exercise real
+in-browser behavior headlessly; `tests/213-browser-vega-render.mjs` drives the
+shipped `vega-shared.js` through the single-series, multi-series (fold), and
+dotted-column spec paths and asserts the vendored vega-embed bundle renders SVG
+line geometry with no JS errors -- the de-risking step S3.3 calls for, now
+satisfied. (Lazy fetch and full-screen resize remain unexercised headlessly.)
+Client assets live in
+`crates/sitegen/assets/` and embed into the binary via `include_str!` in
+`crates/sitegen/src/factory.rs::write_shared_assets`.
+
+Done:
+
+- **Stage 0 / Stage 1 / Stage 2** — complete. Dataset picker over multiple
+  selectable datasets; deferred + window-pruned per-partition registration with a
+  window control; column-chip browser; canned examples; result paging + row
+  counts; CSV / JSON / Parquet export; Table/Chart view switcher; full-screen
+  toggle; chart → explorer "Explore this data" cross-link (ad-hoc `chart_data`
+  dataset); shareable `#dataset=&sql=` (+ `&files=&label=`) URL.
+- **Stage 3 S3.1** — Vega-Lite chart-view spike in the explorer.
+- **Stage 3 S3.2** — `assets/vega-shared.js` shared module (`loadVega`,
+  `detectKind`, `inferEncoding`, `buildLineSpec` returning a data-less spec,
+  `sanitizeRows`); explore.js imports it; the Chart view has an editable
+  Vega-Lite spec textarea with "Apply spec" / "Reset to auto" (data is injected
+  from the live query at render time).
+- **Stage 3 S3.4 (shareable URL round-trip)** — the explorer hash now carries
+  `&view=chart` and, when the spec is hand-edited, `&spec=<encoded>`; on load
+  both are restored before the first run so a shared link reopens the same
+  visualization (auto-inferred specs are omitted to keep links short). View
+  toggles and Apply/Reset spec rewrite the hash live.
+- **Stage 3 S3.3 prerequisite (headless render verification)** — a Puppeteer
+  test (`testsuite/browser/tests/213-browser-vega-render.mjs`) proves the
+  in-browser Vega path renders: the vendored vega-embed bundle imports, a
+  `buildLineSpec` spec compiles, and both single-series and folded multi-series
+  specs draw SVG line paths with no JS errors. This removes the "untested
+  headlessly" blocker noted below for the chart.js migration.
+- **Stage 3 S3.3 (overlay.js)** — the pump-cycle analysis charts (overlay,
+  Horner, drawdown, recovery, and the three summary dot+line charts) are ported
+  from Observable Plot to Vega-Lite via two new `vega-shared.js` builders:
+  `buildMultiLineSpec` (identity-colored lines grouped per pump event) and
+  `buildDotLineSpec` (filled month-colored points over a faint line on a temporal
+  axis). Theming is preserved by resolving `--fg` from CSS and passing it into the
+  spec config. Verified by the browser test `305-browser-overlay-chart.mjs`, which
+  asserts Vega-rendered SVGs (`svg.marks`) appear with no JS errors.
+- **Stage 3 S3.3 (chart.js) — all-in Vega-Lite** — the main chart pages render
+  through a new `buildMetricChartSpec` (`vega-shared.js`): per series an optional
+  avg/min/max area band plus an avg line in a fixed palette color, one shared y
+  scale, an x scale pinned to the queried window, and `invalid: null` so null
+  cells stay path breaks (matching Observable Plot's `defined`). The
+  auto-resolution + lazy-fetch data layer, counter-rate transform, brush-to-zoom,
+  and the rich hover crosshair/tooltip are preserved unchanged — the brush/hover
+  is library-agnostic DOM positioned from the Vega view geometry (`view.origin()`
+  / `view.width()`). Byte y-axes use SI tick labels (`~s`); the exact KiB/MiB
+  formatting still appears in the hover tooltip (a minor cosmetic change to the
+  axis only).
+- **Stage 3 S3.3 (overlay brush) — d3 removed** — the overview timeline's
+  `d3.brushX` is replaced by a Vega-Lite interval selection
+  (`buildBrushOverviewSpec`): stems + dots over a temporal axis with a `brush`
+  param; on pointer release the `brush` signal's extent drives `renderAnalysis`
+  and the overview re-embeds zoomed into the selection. `d3` is no longer
+  imported by overlay.js.
+- **Vendor — Observable Plot + d3 dropped** — `vendor/download.sh` no longer
+  installs `@observablehq/plot` or `d3` or builds `plot-d3-bundle.mjs`;
+  `vega-bundle.mjs` is the single charting bundle. `factory.rs` drops
+  `plot-d3-bundle.mjs` from `VENDOR_FILES`/`VENDOR_FILES_COMPRESSED`, and test
+  `201` now asserts the bundle is absent and `vega-bundle.mjs` is present. Every
+  sitegen chart asset (explorer, chart pages, overlay) is now all-in Vega-Lite.
+- **Stage 3 S3.4 (chart cross-link spec) — done** — the chart pages' "Explore
+  this data" link now hands the explorer `&view=chart` plus a `&spec=<encoded>`
+  data-less Vega-Lite spec (one avg line per metric, built by chart.js's
+  `buildExploreSpec`), so the cross-link opens straight into a chart that mirrors
+  the source page instead of the raw query grid. The explorer already restored
+  `view`/`spec` from the hash (S3.4 URL round-trip), so the result renders into
+  chart view with the handed spec; the user can still edit the SQL/spec, reset to
+  auto, or switch to the table.
+- **Dot-escaped field references (regression fix)** — Vega-Lite reads an
+  unescaped `.` in a `field` as nested-object access, so the temporal-reduce
+  columns (`do.avg`, `committed.txn_ids.max`, …) silently resolved to undefined
+  and the migrated charts drew axes but no data lines. `vega-shared.js` adds an
+  `escapeField` helper applied to every data-derived `field`/`fold` reference in
+  `buildLineSpec` and `buildMetricChartSpec` (and reused by chart.js's handed
+  spec). Browser test `210` now asserts `g.mark-line`/`g.mark-area` paths carry
+  real line-to geometry, and `213` adds a dotted-column render case — both would
+  have failed before the fix.
+
+Remaining:
+
+- **Optional embedded SQL editor** (syntax highlight / completion) — explicitly
+  deferred; the plain `<textarea>` stands.
 
 ## Open questions
 

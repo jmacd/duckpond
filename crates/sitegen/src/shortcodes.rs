@@ -62,6 +62,10 @@ pub struct ExportedFile {
 pub struct ExportContext {
     /// Files grouped by the $0 capture value
     pub by_key: BTreeMap<String, Vec<ExportedFile>>,
+    /// Union of column names seen across this stage's exported parquet files.
+    /// Used by the data explorer to present a dataset's schema without a
+    /// round-trip query. Empty if no schema was captured.
+    pub columns: Vec<String>,
 }
 
 /// One pond's "systemctl status"-style summary, computed at sitegen
@@ -266,6 +270,35 @@ pub struct ShortcodeContext {
     /// their raw capture through this table so headings show a friendly name
     /// (e.g. `DO` -> `Dissolved Oxygen`); missing keys emit the raw value.
     pub labels: BTreeMap<String, String>,
+
+    /// Resolved data-explorer datasets for this page, built from
+    /// `SiteConfig.explore` against the export stages.  When non-empty the
+    /// `explore` shortcode emits one manifest entry per dataset (multi-dataset
+    /// picker); when empty the shortcode falls back to a single dataset built
+    /// from the page's `datafiles`.
+    pub explore_datasets: Vec<ResolvedExploreDataset>,
+
+    /// Site-relative URL of the explorer page (already `base_url`-prefixed),
+    /// from `SiteConfig.explore.url`. When `Some`, the `chart` shortcode emits
+    /// it as `data-explore-url` so chart.js can offer an "Explore this data"
+    /// cross-link that hands the current files + window to the explorer.
+    pub explore_url: Option<String>,
+}
+
+/// A data-explorer dataset resolved from `SiteConfig.explore` against an
+/// export stage's `ExportContext`.  Carries the flattened file list and the
+/// stage's unioned column names so the explorer can register the dataset and
+/// show its schema without a round-trip query.
+#[derive(Debug, Clone)]
+pub struct ResolvedExploreDataset {
+    /// SQL-safe table/view name the dataset registers as (e.g. "reduced").
+    pub table: String,
+    /// Human-friendly label shown in the dataset picker.
+    pub label: String,
+    /// All parquet files comprising this dataset, across all $0 keys.
+    pub files: Vec<ExportedFile>,
+    /// Union of column names across the dataset's files.
+    pub columns: Vec<String>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -300,6 +333,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                 &c.metric_registry,
                 &c.metric_captions,
                 c.default_range.as_deref(),
+                c.explore_url.as_deref(),
             )
         });
     }
@@ -319,6 +353,23 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         let c = ctx.clone();
         shortcodes.register("log_viewer", move |_args: &ShortcodeArgs| {
             render_log_viewer(&c.datafiles)
+        });
+    }
+
+    // {{ explore table="reduced" label="Reduced tiers" /}} -- emit the data
+    // explorer container with a `datasets` manifest built from this page's
+    // exported files. Client-side explore.js registers the parquet as a DuckDB
+    // view and offers a SQL playground over it.
+    {
+        let c = ctx.clone();
+        shortcodes.register("explore", move |args: &ShortcodeArgs| {
+            if !c.explore_datasets.is_empty() {
+                render_explore_multi(&c.explore_datasets)
+            } else {
+                let table = args.get_str("table").unwrap_or("data");
+                let label = args.get_str("label").unwrap_or(table);
+                render_explore(&c.datafiles, table, label)
+            }
         });
     }
 
@@ -477,6 +528,7 @@ fn render_chart(
     registry: &BTreeMap<String, String>,
     captions: &BTreeMap<String, String>,
     default_range: Option<&str>,
+    explore_url: Option<&str>,
 ) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
@@ -525,13 +577,20 @@ fn render_chart(
         _ => String::new(),
     };
 
+    let explore_url_attr = match explore_url {
+        Some(u) if !u.is_empty() => {
+            format!(" data-explore-url=\"{}\"", html_escape(u))
+        }
+        _ => String::new(),
+    };
+
     format!(
-        "<div class=\"chart-container\" id=\"chart\"{}>\
+        "<div class=\"chart-container\" id=\"chart\"{}{}>\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
          {}\
          {}\
          </div>",
-        default_range_attr, json, registry_block, captions_block
+        default_range_attr, explore_url_attr, json, registry_block, captions_block
     )
 }
 
@@ -597,6 +656,77 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
     format!(
         "<div id=\"log-viewer\">\
          <script type=\"application/json\" class=\"log-data\">{}</script>\
+         </div>",
+        json
+    )
+}
+
+/// Render the data explorer container with a `datasets` manifest.
+///
+/// Emits a `<div id="explore">` carrying a `<script class="datasets">` JSON
+/// block. The manifest is a single dataset (Stage 0) listing this page's
+/// exported parquet files. Client-side explore.js registers them as a DuckDB
+/// view named `table` and offers a SQL playground. The `url` field carries the
+/// relative parquet URL (the `file` of each ExportedFile), matching the key
+/// explore.js reads.
+fn render_explore(datafiles: &[ExportedFile], table: &str, label: &str) -> String {
+    let files_json: Vec<serde_json::Value> = datafiles
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "url": f.file,
+                "captures": f.captures,
+                "start_time": f.start_time,
+                "end_time": f.end_time,
+            })
+        })
+        .collect();
+
+    let datasets = serde_json::json!([{
+        "table": table,
+        "label": label,
+        "files": files_json,
+    }]);
+    wrap_explore(datasets)
+}
+
+/// Render the data explorer container with a multi-dataset `datasets` manifest
+/// resolved from `SiteConfig.explore`. Each dataset carries its file list and
+/// the export stage's unioned column names so the explorer can show the schema
+/// up front without a DESCRIBE round-trip.
+fn render_explore_multi(datasets: &[ResolvedExploreDataset]) -> String {
+    let arr: Vec<serde_json::Value> = datasets
+        .iter()
+        .map(|d| {
+            let files_json: Vec<serde_json::Value> = d
+                .files
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "url": f.file,
+                        "captures": f.captures,
+                        "start_time": f.start_time,
+                        "end_time": f.end_time,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "table": d.table,
+                "label": d.label,
+                "files": files_json,
+                "columns": d.columns,
+            })
+        })
+        .collect();
+    wrap_explore(serde_json::Value::Array(arr))
+}
+
+/// Wrap a `datasets` JSON value in the explorer container markup.
+fn wrap_explore(datasets: serde_json::Value) -> String {
+    let json = serde_json::to_string(&datasets).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "<div id=\"explore\">\
+         <script type=\"application/json\" class=\"datasets\">{}</script>\
          </div>",
         json
     )
@@ -1346,6 +1476,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1357,8 +1489,76 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None);
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None, None);
         assert!(html.contains("No data files"));
+    }
+
+    #[test]
+    fn test_render_explore_emits_datasets_manifest() {
+        let files = vec![ExportedFile {
+            path: "/reduced/Temp.series".to_string(),
+            file: "/noyo/data/Temp/res=1h.parquet".to_string(),
+            captures: vec!["Temp".to_string(), "res=1h".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_explore(&files, "reduced", "Reduced tiers");
+        assert!(html.contains("id=\"explore\""), "explore container: {html}");
+        assert!(
+            html.contains("class=\"datasets\""),
+            "datasets manifest script: {html}"
+        );
+        // The url field carries the ExportedFile.file value (what explore.js reads).
+        assert!(html.contains("/noyo/data/Temp/res=1h.parquet"));
+        assert!(html.contains("\"table\":\"reduced\""));
+        assert!(html.contains("\"label\":\"Reduced tiers\""));
+        // start/end times are carried through for lazy fetch.
+        assert!(html.contains("\"start_time\":100"));
+        assert!(html.contains("\"end_time\":200"));
+    }
+
+    #[test]
+    fn test_render_explore_empty_files() {
+        let html = render_explore(&[], "data", "Data");
+        // Still emits a valid (empty) manifest so explore.js shows its own state.
+        assert!(html.contains("class=\"datasets\""));
+        assert!(html.contains("\"files\":[]"));
+    }
+
+    #[test]
+    fn test_render_explore_multi_emits_all_datasets_with_columns() {
+        let mk = |file: &str| ExportedFile {
+            path: "p".to_string(),
+            file: file.to_string(),
+            captures: vec![],
+            temporal: BTreeMap::new(),
+            start_time: 0,
+            end_time: 0,
+        };
+        let datasets = vec![
+            ResolvedExploreDataset {
+                table: "reduced".to_string(),
+                label: "Reduced".to_string(),
+                files: vec![mk("/d/reduced.parquet")],
+                columns: vec!["timestamp".to_string(), "value".to_string()],
+            },
+            ResolvedExploreDataset {
+                table: "combined".to_string(),
+                label: "Combined".to_string(),
+                files: vec![mk("/d/combined.parquet")],
+                columns: vec!["timestamp".to_string()],
+            },
+        ];
+        let html = render_explore_multi(&datasets);
+        assert!(html.contains("id=\"explore\""), "container: {html}");
+        // Both datasets present.
+        assert!(html.contains("\"table\":\"reduced\""));
+        assert!(html.contains("\"table\":\"combined\""));
+        assert!(html.contains("/d/reduced.parquet"));
+        assert!(html.contains("/d/combined.parquet"));
+        // Columns carried in the manifest for the up-front schema display.
+        assert!(html.contains("\"columns\":[\"timestamp\",\"value\"]"));
     }
 
     #[test]
@@ -1371,7 +1571,7 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None);
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None, None);
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
         // Empty registry -> no chart-registry script element.
@@ -1390,8 +1590,30 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"));
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"), None);
         assert!(html.contains("data-default-range=\"1M\""));
+        // No explore url configured -> no cross-link attribute.
+        assert!(!html.contains("data-explore-url"));
+    }
+
+    #[test]
+    fn test_render_chart_with_explore_url() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_chart(
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            Some("/explore/"),
+        );
+        assert!(html.contains("data-explore-url=\"/explore/\""));
     }
 
     #[test]
@@ -1408,7 +1630,7 @@ mod tests {
             ("committed.txn_ids".to_string(), "counter".to_string()),
             ("size.bytes".to_string(), "updowncounter".to_string()),
         ]);
-        let html = render_chart(&files, &registry, &BTreeMap::new(), None);
+        let html = render_chart(&files, &registry, &BTreeMap::new(), None, None);
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
@@ -1447,6 +1669,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1520,6 +1744,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1609,6 +1835,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1753,6 +1981,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1815,6 +2045,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1895,6 +2127,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1968,6 +2202,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -2062,6 +2298,8 @@ mod tests {
             generated_at: String::new(),
             default_range: None,
             labels: BTreeMap::new(),
+            explore_datasets: vec![],
+            explore_url: None,
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");

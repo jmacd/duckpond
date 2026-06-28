@@ -4,13 +4,16 @@
 
 // DuckPond sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
-// renders time-series line charts with Observable Plot.
+// renders time-series line charts with Vega-Lite.
 // Supports duration buttons (12h … 7d) and click-drag brush-to-zoom.
 //
 // LAZY LOADING: Parquet files are fetched on demand — only the files needed
 // for the current resolution and visible time window are loaded. Each
 // resolution tier is designed so that a typical screen view spans at most
 // one partition boundary, meaning at most 2 files are fetched per render.
+
+import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
+import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -64,7 +67,7 @@
   // IEC byte formatter for `<param>.bytes` y-axes.  Picks the largest
   // unit whose magnitude keeps the displayed value below 1024 and uses
   // up to one fractional digit.  `null`/`NaN` render as the empty
-  // string so Plot's tickFormat doesn't blow up on missing data.
+  // string so the hover tooltip doesn't blow up on missing data.
   function formatBytes(v) {
     if (v == null || !isFinite(v)) return "";
     const sign = v < 0 ? "-" : "";
@@ -240,7 +243,22 @@
   downloadBtn.textContent = "Download CSV";
   downloadBtn.disabled = true;
 
+  // "Explore this data" cross-link — only when sitegen emitted an explorer URL
+  // (data-explore-url) on the chart container. Hands the current view's
+  // overlapping files + time window to the explorer so the user can query
+  // exactly what the chart shows, then edit the SQL freely.
+  const exploreUrl = container.dataset.exploreUrl || "";
+  let exploreBtn = null;
+  if (exploreUrl) {
+    exploreBtn = document.createElement("button");
+    exploreBtn.type = "button";
+    exploreBtn.className = "explore-data";
+    exploreBtn.textContent = "Explore this data";
+    exploreBtn.disabled = true;
+  }
+
   windowBar.append(winLabel, startInput, arrow, endInput, copyBtn, downloadBtn);
+  if (exploreBtn) windowBar.append(exploreBtn);
   toolbar.after(windowBar);
 
   function pad2(n) { return String(n).padStart(2, "0"); }
@@ -301,30 +319,11 @@
   // Serialize the queried rows to CSV: a `timestamp` column (ISO 8601 / UTC)
   // followed by every non-partition data column, sorted for stable output.
   function buildCsv(rows) {
-    if (!rows || !rows.length) return "";
-    const cols = new Set();
-    for (const r of rows) {
-      for (const k of Object.keys(r)) {
-        if (k === "timestamp" || PARTITION_COLS.has(k)) continue;
-        cols.add(k);
-      }
-    }
-    const valueCols = Array.from(cols).sort();
-    const header = ["timestamp", ...valueCols];
-    const esc = (s) => {
-      const str = String(s);
-      return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-    };
-    const lines = [header.map(esc).join(",")];
-    for (const r of rows) {
-      const cells = [toDate(r.timestamp).toISOString()];
-      for (const c of valueCols) {
-        const v = r[c];
-        cells.push(v == null ? "" : (typeof v === "bigint" ? v.toString() : String(v)));
-      }
-      lines.push(cells.map(esc).join(","));
-    }
-    return lines.join("\n");
+    return rowsToCsv(rows, {
+      timestampCol: "timestamp",
+      excludeCols: [...PARTITION_COLS],
+      timestampToIso: (v) => toDate(v).toISOString(),
+    });
   }
 
   downloadBtn.addEventListener("click", () => {
@@ -342,6 +341,71 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
+
+  // Build the data-less Vega-Lite spec handed to the explorer when the user
+  // clicks "Explore this data": fold the per-metric avg columns into one line
+  // series each over a temporal x axis. The explorer injects its own query
+  // result as the data, so this mirrors the shape of vega-shared's
+  // `buildLineSpec` (which the explorer's "Reset to auto" reproduces).
+  function buildExploreSpec(avgCols) {
+    const cols = avgCols.map(escapeField);
+    const multi = cols.length > 1;
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      height: 340,
+      transform: multi ? [{ fold: cols, as: ["series", "value"] }] : [],
+      mark: { type: "line", clip: true, tooltip: true },
+      encoding: {
+        x: { field: "timestamp", type: "temporal", title: "timestamp" },
+        y: multi
+          ? { field: "value", type: "quantitative" }
+          : { field: cols[0], type: "quantitative", title: avgCols[0] },
+        ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
+      },
+    };
+  }
+
+  if (exploreBtn) {
+    exploreBtn.addEventListener("click", () => {
+      if (curBegin == null || curEnd == null) return;
+      const begin = Math.round(curBegin);
+      const end = Math.round(curEnd);
+      // The exact files backing the current view, as absolute URLs so the
+      // explorer (served from a different path) can fetch them unchanged.
+      const urls = overlappingEntries(begin, end)
+        .map(e => new URL(e.url, location.href).href)
+        .filter(Boolean);
+      if (urls.length === 0) return;
+      // The explorer registers the handed files as a view named `chart_data`;
+      // this query reproduces the chart's window byte-for-byte, then the user
+      // can edit it freely.
+      const sql =
+        `SELECT * FROM chart_data ` +
+        `WHERE epoch_ms(timestamp) BETWEEN ${begin} AND ${end} ` +
+        `ORDER BY timestamp`;
+      const label = (document.title || "Chart data").trim() || "Chart data";
+      const params = new URLSearchParams();
+      params.set("label", label);
+      params.set("files", urls.join(","));
+      params.set("sql", sql);
+      // Hand the explorer a clean default visualization: one avg line per metric
+      // (matching this page's chart, minus the min/max bands) so "Explore this
+      // data" opens straight into chart view instead of the raw query grid. The
+      // user can still edit the SQL/spec or switch to the table. Field names are
+      // dot-escaped because the temporal-reduce columns (`do.avg` etc.) contain
+      // dots, which Vega-Lite would otherwise read as nested-object access.
+      const avgCols = [];
+      for (const series of groupColumns(lastData).values()) {
+        for (const s of series) if (s.avg) avgCols.push(s.avg);
+      }
+      if (avgCols.length) {
+        params.set("view", "chart");
+        params.set("spec", JSON.stringify(buildExploreSpec(avgCols)));
+      }
+      location.assign(`${exploreUrl}#${params.toString()}`);
+    });
+  }
 
   // If the page opened with a shared (custom) range, reflect that state:
   // no duration button is active and Reset is available.
@@ -400,16 +464,7 @@
 
   let db, conn;
   try {
-    const duckdb = await import(/* @vite-ignore */ "./vendor/duckdb-browser.mjs");
-    const bundle = {
-      mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
-      mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
-    };
-    const worker = new Worker(bundle.mainWorker);
-    const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
-    db = new duckdb.AsyncDuckDB(logger, worker);
-    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-    conn = await db.connect();
+    ({ db, conn } = await initDuckdb());
   } catch (e) {
     container.innerHTML = `<div class="empty-state">DuckDB-WASM failed to load: ${e.message}</div>`;
     return;
@@ -428,28 +483,8 @@
     return;
   }
 
-  // Cache: file URL → DuckDB registered name (populated lazily)
-  const registeredNames = new Map();
-  let fileIdx = 0;
-
-  // Fetch a single parquet file, register it with DuckDB, return its name.
-  // Returns null if the fetch fails. Results are cached.
-  async function ensureFile(url) {
-    if (registeredNames.has(url)) return registeredNames.get(url);
-    const duckdbName = `f${fileIdx++}.parquet`;
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-      const buf = await resp.arrayBuffer();
-      await db.registerFileBuffer(duckdbName, new Uint8Array(buf));
-      registeredNames.set(url, duckdbName);
-      return duckdbName;
-    } catch (e) {
-      console.error("chart.js: failed to load parquet file", url, e);
-      registeredNames.set(url, null); // cache failure to avoid retries
-      return null;
-    }
-  }
+  // Cache: file URL → DuckDB registered name (populated lazily by ensureFile)
+  const { ensureFile } = createFileRegistry(db);
 
   // ── Resolution detection ────────────────────────────────────────────────
   //
@@ -542,17 +577,24 @@
   // For monitoring: the time axis always extends to now.
   const nowMs = Date.now();
 
+  // Resolve the files overlapping a window at the auto-picked resolution.
+  // Shared by queryData (which fetches them) and the "Explore this data"
+  // cross-link (which hands their URLs to the explorer) so both see exactly
+  // the same file set for a given window.
+  function overlappingEntries(beginMs, endMs) {
+    const res = pickResolution(beginMs, endMs);
+    const entries = byResolution.get(res) || [];
+    return entries.filter(f =>
+      f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
+    );
+  }
+
   // Query data for a time window [beginMs, endMs].
   // Resolution is chosen automatically based on window width.
   // Only the parquet files that overlap the window are fetched (lazy).
   async function queryData(beginMs, endMs) {
-    const res = pickResolution(beginMs, endMs);
-    const entries = byResolution.get(res) || [];
-
     // Filter to files whose time range overlaps the query window.
-    const overlapping = entries.filter(f =>
-      f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
-    );
+    const overlapping = overlappingEntries(beginMs, endMs);
 
     // Lazily fetch only the overlapping files (parallel).
     const loaded = await Promise.all(overlapping.map(f => ensureFile(f.url)));
@@ -575,7 +617,15 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  const Plot = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs").then(m => m.Plot);
+  // Resolve the page theme's foreground and a faint grid color from CSS custom
+  // properties so the Vega charts match the surrounding light/dark styling
+  // (Vega cannot read CSS variables itself, so we pass resolved colors in).
+  function resolveTheme() {
+    const cs = getComputedStyle(document.body);
+    const fg = (cs.getPropertyValue("--fg") || "").trim() || "#333333";
+    return { fg, grid: "rgba(128,128,128,0.2)" };
+  }
+  const chartTheme = resolveTheme();
 
   function toDate(v) {
     return typeof v === "bigint" ? new Date(Number(v / 1000000n)) : new Date(v);
@@ -700,7 +750,7 @@
   // ── Brush-to-zoom ─────────────────────────────────────────────────────────
 
   // Attach a brush overlay to a chart wrapper.  The overlay sits on top of
-  // the Plot SVG and translates pixel drag → time domain → re-render.
+  // the chart SVG and translates pixel drag → time domain → re-render.
   //
   // `domainBegin` / `domainEnd` are epoch-ms values that correspond to the
   // left/right edges of the plot area (the SVG viewBox minus margins).
@@ -862,6 +912,7 @@
     // Keep the raw rows for CSV export; disable the button when empty.
     lastData = data;
     downloadBtn.disabled = data.length === 0;
+    if (exploreBtn) exploreBtn.disabled = data.length === 0;
 
     container.innerHTML = "";
 
@@ -871,10 +922,6 @@
     }
 
     const charts = groupColumns(data);
-
-    const width = container.clientWidth - 32;
-    const marginLeft = 60;
-    const plotAreaWidth = width - marginLeft - 20; // 20 = right margin
 
     // In full-screen mode the chart fills the viewport: split the available
     // height across however many charts the page renders. Otherwise the chart
@@ -899,38 +946,6 @@
       }
       const plotData = isCounter ? computeCounterRates(data, allCols) : data;
 
-      const marks = [];
-      series.forEach((s, i) => {
-        const color = palette[i % palette.length];
-        const label = legendLabel(s.base);
-
-        if (s.min && s.max) {
-          marks.push(
-            Plot.areaY(plotData, {
-              x: d => toDate(d.timestamp),
-              y1: d => d[s.min] != null ? Number(d[s.min]) : NaN,
-              y2: d => d[s.max] != null ? Number(d[s.max]) : NaN,
-              defined: d => d[s.min] != null && d[s.max] != null,
-              fill: color,
-              fillOpacity: 0.15,
-            })
-          );
-        }
-
-        if (s.avg) {
-          marks.push(
-            Plot.line(plotData, {
-              x: d => toDate(d.timestamp),
-              y: d => d[s.avg] != null ? Number(d[s.avg]) : NaN,
-              defined: d => d[s.avg] != null,
-              stroke: color,
-              strokeWidth: 1.5,
-              title: () => label,
-            })
-          );
-        }
-      });
-
       const keyParts = chartKey.split(".");
       const title = keyParts.length >= 2
         ? `${keyParts[0].charAt(0).toUpperCase() + keyParts[0].slice(1)} (${keyParts[1]})`
@@ -952,11 +967,6 @@
       const unit = keyParts[keyParts.length - 1] || "";
       const isBytes = unit === "bytes";
       const yLabel = isCounter ? `${unit}/s` : unit;
-      // Humanize byte y-axes for both raw values (`bytes`) and rates
-      // (`bytes/s`) so users see KiB / MiB instead of "0,000,000".
-      const yTickFormat = isBytes
-        ? (isCounter ? (v) => `${formatBytes(v)}/s` : formatBytes)
-        : undefined;
 
       // Value formatter for the hover tooltip: humanize bytes, otherwise show a
       // sensible number of significant digits followed by the unit label.
@@ -976,29 +986,37 @@
         return yLabel ? `${s} ${yLabel}` : s;
       };
 
-      const plot = Plot.plot({
-        width,
+      // Build the Vega-Lite spec for this chart and project the rows to plain
+      // Vega values: timestamp -> epoch-ms number, each series column -> Number
+      // or null (null cells become path breaks via the spec's `invalid: null`).
+      const colorFor = (i) => palette[i % palette.length];
+      const spec = buildMetricChartSpec({
+        series: series.map((s, i) => ({
+          avg: s.avg, min: s.min, max: s.max, color: colorFor(i),
+        })),
+        xDomain: [domainBegin, domainEnd],
+        yLabel,
         height: chartHeight,
-        marginLeft,
-        style: { background: "transparent", color: "var(--fg)" },
-        x: {
-          type: "time",
-          label: "Date",
-          grid: true,
-          domain: [domainBegin, domainEnd],
-        },
-        y: {
-          label: yLabel,
-          grid: true,
-          ...(yTickFormat ? { tickFormat: yTickFormat } : {}),
-        },
-        marks,
+        byteAxis: isBytes,
+        theme: chartTheme,
       });
+
+      const values = plotData.map((d) => {
+        const o = { timestamp: +toDate(d.timestamp) };
+        for (const c of allCols) {
+          const v = d[c];
+          o[c] = v == null ? null : Number(v);
+        }
+        return o;
+      });
+
+      const plotDiv = document.createElement("div");
+      plotDiv.className = "chart-plot";
 
       const wrapper = document.createElement("div");
       wrapper.className = "chart";
       wrapper.appendChild(header);
-      wrapper.appendChild(plot);
+      wrapper.appendChild(plotDiv);
 
       // Caption (textContent only -- never innerHTML -- to avoid
       // injection via config-supplied strings).
@@ -1012,10 +1030,29 @@
 
       container.appendChild(wrapper);
 
+      const embed = await loadVega();
+      let view = null;
+      try {
+        const res = await embed(
+          plotDiv,
+          { ...spec, data: { values } },
+          { actions: false, renderer: "svg" }
+        );
+        view = res.view;
+      } catch (e) {
+        plotDiv.innerHTML =
+          '<div class="empty-state">Chart render failed: ' +
+          String((e && e.message) || e) + "</div>";
+        continue;
+      }
+
       // Attach brush-to-zoom on the rendered SVG, plus a hover crosshair that
-      // reports each series' value at the pointed-to sample.
+      // reports each series' value at the pointed-to sample. The brush/hover
+      // overlay is library-agnostic DOM positioned from the Vega view geometry:
+      // `origin()[0]` is the data-rect left (y-axis gutter), `width()` the inner
+      // plot width.
       const hoverSeries = series
-        .map((s, i) => ({ col: s.avg, color: palette[i % palette.length], label: legendLabel(s.base) }))
+        .map((s, i) => ({ col: s.avg, color: colorFor(i), label: legendLabel(s.base) }))
         .filter(h => h.col);
       const hover = {
         rows: plotData,
@@ -1023,7 +1060,7 @@
         series: hoverSeries,
         fmt: fmtVal,
       };
-      attachBrush(wrapper, plot, domainBegin, domainEnd, marginLeft, plotAreaWidth, hover);
+      attachBrush(wrapper, plotDiv, domainBegin, domainEnd, view.origin()[0], view.width(), hover);
     }
   }
 

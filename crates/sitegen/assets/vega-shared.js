@@ -1,0 +1,346 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// DuckPond sitegen -- vega-shared.js
+//
+// Shared Vega-Lite rendering helpers used by the explorer (explore.js) and,
+// in a later stage, the chart pages (chart.js). Centralizing the lazy vendor
+// import, encoding inference, spec construction, and row sanitization keeps the
+// two render paths from diverging.
+
+let vegaEmbedFn = null;
+
+// Escape a data column name for use as a Vega-Lite field reference. Vega-Lite
+// interprets an unescaped `.` as nested-object access, so a flat column whose
+// name contains a dot -- e.g. the temporal-reduce `do.avg` / `committed.txn_ids.max`
+// columns -- must have its dots backslash-escaped or the encoding silently
+// resolves to undefined and the mark renders nothing. Brackets are escaped for
+// the same reason. Always pass column names through this before placing them in
+// a spec's `field`/`fold`; keep the raw name for human-facing `title` text.
+export function escapeField(name) {
+  return String(name).replace(/([.[\]])/g, "\\$1");
+}
+
+// Lazily import the vendored vega-embed bundle, resolved relative to this
+// module so any asset that imports it picks up the same vendor copy. The bundle
+// is large, so callers should invoke this only when a chart is first shown.
+export async function loadVega() {
+  if (vegaEmbedFn) return vegaEmbedFn;
+  const mod = await import(
+    /* @vite-ignore */ new URL("./vendor/vega-bundle.mjs", import.meta.url).href
+  );
+  vegaEmbedFn = mod.vegaEmbed;
+  return vegaEmbedFn;
+}
+
+// Detect whether a column is temporal / quantitative / nominal by sampling its
+// first non-null value across the materialized rows.
+export function detectKind(field, rows) {
+  for (const r of rows) {
+    const v = r[field];
+    if (v == null) continue;
+    if (v instanceof Date) return "temporal";
+    if (typeof v === "number" || typeof v === "bigint") return "quantitative";
+    return "nominal";
+  }
+  return "nominal";
+}
+
+// Choose an x column (first temporal, else first column) and the numeric y
+// columns (all quantitative columns except x).
+export function inferEncoding(fields, rows) {
+  const kinds = {};
+  for (const f of fields) kinds[f] = detectKind(f, rows);
+  let xCol = fields.find((f) => kinds[f] === "temporal");
+  if (!xCol) xCol = fields[0];
+  const yCols = fields.filter((f) => f !== xCol && kinds[f] === "quantitative");
+  return { xCol, xKind: kinds[xCol], yCols };
+}
+
+// Build a data-less Vega-Lite line-chart spec from result fields/rows. The data
+// is injected by the caller at render time so the same spec can be reused as the
+// query result changes and edited independently of the data. Returns
+// `{ spec }` on success or `{ error }` when there is nothing chartable.
+export function buildLineSpec(fields, rows, opts = {}) {
+  if (!rows || !rows.length || !fields || !fields.length) {
+    return { error: "Run a query to chart its result." };
+  }
+  const { xCol, xKind, yCols } = inferEncoding(fields, rows);
+  if (!yCols.length) {
+    return {
+      error:
+        "No numeric column to plot. The chart view needs at least one numeric column.",
+    };
+  }
+  const multi = yCols.length > 1;
+  const spec = {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height: opts.height || 340,
+    transform: multi ? [{ fold: yCols.map(escapeField), as: ["series", "value"] }] : [],
+    mark: { type: "line", clip: true, tooltip: true },
+    encoding: {
+      x: {
+        field: escapeField(xCol),
+        type: xKind === "temporal" ? "temporal" : "quantitative",
+        title: xCol,
+      },
+      y: multi
+        ? { field: "value", type: "quantitative" }
+        : { field: escapeField(yCols[0]), type: "quantitative", title: yCols[0] },
+      ...(multi ? { color: { field: "series", type: "nominal", title: null } } : {}),
+    },
+    // Interval selection bound to scales gives pan + zoom out of the box --
+    // brush-zoom parity with the Observable Plot chart path.
+    params: [{ name: "grid", select: "interval", bind: "scales" }],
+  };
+  return { spec };
+}
+
+// Build a data-less multi-series metric spec for the chart pages: each series
+// draws an optional avg/min/max area band plus an avg line in a fixed palette
+// color, sharing one y scale. `xDomain` pins the temporal axis to the queried
+// window (epoch-ms numbers); `invalid: null` keeps null cells as path breaks so
+// gaps in the data show as gaps (matching the Observable Plot `defined` path).
+// Byte axes use SI-suffixed tick labels (`~s`); the exact KiB/MiB formatting is
+// applied by the DOM hover tooltip, not the axis.
+export function buildMetricChartSpec(opts) {
+  const {
+    series,
+    xField = "timestamp",
+    xDomain,
+    yLabel,
+    height = 300,
+    byteAxis = false,
+    theme,
+  } = opts;
+  const yAxis = { grid: true, title: yLabel || null };
+  if (byteAxis) yAxis.format = "~s";
+  const layers = [];
+  let yAssigned = false;
+  for (const s of series) {
+    if (s.min && s.max) {
+      layers.push({
+        mark: { type: "area", color: s.color, opacity: 0.15, clip: true, invalid: null },
+        encoding: {
+          y: { field: escapeField(s.min), type: "quantitative", axis: yAssigned ? null : yAxis },
+          y2: { field: escapeField(s.max) },
+        },
+      });
+      yAssigned = true;
+    }
+    if (s.avg) {
+      layers.push({
+        mark: { type: "line", color: s.color, strokeWidth: 1.5, clip: true, invalid: null },
+        encoding: {
+          y: { field: escapeField(s.avg), type: "quantitative", axis: yAssigned ? null : yAxis },
+        },
+      });
+      yAssigned = true;
+    }
+  }
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: {
+        field: xField,
+        type: "temporal",
+        title: "Date",
+        scale: { domain: xDomain },
+        axis: { grid: true },
+      },
+    },
+    layer: layers,
+  };
+}
+
+// Build a data-less overview-timeline spec carrying an `interval` selection on
+// the x (time) axis, used by the overlay analysis page to pick a date range.
+// Each row draws a vertical stem (`yTopField` -> `yField`, identity color) plus
+// a filled dot at `yTopField`; the selection's extent drives the analysis
+// charts. `yDomain` pins the depth axis. Callers read the `brush` signal off the
+// returned view on pointer release (the selection is otherwise continuous).
+export function buildBrushOverviewSpec(opts) {
+  const {
+    xField = "timestamp",
+    yField = "min_depth",
+    yTopField = "y_top",
+    colorField = "color",
+    yTitle = "Depth (m)",
+    yDomain,
+    height = 160,
+    theme,
+  } = opts;
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: { field: xField, type: "temporal", title: null, axis: { grid: false } },
+    },
+    layer: [
+      {
+        // The interval selection lives on a single layer unit; placing it at the
+        // top of a layered spec makes Vega-Lite emit duplicate `brush_x` signals.
+        params: [{ name: "brush", select: { type: "interval", encodings: ["x"] } }],
+        mark: { type: "rule", strokeWidth: 1, opacity: 0.4 },
+        encoding: {
+          y: {
+            field: yTopField,
+            type: "quantitative",
+            title: yTitle,
+            axis: { grid: true },
+            ...domainScale(yDomain),
+          },
+          y2: { field: yField },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+      {
+        transform: [{ filter: "isValid(datum.static_depth)" }],
+        mark: { type: "point", filled: true, size: 8, opacity: 0.7 },
+        encoding: {
+          y: { field: "static_depth", type: "quantitative" },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+    ],
+  };
+}
+
+// Coerce rows to Vega-friendly plain objects: BigInt -> Number, keep Date. All
+// fields are included so a hand-edited spec can reference any result column.
+export function sanitizeRows(fields, rows) {
+  return rows.map((r) => {
+    const o = {};
+    for (const c of fields) {
+      const v = r[c];
+      o[c] = typeof v === "bigint" ? Number(v) : v;
+    }
+    return o;
+  });
+}
+
+// Common chart config that keeps the SVG transparent and pulls axis/grid colors
+// from the surrounding theme, so a migrated chart matches the page's light/dark
+// styling (the Observable Plot path read `var(--fg)`; Vega cannot resolve CSS
+// variables itself, so callers resolve them and pass the colors in via `theme`).
+function themeConfig(theme) {
+  const fg = (theme && theme.fg) || "#333333";
+  const grid = (theme && theme.grid) || "rgba(128,128,128,0.2)";
+  return {
+    background: "transparent",
+    view: { stroke: null },
+    axis: {
+      labelColor: fg,
+      titleColor: fg,
+      domainColor: fg,
+      tickColor: fg,
+      gridColor: grid,
+    },
+  };
+}
+
+// Optional scale clause from an explicit [min, max] domain; returns `{}` when no
+// domain is given so the spec relies on Vega's automatic extent.
+function domainScale(domain) {
+  return domain ? { scale: { domain } } : {};
+}
+
+// Build a data-less multi-line spec where each line is one group (`detailField`,
+// e.g. a pump-event id) drawn in a literal per-row color (`colorField` holds CSS
+// color strings; `scale: null` makes Vega use them verbatim, matching Observable
+// Plot's `color: { type: "identity" }`). Used by the overlay analysis charts.
+export function buildMultiLineSpec(opts) {
+  const {
+    xField,
+    yField,
+    detailField = "event",
+    colorField = "color",
+    xTitle,
+    yTitle,
+    xDomain,
+    yDomain,
+    height = 360,
+    strokeWidth = 0.8,
+    strokeOpacity = 0.4,
+    theme,
+  } = opts;
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    mark: { type: "line", strokeWidth, opacity: strokeOpacity, clip: true },
+    encoding: {
+      x: {
+        field: xField,
+        type: "quantitative",
+        title: xTitle,
+        axis: { grid: true },
+        ...domainScale(xDomain),
+      },
+      y: {
+        field: yField,
+        type: "quantitative",
+        title: yTitle,
+        axis: { grid: true },
+        ...domainScale(yDomain),
+      },
+      detail: { field: detailField, type: "nominal" },
+      color: { field: colorField, type: "nominal", scale: null, legend: null },
+    },
+  };
+}
+
+// Build a data-less layered spec: a faint connecting line plus filled points
+// colored per-row (`colorField`, identity colors as above) over a temporal x
+// axis. Mirrors the overlay summary charts (duty cycle, max drawdown, duration).
+export function buildDotLineSpec(opts) {
+  const {
+    xField = "timestamp",
+    yField,
+    xTitle = "Date",
+    yTitle,
+    yDomain,
+    height = 300,
+    lineColor = "#6b7280",
+    colorField = "color",
+    pointSize = 50,
+    theme,
+  } = opts;
+  const yEnc = {
+    field: yField,
+    type: "quantitative",
+    title: yTitle,
+    axis: { grid: true },
+    ...domainScale(yDomain),
+  };
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: { field: xField, type: "temporal", title: xTitle, axis: { grid: true } },
+    },
+    layer: [
+      {
+        mark: { type: "line", color: lineColor, strokeWidth: 1, opacity: 0.5 },
+        encoding: { y: yEnc },
+      },
+      {
+        mark: { type: "point", filled: true, size: pointSize },
+        encoding: {
+          y: { field: yField, type: "quantitative" },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+    ],
+  };
+}

@@ -5,13 +5,24 @@
 // DuckPond sitegen -- overlay.js
 // Interactive pump cycle analysis with coordinated brush+filter.
 //
-// Top: 4-year well-depth overview with D3 brush for time selection.
-// Below: analysis charts (overlay, Horner, drawdown, recovery, summary)
-// that re-render when the brush selection changes.
+// Top: 4-year well-depth overview with a Vega-Lite interval selection for
+// time-range selection. Below: analysis charts (overlay, Horner, drawdown,
+// recovery, summary) that re-render when the selection changes.
+//
+// All charts render with Vega-Lite via the shared vega module (the Stage 3
+// S3.3 migration -- Observable Plot and D3 are no longer used here).
 //
 // Data sources:
 //   pump-cycles: pump_event_id, month, elapsed_s, depth, static_depth, phase
 //   cycle-summary: pump_event_id, timestamp, month, draw_duration_s, ...
+
+import {
+  loadVega,
+  sanitizeRows,
+  buildMultiLineSpec,
+  buildDotLineSpec,
+  buildBrushOverviewSpec,
+} from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -117,9 +128,32 @@
     return;
   }
 
-  // -- Import Plot + D3 -------------------------------------------------------
+  // Resolve the page theme's foreground and a faint grid color from CSS custom
+  // properties so the Vega charts match the surrounding light/dark styling
+  // (Vega cannot read CSS variables itself; we pass resolved colors in).
+  function resolveTheme() {
+    const cs = getComputedStyle(document.body);
+    const fg = (cs.getPropertyValue("--fg") || "").trim() || "#333333";
+    return { fg, grid: "rgba(128,128,128,0.2)" };
+  }
+  const chartTheme = resolveTheme();
 
-  const { Plot, d3 } = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs");
+  // Render a data-less Vega-Lite spec into `targetEl` with the supplied rows
+  // injected as data. The wrapper is appended synchronously by the caller so
+  // chart order is preserved; this async embed fills it in when ready. Errors
+  // surface inline rather than throwing out of the (unawaited) render path.
+  async function embedVega(targetEl, spec, rows, fields) {
+    try {
+      const embed = await loadVega();
+      const renderSpec = { ...spec, data: { values: sanitizeRows(fields, rows) } };
+      await embed(targetEl, renderSpec, { actions: false, renderer: "svg" });
+    } catch (e) {
+      targetEl.innerHTML =
+        '<div class="empty-state">Chart render failed: ' +
+        String((e && e.message) || e) +
+        "</div>";
+    }
+  }
 
   // -- Constants ---------------------------------------------------------------
 
@@ -245,8 +279,6 @@
   // -- DOM layout -------------------------------------------------------------
 
   container.innerHTML = "";
-  const width = container.clientWidth - 32;
-  const marginLeft = 60;
 
   const overviewSection = document.createElement("div");
   overviewSection.className = "overview-section";
@@ -269,7 +301,7 @@
   for (const r of allPumpRows) allEventIds.add(r.event);
   for (const r of allSummaryRows) allEventIds.add(r.pump_event_id);
 
-  // -- Overview chart with D3 brush -------------------------------------------
+  // -- Overview chart with Vega interval selection ----------------------------
 
   // Month legend (always shows all 12 months)
   const legendDiv = document.createElement("div");
@@ -277,11 +309,8 @@
   legendDiv.innerHTML = buildMonthLegend([1,2,3,4,5,6,7,8,9,10,11,12]);
   overviewSection.appendChild(legendDiv);
 
-  let brushGroup = null;
-  let overviewX = null;
-  let overviewXAxis = null;
-  let overviewLines = null;
-  let overviewDots = null;
+  // The Vega view backing the overview; rebuilt when zooming into a selection.
+  let overviewView = null;
 
   if (allSummaryRows.length > 0) {
     const ovHeader = document.createElement("div");
@@ -300,137 +329,75 @@
       "cursor:pointer;border:1px solid #999;border-radius:4px;" +
       "background:var(--bg,#fff);color:var(--fg,#333)";
     resetBtn.addEventListener("click", function () {
-      overviewX.domain(xDomainFull);
-      updateOverviewView();
-      brushGroup.call(brush.move, null);
+      embedOverview(null);
       renderAnalysis(null);
     });
     overviewSection.appendChild(resetBtn);
 
-    const ovHeight = 160;
-    const margin = { top: 15, right: 20, bottom: 30, left: marginLeft };
+    const ovHolder = document.createElement("div");
+    ovHolder.className = "overlay-vega";
+    overviewSection.appendChild(ovHolder);
 
-    const xDomainFull = d3.extent(allSummaryRows, function (d) {
-      return d.timestamp;
+    // Project the summary rows once for the overview: a temporal timestamp
+    // (epoch-ms), the per-row month color used verbatim, and the stem top
+    // (static depth, falling back to the cycle's start depth).
+    const overviewRows = allSummaryRows.map(function (d) {
+      return {
+        timestamp: +d.timestamp,
+        min_depth: d.min_depth,
+        static_depth: d.static_depth,
+        y_top: d.static_depth != null ? d.static_depth : d.depth_at_start,
+        color: monthColor(d.month),
+      };
     });
-    overviewX = d3.scaleTime()
-      .domain(xDomainFull.slice())
-      .range([margin.left, width - margin.right]);
-    const x = overviewX;
 
-    const y = d3.scaleLinear()
-      .domain([34, 46])
-      .range([ovHeight - margin.bottom, margin.top]);
-
-    const svg = d3.select(overviewSection)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", ovHeight)
-      .style("background", "transparent");
-
-    // Clip path for zoomed view
-    svg.append("defs").append("clipPath")
-      .attr("id", "overview-clip")
-      .append("rect")
-      .attr("x", margin.left)
-      .attr("y", margin.top)
-      .attr("width", width - margin.left - margin.right)
-      .attr("height", ovHeight - margin.top - margin.bottom);
-
-    const chartArea = svg.append("g")
-      .attr("clip-path", "url(#overview-clip)");
-
-    // Vertical lines: static_depth to min_depth per cycle (pump envelope)
-    overviewLines = chartArea.selectAll(".range-line")
-      .data(allSummaryRows)
-      .join("line")
-      .attr("x1", function (d) { return x(d.timestamp); })
-      .attr("x2", function (d) { return x(d.timestamp); })
-      .attr("y1", function (d) {
-        return y(d.static_depth != null ? d.static_depth : d.depth_at_start);
-      })
-      .attr("y2", function (d) { return y(d.min_depth); })
-      .attr("stroke", function (d) { return monthColor(d.month); })
-      .attr("stroke-width", 1)
-      .attr("opacity", 0.4);
-
-    // Static depth dots (water table level)
-    overviewDots = chartArea.selectAll(".static-dot")
-      .data(allSummaryRows.filter(function (d) {
-        return d.static_depth != null;
-      }))
-      .join("circle")
-      .attr("cx", function (d) { return x(d.timestamp); })
-      .attr("cy", function (d) { return y(d.static_depth); })
-      .attr("r", 1.5)
-      .attr("fill", function (d) { return monthColor(d.month); })
-      .attr("opacity", 0.7);
-
-    // Axes
-    overviewXAxis = svg.append("g")
-      .attr("transform", "translate(0," + (ovHeight - margin.bottom) + ")")
-      .call(d3.axisBottom(x).ticks(width > 600 ? 10 : 5));
-
-    svg.append("g")
-      .attr("transform", "translate(" + margin.left + ",0)")
-      .call(d3.axisLeft(y).ticks(5));
-
-    svg.append("text")
-      .attr("transform", "rotate(-90)")
-      .attr("x", -(ovHeight / 2))
-      .attr("y", 14)
-      .attr("text-anchor", "middle")
-      .attr("fill", "var(--fg,#333)")
-      .attr("font-size", "12px")
-      .text("Depth (m)");
-
-    function updateOverviewView() {
-      overviewLines
-        .attr("x1", function (d) { return x(d.timestamp); })
-        .attr("x2", function (d) { return x(d.timestamp); });
-      overviewDots
-        .attr("cx", function (d) { return x(d.timestamp); });
-      overviewXAxis.call(d3.axisBottom(x).ticks(width > 600 ? 10 : 5));
+    // (Re)render the overview chart, optionally zoomed to an [t0, t1] epoch-ms
+    // window. Each embed replaces the holder's content, so the pointerup
+    // listener is attached once to the holder (below), not per embed.
+    async function embedOverview(domain) {
+      const spec = buildBrushOverviewSpec({
+        yDomain: [34, 46],
+        height: 160,
+        theme: chartTheme,
+      });
+      if (domain) spec.encoding.x.scale = { domain: domain };
+      try {
+        const embed = await loadVega();
+        if (overviewView) {
+          try { overviewView.finalize(); } catch (e) { /* already gone */ }
+          overviewView = null;
+        }
+        const res = await embed(
+          ovHolder,
+          { ...spec, data: { values: overviewRows } },
+          { actions: false, renderer: "svg" }
+        );
+        overviewView = res.view;
+      } catch (e) {
+        ovHolder.innerHTML =
+          '<div class="empty-state">Overview render failed: ' +
+          String((e && e.message) || e) + "</div>";
+      }
     }
 
-    // D3 brush
-    let debounceTimer = null;
-    let suppressBrushReset = false;
-    const brush = d3.brushX()
-      .extent([
-        [margin.left, margin.top],
-        [width - margin.right, ovHeight - margin.bottom],
-      ])
-      .on("end", function (event) {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        if (suppressBrushReset) {
-          suppressBrushReset = false;
-          return;
+    // The Vega interval selection updates continuously while dragging; act on
+    // release. Read the `brush` signal's x extent, drive the analysis charts,
+    // and re-render the overview zoomed into the selection (mirrors the old
+    // D3 brush-then-zoom behaviour). A plain click (empty selection) is a no-op.
+    let releaseTimer = null;
+    ovHolder.addEventListener("pointerup", function () {
+      if (releaseTimer) clearTimeout(releaseTimer);
+      releaseTimer = setTimeout(function () {
+        const sel = overviewView && overviewView.signal("brush");
+        const ext = sel && sel.timestamp;
+        if (ext && ext.length === 2 && ext[0] !== ext[1]) {
+          renderAnalysis([new Date(ext[0]), new Date(ext[1])]);
+          embedOverview([ext[0], ext[1]]);
         }
-        debounceTimer = setTimeout(function () {
-          if (!event.selection) {
-            renderAnalysis(null);
-            return;
-          }
-          const t0 = x.invert(event.selection[0]);
-          const t1 = x.invert(event.selection[1]);
+      }, 80);
+    });
 
-          // Zoom the overview to the selection
-          overviewX.domain([t0, t1]);
-          updateOverviewView();
-          suppressBrushReset = true;
-          brushGroup.call(brush.move, null);
-
-          renderAnalysis([t0, t1]);
-        }, 100);
-      });
-
-    brushGroup = svg.append("g").attr("class", "brush").call(brush);
-
-    svg.selectAll(".brush .selection")
-      .attr("fill", "steelblue")
-      .attr("fill-opacity", 0.15)
-      .attr("stroke", "steelblue");
+    await embedOverview(null);
   }
 
   // -- Chart render functions -------------------------------------------------
@@ -465,39 +432,26 @@
       '<p class="chart-subtitle">Each line starts at its pre-pump ' +
       "static water level. Seasonal variation visible in starting depth.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 400,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: {
-        label: "Elapsed time (minutes)",
-        domain: [-2, maxMin],
-        grid: true,
-      },
-      y: {
-        label: "Well depth (m)",
-        domain: [30, 45],
-        grid: true,
-      },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(rows, {
-          x: "elapsed_min",
-          y: "depth",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "depth",
+      xTitle: "Elapsed time (minutes)",
+      yTitle: "Well depth (m)",
+      xDomain: [-2, maxMin],
+      yDomain: [30, 45],
+      height: 400,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, rows, ["elapsed_min", "depth", "event", "color"]);
   }
 
   function computeDrawStats(rows) {
@@ -548,31 +502,29 @@
       "log\u2081\u2080((t\u209A + \u0394t') / \u0394t'). " +
       "Straight-line slope indicates transmissivity.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 400,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { label: "log\u2081\u2080(Horner time ratio)", grid: true },
-      y: { label: "Residual drawdown (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(hornerRows, {
-          x: "horner_time",
-          y: "residual_drawdown",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "horner_time",
+      yField: "residual_drawdown",
+      xTitle: "log\u2081\u2080(Horner time ratio)",
+      yTitle: "Residual drawdown (m)",
+      height: 400,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, hornerRows, [
+      "horner_time",
+      "residual_drawdown",
+      "event",
+      "color",
+    ]);
   }
 
   function renderDrawdownDetail(target, rows) {
@@ -592,37 +544,27 @@
       '<p class="chart-subtitle">Pump-on phase only. Seasonal variation ' +
       "in drawdown rate reflects aquifer recharge state.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 350,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: {
-        label: "Elapsed time (minutes)",
-        domain: [0, Math.min(60, arrayMax(drawOnly, function (r) {
-          return r.elapsed_min;
-        }))],
-        grid: true,
-      },
-      y: { label: "Drawdown (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(drawOnly, {
-          x: "elapsed_min",
-          y: "drawdown",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "drawdown",
+      xTitle: "Elapsed time (minutes)",
+      yTitle: "Drawdown (m)",
+      xDomain: [0, Math.min(60, arrayMax(drawOnly, function (r) {
+        return r.elapsed_min;
+      }))],
+      height: 350,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, drawOnly, ["elapsed_min", "drawdown", "event", "color"]);
   }
 
   function renderRecoveryDetail(target, rows, drawStats) {
@@ -650,129 +592,94 @@
       '<p class="chart-subtitle">Water level recovery after pump shutoff. ' +
       "Aligned at pump-off, showing meters recovered vs elapsed time.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 350,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { label: "Minutes since pump off", grid: true },
-      y: { label: "Recovery (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(recoveryRows, {
-          x: "elapsed_min",
-          y: "recovery",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "recovery",
+      xTitle: "Minutes since pump off",
+      yTitle: "Recovery (m)",
+      height: 350,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, recoveryRows, [
+      "elapsed_min",
+      "recovery",
+      "event",
+      "color",
+    ]);
   }
 
   function renderSummaryCharts(target, sRows) {
     if (sRows.length === 0) return;
 
+    // Append a time-series dot+line chart (filled points colored by month over a
+    // faint connecting line). Rows carry a per-row `color` so the points use the
+    // month palette via the spec's identity color scale.
+    function addDotLineChart(headerHtml, rows, yField, yTitle, yDomain) {
+      const header = document.createElement("div");
+      header.className = "overlay-header";
+      header.innerHTML = headerHtml;
+
+      const plot = document.createElement("div");
+      plot.className = "overlay-vega";
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "chart overlay-chart";
+      wrapper.appendChild(header);
+      wrapper.appendChild(plot);
+      target.appendChild(wrapper);
+
+      const colored = rows.map(function (d) {
+        return { timestamp: d.timestamp, color: monthColor(d.month), [yField]: d[yField] };
+      });
+      const spec = buildDotLineSpec({
+        yField: yField,
+        yTitle: yTitle,
+        yDomain: yDomain,
+        height: 300,
+        theme: chartTheme,
+      });
+      embedVega(plot, spec, colored, ["timestamp", yField, "color"]);
+    }
+
     // Duty cycle (draw_duration / inter_pump_interval)
-    const dutyRows = sRows.filter(function (d) { return d.duty_cycle != null; });
-    const dutyHeader = document.createElement("div");
-    dutyHeader.className = "overlay-header";
-    dutyHeader.innerHTML =
+    addDotLineChart(
       "<h3>Pump Duty Cycle</h3>" +
-      '<p class="chart-subtitle">Draw duration / time to next pump start. ' +
-      "Rising duty cycle indicates increasing demand or a leak.</p>";
-
-    const dutyPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Duty cycle (draw / interval)", domain: [0, 1], grid: true },
-      marks: [
-        Plot.dot(dutyRows, {
-          x: "timestamp", y: "duty_cycle",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(dutyRows, {
-          x: "timestamp", y: "duty_cycle",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const dutyW = document.createElement("div");
-    dutyW.className = "chart overlay-chart";
-    dutyW.appendChild(dutyHeader);
-    dutyW.appendChild(dutyPlot);
-    target.appendChild(dutyW);
+        '<p class="chart-subtitle">Draw duration / time to next pump start. ' +
+        "Rising duty cycle indicates increasing demand or a leak.</p>",
+      sRows.filter(function (d) { return d.duty_cycle != null; }),
+      "duty_cycle",
+      "Duty cycle (draw / interval)",
+      [0, 1]
+    );
 
     // Max drawdown
-    const ddHeader = document.createElement("div");
-    ddHeader.className = "overlay-header";
-    ddHeader.innerHTML =
+    addDotLineChart(
       "<h3>Maximum Drawdown per Cycle</h3>" +
-      '<p class="chart-subtitle">Peak drawdown reached during each pump ' +
-      "cycle. Deeper drawdown at same duty cycle suggests declining aquifer.</p>";
-
-    const ddPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Max drawdown (m)", grid: true },
-      marks: [
-        Plot.dot(sRows, {
-          x: "timestamp", y: "max_drawdown",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(sRows, {
-          x: "timestamp", y: "max_drawdown",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const ddW = document.createElement("div");
-    ddW.className = "chart overlay-chart";
-    ddW.appendChild(ddHeader);
-    ddW.appendChild(ddPlot);
-    target.appendChild(ddW);
+        '<p class="chart-subtitle">Peak drawdown reached during each pump ' +
+        "cycle. Deeper drawdown at same duty cycle suggests declining aquifer.</p>",
+      sRows,
+      "max_drawdown",
+      "Max drawdown (m)"
+    );
 
     // Pump duration
-    const durHeader = document.createElement("div");
-    durHeader.className = "overlay-header";
-    durHeader.innerHTML =
+    addDotLineChart(
       "<h3>Pump Duration per Cycle</h3>" +
-      '<p class="chart-subtitle">Minutes spent pumping per cycle. ' +
-      "Longer pump times at same consumption indicate reduced well yield.</p>";
-
-    const durPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Draw duration (min)", grid: true },
-      marks: [
-        Plot.dot(sRows, {
-          x: "timestamp", y: "draw_duration_min",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(sRows, {
-          x: "timestamp", y: "draw_duration_min",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const durW = document.createElement("div");
-    durW.className = "chart overlay-chart";
-    durW.appendChild(durHeader);
-    durW.appendChild(durPlot);
-    target.appendChild(durW);
+        '<p class="chart-subtitle">Minutes spent pumping per cycle. ' +
+        "Longer pump times at same consumption indicate reduced well yield.</p>",
+      sRows,
+      "draw_duration_min",
+      "Draw duration (min)"
+    );
   }
 
   // -- Coordinated render -----------------------------------------------------
