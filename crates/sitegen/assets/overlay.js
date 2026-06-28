@@ -9,9 +9,21 @@
 // Below: analysis charts (overlay, Horner, drawdown, recovery, summary)
 // that re-render when the brush selection changes.
 //
+// The overview chart uses raw D3 for its brush interaction; the analysis
+// charts below render with Vega-Lite via the shared vega module (the Stage 3
+// S3.3 migration -- D3 is still imported for the brush, Observable Plot is no
+// longer used here).
+//
 // Data sources:
 //   pump-cycles: pump_event_id, month, elapsed_s, depth, static_depth, phase
 //   cycle-summary: pump_event_id, timestamp, month, draw_duration_s, ...
+
+import {
+  loadVega,
+  sanitizeRows,
+  buildMultiLineSpec,
+  buildDotLineSpec,
+} from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -117,9 +129,36 @@
     return;
   }
 
-  // -- Import Plot + D3 -------------------------------------------------------
+  // -- Import D3 (for the brush overview) -------------------------------------
 
-  const { Plot, d3 } = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs");
+  const { d3 } = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs");
+
+  // Resolve the page theme's foreground and a faint grid color from CSS custom
+  // properties so the Vega charts match the surrounding light/dark styling
+  // (Vega cannot read CSS variables itself; we pass resolved colors in).
+  function resolveTheme() {
+    const cs = getComputedStyle(document.body);
+    const fg = (cs.getPropertyValue("--fg") || "").trim() || "#333333";
+    return { fg, grid: "rgba(128,128,128,0.2)" };
+  }
+  const chartTheme = resolveTheme();
+
+  // Render a data-less Vega-Lite spec into `targetEl` with the supplied rows
+  // injected as data. The wrapper is appended synchronously by the caller so
+  // chart order is preserved; this async embed fills it in when ready. Errors
+  // surface inline rather than throwing out of the (unawaited) render path.
+  async function embedVega(targetEl, spec, rows, fields) {
+    try {
+      const embed = await loadVega();
+      const renderSpec = { ...spec, data: { values: sanitizeRows(fields, rows) } };
+      await embed(targetEl, renderSpec, { actions: false, renderer: "svg" });
+    } catch (e) {
+      targetEl.innerHTML =
+        '<div class="empty-state">Chart render failed: ' +
+        String((e && e.message) || e) +
+        "</div>";
+    }
+  }
 
   // -- Constants ---------------------------------------------------------------
 
@@ -465,39 +504,26 @@
       '<p class="chart-subtitle">Each line starts at its pre-pump ' +
       "static water level. Seasonal variation visible in starting depth.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 400,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: {
-        label: "Elapsed time (minutes)",
-        domain: [-2, maxMin],
-        grid: true,
-      },
-      y: {
-        label: "Well depth (m)",
-        domain: [30, 45],
-        grid: true,
-      },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(rows, {
-          x: "elapsed_min",
-          y: "depth",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "depth",
+      xTitle: "Elapsed time (minutes)",
+      yTitle: "Well depth (m)",
+      xDomain: [-2, maxMin],
+      yDomain: [30, 45],
+      height: 400,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, rows, ["elapsed_min", "depth", "event", "color"]);
   }
 
   function computeDrawStats(rows) {
@@ -548,31 +574,29 @@
       "log\u2081\u2080((t\u209A + \u0394t') / \u0394t'). " +
       "Straight-line slope indicates transmissivity.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 400,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { label: "log\u2081\u2080(Horner time ratio)", grid: true },
-      y: { label: "Residual drawdown (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(hornerRows, {
-          x: "horner_time",
-          y: "residual_drawdown",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "horner_time",
+      yField: "residual_drawdown",
+      xTitle: "log\u2081\u2080(Horner time ratio)",
+      yTitle: "Residual drawdown (m)",
+      height: 400,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, hornerRows, [
+      "horner_time",
+      "residual_drawdown",
+      "event",
+      "color",
+    ]);
   }
 
   function renderDrawdownDetail(target, rows) {
@@ -592,37 +616,27 @@
       '<p class="chart-subtitle">Pump-on phase only. Seasonal variation ' +
       "in drawdown rate reflects aquifer recharge state.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 350,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: {
-        label: "Elapsed time (minutes)",
-        domain: [0, Math.min(60, arrayMax(drawOnly, function (r) {
-          return r.elapsed_min;
-        }))],
-        grid: true,
-      },
-      y: { label: "Drawdown (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(drawOnly, {
-          x: "elapsed_min",
-          y: "drawdown",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "drawdown",
+      xTitle: "Elapsed time (minutes)",
+      yTitle: "Drawdown (m)",
+      xDomain: [0, Math.min(60, arrayMax(drawOnly, function (r) {
+        return r.elapsed_min;
+      }))],
+      height: 350,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, drawOnly, ["elapsed_min", "drawdown", "event", "color"]);
   }
 
   function renderRecoveryDetail(target, rows, drawStats) {
@@ -650,129 +664,94 @@
       '<p class="chart-subtitle">Water level recovery after pump shutoff. ' +
       "Aligned at pump-off, showing meters recovered vs elapsed time.</p>";
 
-    const plot = Plot.plot({
-      width: width,
-      height: 350,
-      marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { label: "Minutes since pump off", grid: true },
-      y: { label: "Recovery (m)", grid: true },
-      color: { type: "identity" },
-      marks: [
-        Plot.line(recoveryRows, {
-          x: "elapsed_min",
-          y: "recovery",
-          z: "event",
-          stroke: "color",
-          strokeWidth: 0.8,
-          strokeOpacity: 0.4,
-        }),
-      ],
-    });
+    const plot = document.createElement("div");
+    plot.className = "overlay-vega";
 
     const wrapper = document.createElement("div");
     wrapper.className = "chart overlay-chart";
     wrapper.appendChild(header);
     wrapper.appendChild(plot);
     target.appendChild(wrapper);
+
+    const spec = buildMultiLineSpec({
+      xField: "elapsed_min",
+      yField: "recovery",
+      xTitle: "Minutes since pump off",
+      yTitle: "Recovery (m)",
+      height: 350,
+      theme: chartTheme,
+    });
+    embedVega(plot, spec, recoveryRows, [
+      "elapsed_min",
+      "recovery",
+      "event",
+      "color",
+    ]);
   }
 
   function renderSummaryCharts(target, sRows) {
     if (sRows.length === 0) return;
 
+    // Append a time-series dot+line chart (filled points colored by month over a
+    // faint connecting line). Rows carry a per-row `color` so the points use the
+    // month palette via the spec's identity color scale.
+    function addDotLineChart(headerHtml, rows, yField, yTitle, yDomain) {
+      const header = document.createElement("div");
+      header.className = "overlay-header";
+      header.innerHTML = headerHtml;
+
+      const plot = document.createElement("div");
+      plot.className = "overlay-vega";
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "chart overlay-chart";
+      wrapper.appendChild(header);
+      wrapper.appendChild(plot);
+      target.appendChild(wrapper);
+
+      const colored = rows.map(function (d) {
+        return { timestamp: d.timestamp, color: monthColor(d.month), [yField]: d[yField] };
+      });
+      const spec = buildDotLineSpec({
+        yField: yField,
+        yTitle: yTitle,
+        yDomain: yDomain,
+        height: 300,
+        theme: chartTheme,
+      });
+      embedVega(plot, spec, colored, ["timestamp", yField, "color"]);
+    }
+
     // Duty cycle (draw_duration / inter_pump_interval)
-    const dutyRows = sRows.filter(function (d) { return d.duty_cycle != null; });
-    const dutyHeader = document.createElement("div");
-    dutyHeader.className = "overlay-header";
-    dutyHeader.innerHTML =
+    addDotLineChart(
       "<h3>Pump Duty Cycle</h3>" +
-      '<p class="chart-subtitle">Draw duration / time to next pump start. ' +
-      "Rising duty cycle indicates increasing demand or a leak.</p>";
-
-    const dutyPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Duty cycle (draw / interval)", domain: [0, 1], grid: true },
-      marks: [
-        Plot.dot(dutyRows, {
-          x: "timestamp", y: "duty_cycle",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(dutyRows, {
-          x: "timestamp", y: "duty_cycle",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const dutyW = document.createElement("div");
-    dutyW.className = "chart overlay-chart";
-    dutyW.appendChild(dutyHeader);
-    dutyW.appendChild(dutyPlot);
-    target.appendChild(dutyW);
+        '<p class="chart-subtitle">Draw duration / time to next pump start. ' +
+        "Rising duty cycle indicates increasing demand or a leak.</p>",
+      sRows.filter(function (d) { return d.duty_cycle != null; }),
+      "duty_cycle",
+      "Duty cycle (draw / interval)",
+      [0, 1]
+    );
 
     // Max drawdown
-    const ddHeader = document.createElement("div");
-    ddHeader.className = "overlay-header";
-    ddHeader.innerHTML =
+    addDotLineChart(
       "<h3>Maximum Drawdown per Cycle</h3>" +
-      '<p class="chart-subtitle">Peak drawdown reached during each pump ' +
-      "cycle. Deeper drawdown at same duty cycle suggests declining aquifer.</p>";
-
-    const ddPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Max drawdown (m)", grid: true },
-      marks: [
-        Plot.dot(sRows, {
-          x: "timestamp", y: "max_drawdown",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(sRows, {
-          x: "timestamp", y: "max_drawdown",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const ddW = document.createElement("div");
-    ddW.className = "chart overlay-chart";
-    ddW.appendChild(ddHeader);
-    ddW.appendChild(ddPlot);
-    target.appendChild(ddW);
+        '<p class="chart-subtitle">Peak drawdown reached during each pump ' +
+        "cycle. Deeper drawdown at same duty cycle suggests declining aquifer.</p>",
+      sRows,
+      "max_drawdown",
+      "Max drawdown (m)"
+    );
 
     // Pump duration
-    const durHeader = document.createElement("div");
-    durHeader.className = "overlay-header";
-    durHeader.innerHTML =
+    addDotLineChart(
       "<h3>Pump Duration per Cycle</h3>" +
-      '<p class="chart-subtitle">Minutes spent pumping per cycle. ' +
-      "Longer pump times at same consumption indicate reduced well yield.</p>";
-
-    const durPlot = Plot.plot({
-      width: width, height: 300, marginLeft: marginLeft,
-      style: { background: "transparent", color: "var(--fg)" },
-      x: { type: "time", label: "Date", grid: true },
-      y: { label: "Draw duration (min)", grid: true },
-      marks: [
-        Plot.dot(sRows, {
-          x: "timestamp", y: "draw_duration_min",
-          fill: function (d) { return monthColor(d.month); }, r: 4,
-        }),
-        Plot.line(sRows, {
-          x: "timestamp", y: "draw_duration_min",
-          stroke: "#6b7280", strokeWidth: 1, strokeOpacity: 0.5,
-        }),
-      ],
-    });
-
-    const durW = document.createElement("div");
-    durW.className = "chart overlay-chart";
-    durW.appendChild(durHeader);
-    durW.appendChild(durPlot);
-    target.appendChild(durW);
+        '<p class="chart-subtitle">Minutes spent pumping per cycle. ' +
+        "Longer pump times at same consumption indicate reduced well yield.</p>",
+      sRows,
+      "draw_duration_min",
+      "Draw duration (min)"
+    );
   }
 
   // -- Coordinated render -----------------------------------------------------

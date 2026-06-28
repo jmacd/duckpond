@@ -210,15 +210,24 @@ Done:
   `buildLineSpec` spec compiles, and both single-series and folded multi-series
   specs draw SVG line paths with no JS errors. This removes the "untested
   headlessly" blocker noted below for the chart.js migration.
+- **Stage 3 S3.3 (overlay.js)** — the pump-cycle analysis charts (overlay,
+  Horner, drawdown, recovery, and the three summary dot+line charts) are ported
+  from Observable Plot to Vega-Lite via two new `vega-shared.js` builders:
+  `buildMultiLineSpec` (identity-colored lines grouped per pump event) and
+  `buildDotLineSpec` (filled month-colored points over a faint line on a temporal
+  axis). The D3 brush overview is unchanged (it still drives `renderAnalysis`);
+  D3 is still imported for it, Observable Plot is no longer used by overlay.js.
+  Theming is preserved by resolving `--fg` from CSS and passing it into the spec
+  config. Verified by the browser test `305-browser-overlay-chart.mjs`, which now
+  asserts Vega-rendered SVGs (`svg.marks`) appear with no JS errors.
 
 Remaining:
 
-- **Stage 3 S3.3** — port `chart.js` + `overlay.js` line/area/dot marks to
-  Vega-Lite specs (via `vega-shared.js`), preserving the auto-resolution +
-  lazy-fetch data layer. Largest migration. The in-browser Vega render path is
-  now verified headlessly (test 213), so the migration can proceed; the work
-  itself (mapping the existing marks, brush-zoom, hover crosshair, and
-  counter-rate layer onto Vega-Lite specs) is still outstanding.
+- **Stage 3 S3.3 (chart.js)** — port `chart.js` + `overlay.js`-style line/area/dot
+  marks for the main chart pages to Vega-Lite specs (via `vega-shared.js`),
+  preserving the auto-resolution + lazy-fetch data layer, brush-zoom, hover
+  crosshair, and counter-rate layer. overlay.js is migrated (above); chart.js
+  remains on Observable Plot and is the larger remaining piece.
 - **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip above is done;
   what remains is for the chart pages' "Explore this data" link to hand over a
   Vega-Lite spec (and "view as chart" to emit one back to the chart), which is

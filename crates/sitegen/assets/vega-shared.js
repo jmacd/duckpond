@@ -99,3 +99,122 @@ export function sanitizeRows(fields, rows) {
     return o;
   });
 }
+
+// Common chart config that keeps the SVG transparent and pulls axis/grid colors
+// from the surrounding theme, so a migrated chart matches the page's light/dark
+// styling (the Observable Plot path read `var(--fg)`; Vega cannot resolve CSS
+// variables itself, so callers resolve them and pass the colors in via `theme`).
+function themeConfig(theme) {
+  const fg = (theme && theme.fg) || "#333333";
+  const grid = (theme && theme.grid) || "rgba(128,128,128,0.2)";
+  return {
+    background: "transparent",
+    view: { stroke: null },
+    axis: {
+      labelColor: fg,
+      titleColor: fg,
+      domainColor: fg,
+      tickColor: fg,
+      gridColor: grid,
+    },
+  };
+}
+
+// Optional scale clause from an explicit [min, max] domain; returns `{}` when no
+// domain is given so the spec relies on Vega's automatic extent.
+function domainScale(domain) {
+  return domain ? { scale: { domain } } : {};
+}
+
+// Build a data-less multi-line spec where each line is one group (`detailField`,
+// e.g. a pump-event id) drawn in a literal per-row color (`colorField` holds CSS
+// color strings; `scale: null` makes Vega use them verbatim, matching Observable
+// Plot's `color: { type: "identity" }`). Used by the overlay analysis charts.
+export function buildMultiLineSpec(opts) {
+  const {
+    xField,
+    yField,
+    detailField = "event",
+    colorField = "color",
+    xTitle,
+    yTitle,
+    xDomain,
+    yDomain,
+    height = 360,
+    strokeWidth = 0.8,
+    strokeOpacity = 0.4,
+    theme,
+  } = opts;
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    mark: { type: "line", strokeWidth, opacity: strokeOpacity, clip: true },
+    encoding: {
+      x: {
+        field: xField,
+        type: "quantitative",
+        title: xTitle,
+        axis: { grid: true },
+        ...domainScale(xDomain),
+      },
+      y: {
+        field: yField,
+        type: "quantitative",
+        title: yTitle,
+        axis: { grid: true },
+        ...domainScale(yDomain),
+      },
+      detail: { field: detailField, type: "nominal" },
+      color: { field: colorField, type: "nominal", scale: null, legend: null },
+    },
+  };
+}
+
+// Build a data-less layered spec: a faint connecting line plus filled points
+// colored per-row (`colorField`, identity colors as above) over a temporal x
+// axis. Mirrors the overlay summary charts (duty cycle, max drawdown, duration).
+export function buildDotLineSpec(opts) {
+  const {
+    xField = "timestamp",
+    yField,
+    xTitle = "Date",
+    yTitle,
+    yDomain,
+    height = 300,
+    lineColor = "#6b7280",
+    colorField = "color",
+    pointSize = 50,
+    theme,
+  } = opts;
+  const yEnc = {
+    field: yField,
+    type: "quantitative",
+    title: yTitle,
+    axis: { grid: true },
+    ...domainScale(yDomain),
+  };
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: { field: xField, type: "temporal", title: xTitle, axis: { grid: true } },
+    },
+    layer: [
+      {
+        mark: { type: "line", color: lineColor, strokeWidth: 1, opacity: 0.5 },
+        encoding: { y: yEnc },
+      },
+      {
+        mark: { type: "point", filled: true, size: pointSize },
+        encoding: {
+          y: { field: yField, type: "quantitative" },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+    ],
+  };
+}

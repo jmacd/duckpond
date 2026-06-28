@@ -145,6 +145,14 @@ async function testPage(browser, pagePath) {
   );
   check(svgCount > 0, `SVG charts rendered (${svgCount})`);
 
+  // The analysis charts migrated from Observable Plot to Vega-Lite; Vega's SVG
+  // renderer marks its root <svg> with class "marks". Assert at least one is
+  // present so the migration can't silently regress to a non-Vega path.
+  const vegaSvgCount = await tab.evaluate(
+    () => document.querySelectorAll("#overlay-chart .overlay-vega svg.marks").length
+  );
+  check(vegaSvgCount > 0, `Vega-Lite charts rendered (${vegaSvgCount})`);
+
   // Check that "Loading..." is gone
   const loadingVisible = await tab.evaluate(() => {
     const el = document.getElementById("overlay-chart");
