@@ -28,6 +28,6 @@ export default defineConfig({
   // Don't pre-bundle or analyze vendor imports — these are self-contained
   // modules loaded at runtime by the static site's JS.
   optimizeDeps: {
-    exclude: ["duckdb-browser.mjs", "plot-d3-bundle.mjs"],
+    exclude: ["duckdb-browser.mjs", "vega-bundle.mjs"],
   },
 });

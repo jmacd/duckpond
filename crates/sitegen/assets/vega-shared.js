@@ -87,6 +87,121 @@ export function buildLineSpec(fields, rows, opts = {}) {
   return { spec };
 }
 
+// Build a data-less multi-series metric spec for the chart pages: each series
+// draws an optional avg/min/max area band plus an avg line in a fixed palette
+// color, sharing one y scale. `xDomain` pins the temporal axis to the queried
+// window (epoch-ms numbers); `invalid: null` keeps null cells as path breaks so
+// gaps in the data show as gaps (matching the Observable Plot `defined` path).
+// Byte axes use SI-suffixed tick labels (`~s`); the exact KiB/MiB formatting is
+// applied by the DOM hover tooltip, not the axis.
+export function buildMetricChartSpec(opts) {
+  const {
+    series,
+    xField = "timestamp",
+    xDomain,
+    yLabel,
+    height = 300,
+    byteAxis = false,
+    theme,
+  } = opts;
+  const yAxis = { grid: true, title: yLabel || null };
+  if (byteAxis) yAxis.format = "~s";
+  const layers = [];
+  let yAssigned = false;
+  for (const s of series) {
+    if (s.min && s.max) {
+      layers.push({
+        mark: { type: "area", color: s.color, opacity: 0.15, clip: true, invalid: null },
+        encoding: {
+          y: { field: s.min, type: "quantitative", axis: yAssigned ? null : yAxis },
+          y2: { field: s.max },
+        },
+      });
+      yAssigned = true;
+    }
+    if (s.avg) {
+      layers.push({
+        mark: { type: "line", color: s.color, strokeWidth: 1.5, clip: true, invalid: null },
+        encoding: {
+          y: { field: s.avg, type: "quantitative", axis: yAssigned ? null : yAxis },
+        },
+      });
+      yAssigned = true;
+    }
+  }
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: {
+        field: xField,
+        type: "temporal",
+        title: "Date",
+        scale: { domain: xDomain },
+        axis: { grid: true },
+      },
+    },
+    layer: layers,
+  };
+}
+
+// Build a data-less overview-timeline spec carrying an `interval` selection on
+// the x (time) axis, used by the overlay analysis page to pick a date range.
+// Each row draws a vertical stem (`yTopField` -> `yField`, identity color) plus
+// a filled dot at `yTopField`; the selection's extent drives the analysis
+// charts. `yDomain` pins the depth axis. Callers read the `brush` signal off the
+// returned view on pointer release (the selection is otherwise continuous).
+export function buildBrushOverviewSpec(opts) {
+  const {
+    xField = "timestamp",
+    yField = "min_depth",
+    yTopField = "y_top",
+    colorField = "color",
+    yTitle = "Depth (m)",
+    yDomain,
+    height = 160,
+    theme,
+  } = opts;
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    width: "container",
+    height,
+    config: themeConfig(theme),
+    encoding: {
+      x: { field: xField, type: "temporal", title: null, axis: { grid: false } },
+    },
+    layer: [
+      {
+        // The interval selection lives on a single layer unit; placing it at the
+        // top of a layered spec makes Vega-Lite emit duplicate `brush_x` signals.
+        params: [{ name: "brush", select: { type: "interval", encodings: ["x"] } }],
+        mark: { type: "rule", strokeWidth: 1, opacity: 0.4 },
+        encoding: {
+          y: {
+            field: yTopField,
+            type: "quantitative",
+            title: yTitle,
+            axis: { grid: true },
+            ...domainScale(yDomain),
+          },
+          y2: { field: yField },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+      {
+        transform: [{ filter: "isValid(datum.static_depth)" }],
+        mark: { type: "point", filled: true, size: 8, opacity: 0.7 },
+        encoding: {
+          y: { field: "static_depth", type: "quantitative" },
+          color: { field: colorField, type: "nominal", scale: null, legend: null },
+        },
+      },
+    ],
+  };
+}
+
 // Coerce rows to Vega-friendly plain objects: BigInt -> Number, keep Date. All
 // fields are included so a hand-edited spec can reference any result column.
 export function sanitizeRows(fields, rows) {

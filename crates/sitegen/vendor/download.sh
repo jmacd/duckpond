@@ -32,8 +32,6 @@ npm init -y --silent > /dev/null 2>&1 || true
 echo "Installing packages..."
 npm install --save \
     @duckdb/duckdb-wasm@1.29.0 \
-    @observablehq/plot@0.6 \
-    d3@7 \
     vega@5 \
     vega-lite@5 \
     vega-embed@6 \
@@ -51,18 +49,11 @@ export * from "@duckdb/duckdb-wasm";
 EOF
 npx esbuild _duckdb.mjs --bundle --format=esm --outfile="${DIST_DIR}/duckdb-browser.mjs" --minify 2>&1
 
-# -- Observable Plot + D3: bundle into a single file --
-echo "Bundling Observable Plot + D3..."
-cat > _plot.mjs << 'EOF'
-export * as Plot from "@observablehq/plot";
-export * as d3 from "d3";
-EOF
-npx esbuild _plot.mjs --bundle --format=esm --outfile="${DIST_DIR}/plot-d3-bundle.mjs" --minify 2>&1
-
-# -- Vega / Vega-Lite / Vega-Embed: bundle for the explorer "Chart" view --
-# vega-embed pulls in vega + vega-lite. The explorer lazy-imports this bundle
-# only when a visitor switches a query result to the chart view, so it never
-# affects initial page load. This backs the Stage 3 Vega-Lite migration spike.
+# -- Vega / Vega-Lite / Vega-Embed: the single charting bundle --
+# vega-embed pulls in vega + vega-lite. Every chart asset (explorer, chart
+# pages, overlay analysis) renders through this bundle; the assets lazy-import
+# it so it never affects initial page load. This is the all-in Vega-Lite
+# charting path (Observable Plot and D3 were dropped).
 echo "Bundling Vega-Lite (vega-embed)..."
 cat > _vega.mjs << 'EOF'
 export { default as vegaEmbed } from "vega-embed";

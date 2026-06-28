@@ -192,7 +192,7 @@ async function testPage(browser, page) {
         return new Promise((resolve) => {
           let tries = 0;
           const check = () => {
-            // Observable Plot renders SVG elements inside the chart container
+            // Vega-Lite renders SVG elements inside the chart container
             const svgs = document.querySelectorAll(".chart-container svg");
             if (svgs.length > 0) return resolve(true);
             if (++tries > 60) return resolve(false);
@@ -201,7 +201,7 @@ async function testPage(browser, page) {
           check();
         });
       });
-      check(chartRendered, "chart rendered SVG (DuckDB-WASM + Observable Plot)");
+      check(chartRendered, "chart rendered SVG (DuckDB-WASM + Vega-Lite)");
 
       if (chartRendered) {
         // Check SVG has actual plot content (paths/lines, not just empty axes)
@@ -212,6 +212,13 @@ async function testPage(browser, page) {
           return paths.length;
         });
         check(plotMarks > 0, `chart has plot marks (${plotMarks} path/line/circle elements)`);
+
+        // Vega's SVG renderer roots the chart at <svg class="marks">; assert it
+        // to lock in the all-in Vega-Lite migration (no Observable Plot).
+        const vegaRendered = await tab.evaluate(
+          () => document.querySelectorAll(".chart-container svg.marks").length
+        );
+        check(vegaRendered > 0, `chart rendered via Vega (${vegaRendered} svg.marks)`);
 
         // Check for multiple chart sections (min/max/avg grouping)
         const chartDivs = await tab.evaluate(

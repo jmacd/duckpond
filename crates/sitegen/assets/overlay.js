@@ -5,14 +5,12 @@
 // DuckPond sitegen -- overlay.js
 // Interactive pump cycle analysis with coordinated brush+filter.
 //
-// Top: 4-year well-depth overview with D3 brush for time selection.
-// Below: analysis charts (overlay, Horner, drawdown, recovery, summary)
-// that re-render when the brush selection changes.
+// Top: 4-year well-depth overview with a Vega-Lite interval selection for
+// time-range selection. Below: analysis charts (overlay, Horner, drawdown,
+// recovery, summary) that re-render when the selection changes.
 //
-// The overview chart uses raw D3 for its brush interaction; the analysis
-// charts below render with Vega-Lite via the shared vega module (the Stage 3
-// S3.3 migration -- D3 is still imported for the brush, Observable Plot is no
-// longer used here).
+// All charts render with Vega-Lite via the shared vega module (the Stage 3
+// S3.3 migration -- Observable Plot and D3 are no longer used here).
 //
 // Data sources:
 //   pump-cycles: pump_event_id, month, elapsed_s, depth, static_depth, phase
@@ -23,6 +21,7 @@ import {
   sanitizeRows,
   buildMultiLineSpec,
   buildDotLineSpec,
+  buildBrushOverviewSpec,
 } from "./vega-shared.js";
 
 (async function () {
@@ -128,10 +127,6 @@ import {
       '<div class="empty-state">Unrecognized data shape for overlay chart.</div>';
     return;
   }
-
-  // -- Import D3 (for the brush overview) -------------------------------------
-
-  const { d3 } = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs");
 
   // Resolve the page theme's foreground and a faint grid color from CSS custom
   // properties so the Vega charts match the surrounding light/dark styling
@@ -284,8 +279,6 @@ import {
   // -- DOM layout -------------------------------------------------------------
 
   container.innerHTML = "";
-  const width = container.clientWidth - 32;
-  const marginLeft = 60;
 
   const overviewSection = document.createElement("div");
   overviewSection.className = "overview-section";
@@ -308,7 +301,7 @@ import {
   for (const r of allPumpRows) allEventIds.add(r.event);
   for (const r of allSummaryRows) allEventIds.add(r.pump_event_id);
 
-  // -- Overview chart with D3 brush -------------------------------------------
+  // -- Overview chart with Vega interval selection ----------------------------
 
   // Month legend (always shows all 12 months)
   const legendDiv = document.createElement("div");
@@ -316,11 +309,8 @@ import {
   legendDiv.innerHTML = buildMonthLegend([1,2,3,4,5,6,7,8,9,10,11,12]);
   overviewSection.appendChild(legendDiv);
 
-  let brushGroup = null;
-  let overviewX = null;
-  let overviewXAxis = null;
-  let overviewLines = null;
-  let overviewDots = null;
+  // The Vega view backing the overview; rebuilt when zooming into a selection.
+  let overviewView = null;
 
   if (allSummaryRows.length > 0) {
     const ovHeader = document.createElement("div");
@@ -339,137 +329,75 @@ import {
       "cursor:pointer;border:1px solid #999;border-radius:4px;" +
       "background:var(--bg,#fff);color:var(--fg,#333)";
     resetBtn.addEventListener("click", function () {
-      overviewX.domain(xDomainFull);
-      updateOverviewView();
-      brushGroup.call(brush.move, null);
+      embedOverview(null);
       renderAnalysis(null);
     });
     overviewSection.appendChild(resetBtn);
 
-    const ovHeight = 160;
-    const margin = { top: 15, right: 20, bottom: 30, left: marginLeft };
+    const ovHolder = document.createElement("div");
+    ovHolder.className = "overlay-vega";
+    overviewSection.appendChild(ovHolder);
 
-    const xDomainFull = d3.extent(allSummaryRows, function (d) {
-      return d.timestamp;
+    // Project the summary rows once for the overview: a temporal timestamp
+    // (epoch-ms), the per-row month color used verbatim, and the stem top
+    // (static depth, falling back to the cycle's start depth).
+    const overviewRows = allSummaryRows.map(function (d) {
+      return {
+        timestamp: +d.timestamp,
+        min_depth: d.min_depth,
+        static_depth: d.static_depth,
+        y_top: d.static_depth != null ? d.static_depth : d.depth_at_start,
+        color: monthColor(d.month),
+      };
     });
-    overviewX = d3.scaleTime()
-      .domain(xDomainFull.slice())
-      .range([margin.left, width - margin.right]);
-    const x = overviewX;
 
-    const y = d3.scaleLinear()
-      .domain([34, 46])
-      .range([ovHeight - margin.bottom, margin.top]);
-
-    const svg = d3.select(overviewSection)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", ovHeight)
-      .style("background", "transparent");
-
-    // Clip path for zoomed view
-    svg.append("defs").append("clipPath")
-      .attr("id", "overview-clip")
-      .append("rect")
-      .attr("x", margin.left)
-      .attr("y", margin.top)
-      .attr("width", width - margin.left - margin.right)
-      .attr("height", ovHeight - margin.top - margin.bottom);
-
-    const chartArea = svg.append("g")
-      .attr("clip-path", "url(#overview-clip)");
-
-    // Vertical lines: static_depth to min_depth per cycle (pump envelope)
-    overviewLines = chartArea.selectAll(".range-line")
-      .data(allSummaryRows)
-      .join("line")
-      .attr("x1", function (d) { return x(d.timestamp); })
-      .attr("x2", function (d) { return x(d.timestamp); })
-      .attr("y1", function (d) {
-        return y(d.static_depth != null ? d.static_depth : d.depth_at_start);
-      })
-      .attr("y2", function (d) { return y(d.min_depth); })
-      .attr("stroke", function (d) { return monthColor(d.month); })
-      .attr("stroke-width", 1)
-      .attr("opacity", 0.4);
-
-    // Static depth dots (water table level)
-    overviewDots = chartArea.selectAll(".static-dot")
-      .data(allSummaryRows.filter(function (d) {
-        return d.static_depth != null;
-      }))
-      .join("circle")
-      .attr("cx", function (d) { return x(d.timestamp); })
-      .attr("cy", function (d) { return y(d.static_depth); })
-      .attr("r", 1.5)
-      .attr("fill", function (d) { return monthColor(d.month); })
-      .attr("opacity", 0.7);
-
-    // Axes
-    overviewXAxis = svg.append("g")
-      .attr("transform", "translate(0," + (ovHeight - margin.bottom) + ")")
-      .call(d3.axisBottom(x).ticks(width > 600 ? 10 : 5));
-
-    svg.append("g")
-      .attr("transform", "translate(" + margin.left + ",0)")
-      .call(d3.axisLeft(y).ticks(5));
-
-    svg.append("text")
-      .attr("transform", "rotate(-90)")
-      .attr("x", -(ovHeight / 2))
-      .attr("y", 14)
-      .attr("text-anchor", "middle")
-      .attr("fill", "var(--fg,#333)")
-      .attr("font-size", "12px")
-      .text("Depth (m)");
-
-    function updateOverviewView() {
-      overviewLines
-        .attr("x1", function (d) { return x(d.timestamp); })
-        .attr("x2", function (d) { return x(d.timestamp); });
-      overviewDots
-        .attr("cx", function (d) { return x(d.timestamp); });
-      overviewXAxis.call(d3.axisBottom(x).ticks(width > 600 ? 10 : 5));
+    // (Re)render the overview chart, optionally zoomed to an [t0, t1] epoch-ms
+    // window. Each embed replaces the holder's content, so the pointerup
+    // listener is attached once to the holder (below), not per embed.
+    async function embedOverview(domain) {
+      const spec = buildBrushOverviewSpec({
+        yDomain: [34, 46],
+        height: 160,
+        theme: chartTheme,
+      });
+      if (domain) spec.encoding.x.scale = { domain: domain };
+      try {
+        const embed = await loadVega();
+        if (overviewView) {
+          try { overviewView.finalize(); } catch (e) { /* already gone */ }
+          overviewView = null;
+        }
+        const res = await embed(
+          ovHolder,
+          { ...spec, data: { values: overviewRows } },
+          { actions: false, renderer: "svg" }
+        );
+        overviewView = res.view;
+      } catch (e) {
+        ovHolder.innerHTML =
+          '<div class="empty-state">Overview render failed: ' +
+          String((e && e.message) || e) + "</div>";
+      }
     }
 
-    // D3 brush
-    let debounceTimer = null;
-    let suppressBrushReset = false;
-    const brush = d3.brushX()
-      .extent([
-        [margin.left, margin.top],
-        [width - margin.right, ovHeight - margin.bottom],
-      ])
-      .on("end", function (event) {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        if (suppressBrushReset) {
-          suppressBrushReset = false;
-          return;
+    // The Vega interval selection updates continuously while dragging; act on
+    // release. Read the `brush` signal's x extent, drive the analysis charts,
+    // and re-render the overview zoomed into the selection (mirrors the old
+    // D3 brush-then-zoom behaviour). A plain click (empty selection) is a no-op.
+    let releaseTimer = null;
+    ovHolder.addEventListener("pointerup", function () {
+      if (releaseTimer) clearTimeout(releaseTimer);
+      releaseTimer = setTimeout(function () {
+        const sel = overviewView && overviewView.signal("brush");
+        const ext = sel && sel.timestamp;
+        if (ext && ext.length === 2 && ext[0] !== ext[1]) {
+          renderAnalysis([new Date(ext[0]), new Date(ext[1])]);
+          embedOverview([ext[0], ext[1]]);
         }
-        debounceTimer = setTimeout(function () {
-          if (!event.selection) {
-            renderAnalysis(null);
-            return;
-          }
-          const t0 = x.invert(event.selection[0]);
-          const t1 = x.invert(event.selection[1]);
+      }, 80);
+    });
 
-          // Zoom the overview to the selection
-          overviewX.domain([t0, t1]);
-          updateOverviewView();
-          suppressBrushReset = true;
-          brushGroup.call(brush.move, null);
-
-          renderAnalysis([t0, t1]);
-        }, 100);
-      });
-
-    brushGroup = svg.append("g").attr("class", "brush").call(brush);
-
-    svg.selectAll(".brush .selection")
-      .attr("fill", "steelblue")
-      .attr("fill-opacity", 0.15)
-      .attr("stroke", "steelblue");
+    await embedOverview(null);
   }
 
   // -- Chart render functions -------------------------------------------------

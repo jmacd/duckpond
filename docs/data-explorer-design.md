@@ -215,24 +215,39 @@ Done:
   from Observable Plot to Vega-Lite via two new `vega-shared.js` builders:
   `buildMultiLineSpec` (identity-colored lines grouped per pump event) and
   `buildDotLineSpec` (filled month-colored points over a faint line on a temporal
-  axis). The D3 brush overview is unchanged (it still drives `renderAnalysis`);
-  D3 is still imported for it, Observable Plot is no longer used by overlay.js.
-  Theming is preserved by resolving `--fg` from CSS and passing it into the spec
-  config. Verified by the browser test `305-browser-overlay-chart.mjs`, which now
+  axis). Theming is preserved by resolving `--fg` from CSS and passing it into the
+  spec config. Verified by the browser test `305-browser-overlay-chart.mjs`, which
   asserts Vega-rendered SVGs (`svg.marks`) appear with no JS errors.
+- **Stage 3 S3.3 (chart.js) — all-in Vega-Lite** — the main chart pages render
+  through a new `buildMetricChartSpec` (`vega-shared.js`): per series an optional
+  avg/min/max area band plus an avg line in a fixed palette color, one shared y
+  scale, an x scale pinned to the queried window, and `invalid: null` so null
+  cells stay path breaks (matching Observable Plot's `defined`). The
+  auto-resolution + lazy-fetch data layer, counter-rate transform, brush-to-zoom,
+  and the rich hover crosshair/tooltip are preserved unchanged — the brush/hover
+  is library-agnostic DOM positioned from the Vega view geometry (`view.origin()`
+  / `view.width()`). Byte y-axes use SI tick labels (`~s`); the exact KiB/MiB
+  formatting still appears in the hover tooltip (a minor cosmetic change to the
+  axis only).
+- **Stage 3 S3.3 (overlay brush) — d3 removed** — the overview timeline's
+  `d3.brushX` is replaced by a Vega-Lite interval selection
+  (`buildBrushOverviewSpec`): stems + dots over a temporal axis with a `brush`
+  param; on pointer release the `brush` signal's extent drives `renderAnalysis`
+  and the overview re-embeds zoomed into the selection. `d3` is no longer
+  imported by overlay.js.
+- **Vendor — Observable Plot + d3 dropped** — `vendor/download.sh` no longer
+  installs `@observablehq/plot` or `d3` or builds `plot-d3-bundle.mjs`;
+  `vega-bundle.mjs` is the single charting bundle. `factory.rs` drops
+  `plot-d3-bundle.mjs` from `VENDOR_FILES`/`VENDOR_FILES_COMPRESSED`, and test
+  `201` now asserts the bundle is absent and `vega-bundle.mjs` is present. Every
+  sitegen chart asset (explorer, chart pages, overlay) is now all-in Vega-Lite.
 
 Remaining:
 
-- **Stage 3 S3.3 (chart.js)** — port `chart.js` + `overlay.js`-style line/area/dot
-  marks for the main chart pages to Vega-Lite specs (via `vega-shared.js`),
-  preserving the auto-resolution + lazy-fetch data layer, brush-zoom, hover
-  crosshair, and counter-rate layer. overlay.js is migrated (above); chart.js
-  remains on Observable Plot and is the larger remaining piece.
-- **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip above is done;
-  what remains is for the chart pages' "Explore this data" link to hand over a
-  Vega-Lite spec (and "view as chart" to emit one back to the chart), which is
-  blocked on the S3.3 chart.js Vega migration since chart.js still renders with
-  Observable Plot and has no spec to pass.
+- **Stage 3 S3.4 (chart cross-link spec)** — the URL round-trip is done; what
+  remains is for the chart pages' "Explore this data" link to hand over a
+  Vega-Lite spec (and "view as chart" to emit one back). Now unblocked since
+  chart.js produces `buildMetricChartSpec` specs.
 - **Optional embedded SQL editor** (syntax highlight / completion) — explicitly
   deferred; the plain `<textarea>` stands.
 

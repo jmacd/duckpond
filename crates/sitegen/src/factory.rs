@@ -1375,7 +1375,6 @@ const VENDOR_FILES: &[&str] = &[
     "duckdb-browser.mjs",
     "duckdb-browser-eh.worker.js",
     "duckdb-eh.wasm",
-    "plot-d3-bundle.mjs",
     "vega-bundle.mjs",
 ];
 
@@ -1390,8 +1389,6 @@ const VENDOR_FILES_COMPRESSED: &[&str] = &[
     "duckdb-browser-eh.worker.js.gz",
     "duckdb-eh.wasm.br",
     "duckdb-eh.wasm.gz",
-    "plot-d3-bundle.mjs.br",
-    "plot-d3-bundle.mjs.gz",
     "vega-bundle.mjs.br",
     "vega-bundle.mjs.gz",
 ];

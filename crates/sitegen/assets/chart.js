@@ -4,7 +4,7 @@
 
 // DuckPond sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
-// renders time-series line charts with Observable Plot.
+// renders time-series line charts with Vega-Lite.
 // Supports duration buttons (12h … 7d) and click-drag brush-to-zoom.
 //
 // LAZY LOADING: Parquet files are fetched on demand — only the files needed
@@ -13,6 +13,7 @@
 // one partition boundary, meaning at most 2 files are fetched per render.
 
 import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
+import { loadVega, buildMetricChartSpec } from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -66,7 +67,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   // IEC byte formatter for `<param>.bytes` y-axes.  Picks the largest
   // unit whose magnitude keeps the displayed value below 1024 and uses
   // up to one fractional digit.  `null`/`NaN` render as the empty
-  // string so Plot's tickFormat doesn't blow up on missing data.
+  // string so the hover tooltip doesn't blow up on missing data.
   function formatBytes(v) {
     if (v == null || !isFinite(v)) return "";
     const sign = v < 0 ? "-" : "";
@@ -578,7 +579,15 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  const Plot = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs").then(m => m.Plot);
+  // Resolve the page theme's foreground and a faint grid color from CSS custom
+  // properties so the Vega charts match the surrounding light/dark styling
+  // (Vega cannot read CSS variables itself, so we pass resolved colors in).
+  function resolveTheme() {
+    const cs = getComputedStyle(document.body);
+    const fg = (cs.getPropertyValue("--fg") || "").trim() || "#333333";
+    return { fg, grid: "rgba(128,128,128,0.2)" };
+  }
+  const chartTheme = resolveTheme();
 
   function toDate(v) {
     return typeof v === "bigint" ? new Date(Number(v / 1000000n)) : new Date(v);
@@ -703,7 +712,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
   // ── Brush-to-zoom ─────────────────────────────────────────────────────────
 
   // Attach a brush overlay to a chart wrapper.  The overlay sits on top of
-  // the Plot SVG and translates pixel drag → time domain → re-render.
+  // the chart SVG and translates pixel drag → time domain → re-render.
   //
   // `domainBegin` / `domainEnd` are epoch-ms values that correspond to the
   // left/right edges of the plot area (the SVG viewBox minus margins).
@@ -876,10 +885,6 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
 
     const charts = groupColumns(data);
 
-    const width = container.clientWidth - 32;
-    const marginLeft = 60;
-    const plotAreaWidth = width - marginLeft - 20; // 20 = right margin
-
     // In full-screen mode the chart fills the viewport: split the available
     // height across however many charts the page renders. Otherwise the chart
     // keeps its fixed 300px height.
@@ -903,38 +908,6 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
       }
       const plotData = isCounter ? computeCounterRates(data, allCols) : data;
 
-      const marks = [];
-      series.forEach((s, i) => {
-        const color = palette[i % palette.length];
-        const label = legendLabel(s.base);
-
-        if (s.min && s.max) {
-          marks.push(
-            Plot.areaY(plotData, {
-              x: d => toDate(d.timestamp),
-              y1: d => d[s.min] != null ? Number(d[s.min]) : NaN,
-              y2: d => d[s.max] != null ? Number(d[s.max]) : NaN,
-              defined: d => d[s.min] != null && d[s.max] != null,
-              fill: color,
-              fillOpacity: 0.15,
-            })
-          );
-        }
-
-        if (s.avg) {
-          marks.push(
-            Plot.line(plotData, {
-              x: d => toDate(d.timestamp),
-              y: d => d[s.avg] != null ? Number(d[s.avg]) : NaN,
-              defined: d => d[s.avg] != null,
-              stroke: color,
-              strokeWidth: 1.5,
-              title: () => label,
-            })
-          );
-        }
-      });
-
       const keyParts = chartKey.split(".");
       const title = keyParts.length >= 2
         ? `${keyParts[0].charAt(0).toUpperCase() + keyParts[0].slice(1)} (${keyParts[1]})`
@@ -956,11 +929,6 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
       const unit = keyParts[keyParts.length - 1] || "";
       const isBytes = unit === "bytes";
       const yLabel = isCounter ? `${unit}/s` : unit;
-      // Humanize byte y-axes for both raw values (`bytes`) and rates
-      // (`bytes/s`) so users see KiB / MiB instead of "0,000,000".
-      const yTickFormat = isBytes
-        ? (isCounter ? (v) => `${formatBytes(v)}/s` : formatBytes)
-        : undefined;
 
       // Value formatter for the hover tooltip: humanize bytes, otherwise show a
       // sensible number of significant digits followed by the unit label.
@@ -980,29 +948,37 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
         return yLabel ? `${s} ${yLabel}` : s;
       };
 
-      const plot = Plot.plot({
-        width,
+      // Build the Vega-Lite spec for this chart and project the rows to plain
+      // Vega values: timestamp -> epoch-ms number, each series column -> Number
+      // or null (null cells become path breaks via the spec's `invalid: null`).
+      const colorFor = (i) => palette[i % palette.length];
+      const spec = buildMetricChartSpec({
+        series: series.map((s, i) => ({
+          avg: s.avg, min: s.min, max: s.max, color: colorFor(i),
+        })),
+        xDomain: [domainBegin, domainEnd],
+        yLabel,
         height: chartHeight,
-        marginLeft,
-        style: { background: "transparent", color: "var(--fg)" },
-        x: {
-          type: "time",
-          label: "Date",
-          grid: true,
-          domain: [domainBegin, domainEnd],
-        },
-        y: {
-          label: yLabel,
-          grid: true,
-          ...(yTickFormat ? { tickFormat: yTickFormat } : {}),
-        },
-        marks,
+        byteAxis: isBytes,
+        theme: chartTheme,
       });
+
+      const values = plotData.map((d) => {
+        const o = { timestamp: +toDate(d.timestamp) };
+        for (const c of allCols) {
+          const v = d[c];
+          o[c] = v == null ? null : Number(v);
+        }
+        return o;
+      });
+
+      const plotDiv = document.createElement("div");
+      plotDiv.className = "chart-plot";
 
       const wrapper = document.createElement("div");
       wrapper.className = "chart";
       wrapper.appendChild(header);
-      wrapper.appendChild(plot);
+      wrapper.appendChild(plotDiv);
 
       // Caption (textContent only -- never innerHTML -- to avoid
       // injection via config-supplied strings).
@@ -1016,10 +992,29 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
 
       container.appendChild(wrapper);
 
+      const embed = await loadVega();
+      let view = null;
+      try {
+        const res = await embed(
+          plotDiv,
+          { ...spec, data: { values } },
+          { actions: false, renderer: "svg" }
+        );
+        view = res.view;
+      } catch (e) {
+        plotDiv.innerHTML =
+          '<div class="empty-state">Chart render failed: ' +
+          String((e && e.message) || e) + "</div>";
+        continue;
+      }
+
       // Attach brush-to-zoom on the rendered SVG, plus a hover crosshair that
-      // reports each series' value at the pointed-to sample.
+      // reports each series' value at the pointed-to sample. The brush/hover
+      // overlay is library-agnostic DOM positioned from the Vega view geometry:
+      // `origin()[0]` is the data-rect left (y-axis gutter), `width()` the inner
+      // plot width.
       const hoverSeries = series
-        .map((s, i) => ({ col: s.avg, color: palette[i % palette.length], label: legendLabel(s.base) }))
+        .map((s, i) => ({ col: s.avg, color: colorFor(i), label: legendLabel(s.base) }))
         .filter(h => h.col);
       const hover = {
         rows: plotData,
@@ -1027,7 +1022,7 @@ import { initDuckdb, createFileRegistry, rowsToCsv } from "./duckdb-shared.js";
         series: hoverSeries,
         fmt: fmtVal,
       };
-      attachBrush(wrapper, plot, domainBegin, domainEnd, marginLeft, plotAreaWidth, hover);
+      attachBrush(wrapper, plotDiv, domainBegin, domainEnd, view.origin()[0], view.width(), hover);
     }
   }
 
