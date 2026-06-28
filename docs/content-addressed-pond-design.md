@@ -76,7 +76,7 @@ Four immutable object kinds, each addressed by the BLAKE3 hash of its bytes
 |---------|-------------|------------------|
 | blob    | the exact stored bytes of one file version | no |
 | tree    | the sorted entries of one directory | no |
-| commit  | `(root_tree_hash, parent_commit_hash, provenance)` | **yes -- the only place** |
+| commit  | `(root_tree_hash, parent_commit_hash, node_manifest_hash, provenance)` | **yes -- the only place** |
 | ref     | a commit hash (a pond's tip, or a grafted foreign tip) | pointer |
 
 ### 4.1 Blob -- the leaf atom
@@ -123,7 +123,7 @@ Two consequences, both load-bearing:
 A commit wraps one transaction:
 
 ```
-commit = ( root_tree_hash, parent_commit_hash, provenance )
+commit = ( root_tree_hash, parent_commit_hash, node_manifest_hash, provenance )
 provenance = pond_id, seq, time, author, original request
 ```
 
@@ -133,10 +133,35 @@ hashes comparable across ponds while preserving full lineage for audit and
 for the log. A pond has a single writer, so its commits form a **linear
 chain**; `parent_commit_hash` makes that chain a hash chain already.
 
+The `node_manifest_hash` names the commit's **node manifest** (Section 4.5),
+the one place node identity is recorded. It is part of the commit and therefore
+of lineage; the pure trees and blobs stay identity-free.
+
 ### 4.4 Ref
 
 A ref is a named pointer to a commit hash -- a pond's own tip, or the tip of
 a foreign pond that has been grafted in. Sync moves refs forward.
+
+### 4.5 Node manifest -- identity for the mirror
+
+A tree entry is `(name, entry_type, child_hash)` and carries no `node_id`, so
+the content objects dedup across ponds (Section 1). But a consumer that pulls a
+pond and wants to update it incrementally needs to know *which* node each
+position is, so that a rename stays a rename and a node's version history is
+preserved. The node manifest supplies exactly that, out of band from the pure
+content:
+
+```
+manifest = list of ( node_id, parent_node_id, name, entry_type, child_hash )
+```
+
+one row per node in the commit's tree -- the source's real `NodeID`s. It is a
+content-addressed object like any other (its hash is `node_manifest_hash`), so
+it dedups across commits when the structure is unchanged. A read-only mirror
+adopts these ids verbatim (Decision D8), making it row-identical to the source
+and turning incremental pull into a `node_id`-keyed diff (Section 8.5.2).
+Because identity lives only here and in the commit -- never in trees, blobs, or
+series -- content comparison, dedup, and the transparency log are unaffected.
 
 ---
 
@@ -194,7 +219,7 @@ storage is the shape to avoid. See Decision D1 in Section 11.
 Per commit, one small, permanent record:
 
 ```
-( seq, pond_id, root_tree_hash, parent_commit_hash, provenance )
+( seq, pond_id, root_tree_hash, parent_commit_hash, node_manifest_hash, provenance )
 ```
 
 This is simultaneously the top of the SPACE tree and -- as Section 7 shows --
@@ -386,46 +411,77 @@ pull is a no-op. Otherwise:
 The fetch walk is pure content addressing and needs no identity decisions: it
 moves bytes keyed by hash. Identity enters only at materialization.
 
-#### 8.5.2 The identity problem
+#### 8.5.2 The consumer adopts the source's node_ids via a commit manifest
 
 To write `OplogEntry` rows the consumer must assign each node a `node_id` and a
-`part_id` (its parent directory's node_id). The object graph supplies neither.
-Two stances:
+`part_id` (its parent directory's node_id). The pure content objects -- trees,
+blobs, series -- deliberately carry **neither**: a tree entry is
+`(name, entry_type, child_hash)` with no identity, which is exactly what lets
+two ponds with overlapping content share object hashes (Section 1). So the
+content graph alone tells the consumer *what* the tree contains and *where* (by
+name), but not which `node_id` the source used.
 
-- **Fresh random node_ids.** Mint a new `NodeID` per node on each consumer.
-  Simple, but two consumers of the same graph get different ids, so their ponds
-  differ at the row level and at the fsck Merkle (which keys on node_id) even
-  though they are content-identical. More seriously, a *second* pull into the
-  same consumer cannot match a graph position to the node_id it minted last
-  time, so it cannot update a node in place or preserve its version history --
-  it would re-mint and orphan the old node.
-- **Deterministic node_ids.** Derive `node_id` from the node's stable position
-  or content, so the same node always maps to the same id across consumers and
-  across pulls. The root keeps `ROOT_UUID`. A non-root id is derived (for
-  example, `node_id = H(parent_node_id, name)` with byte[6] overwritten to
-  encode the entry type, matching the existing NodeID layout), or alternatively
-  from the child's content hash. This makes a second pull a natural in-place
-  update: the same path resolves to the same node_id, so a changed `child_hash`
-  becomes a new *version* of an existing node, exactly as a local edit would.
+That missing identity is what an incremental pull needs. Resolving a position by
+**path** is not enough: when a name disappears and another appears, the consumer
+cannot tell a *rename* (same node, preserve identity and version history) from a
+*delete plus a fresh create* -- the two are indistinguishable by name and
+content. Without node identity, every rename degrades to delete-and-recreate
+(re-materializing the node's content under a new id) and every deletion must be
+found by diffing each directory's names.
 
-The content tree hash is independent of node_id, so **content comparison and the
-transparency log work under either choice**; the difference is whether rebuilt
-ponds are reproducible and incrementally updatable. Path-derived identity is the
-strong recommendation: it is the only option that makes incremental pull and
-version history work without a separately persisted position-to-node_id map.
-This is **Decision D8 (open)**.
+The fix is to ship identity **out of band, in the commit**. The commit is
+already the one pond-specific object -- it carries `pond_id`, `seq`, and
+provenance -- so two ponds never share a commit anyway. It is therefore the
+correct home for node identity, and putting identity there leaves the trees,
+blobs, and series **node_id-free and still dedup-shareable**. Each commit
+references a **node manifest**: a content-addressed object listing, for every
+node in that commit's tree,
+
+```text
+node_id  ->  (parent_node_id, name, entry_type, child_hash)
+```
+
+These are the source's real `NodeID`s, not derived and not re-minted. The
+consumer is a read-only mirror (Decision D9): it **adopts** them verbatim,
+creating each node with the explicit id the manifest gives (the persistence
+layer already supports explicit-id creation, and `part_id` is the manifest's
+`parent_node_id`). The manifest is a full snapshot of the logical tree, so it
+dedups across commits whenever the structure is unchanged and the consumer never
+needs the previous manifest -- it diffs the incoming manifest against its own
+current rows.
+
+With node identity in hand, incremental pull is a **node_id-keyed diff** and the
+hard cases collapse into set arithmetic over `node_id`:
+
+- present in the manifest, absent locally -- **create** with the given id;
+- absent in the manifest, present locally -- **delete**;
+- same id, changed `child_hash` -- **write a new version** in place (history
+  preserved; for a series, append only the missing version suffix, Section
+  8.5.3; for a directory, recurse; for a dynamic node, update its recipe);
+- same id, changed `name` or `parent_node_id` -- **rename** in place, with no
+  re-materialization.
+
+No path search, no per-directory name diff for deletion, and no rename
+ambiguity. Because the consumer adopts source ids it becomes **row-identical**
+to the source, so the node_id-keyed fsck Merkle now genuinely matches across
+replicas. This is **Decision D8 (decided)**: adopt source node_ids via the
+commit manifest. The two alternatives are rejected -- *deriving*
+`node_id = H(parent_node_id, name)` buys cross-consumer id agreement that the
+content-tree hash already provides and breaks on rename; *locally minting* ids
+forces the fragile path-resolution scheme above.
 
 #### 8.5.3 Versions, series, and provenance
 
 - **Single-version files.** One blob object becomes one `FilePhysicalVersion`
   row: `content` = blob bytes (or external reference for large blobs), `blake3`
   = the blob hash, `version` = the node's current version on the consumer.
-- **Series.** A series manifest references an ordered list of version blob
-  hashes. Rebuild recreates one row per version. The series object's cumulative
-  `series_hash` is *not* the tlogfs series `blake3` (a bao root); the consumer
-  must recompute the bao outboard from the concatenated version bytes, the same
-  computation a local series append performs. So a faithful series rebuild costs
-  a re-bao over the versions, not just a row copy.
+- **Series.** A series object references an ordered list of version blob hashes.
+  A full rebuild recreates one row per version, in order. An incremental pull
+  reads the node's current versions, asserts they are a **prefix** of the
+  incoming list (the append-only invariant; a violation is a hard error), and
+  appends only the missing **suffix** -- never re-appending versions it already
+  holds. Writing each version's exact bytes reproduces its `blake3`, so the
+  consumer's recomputed series object equals the source's.
 - **Provenance and txn_seq.** Each commit object carries `Provenance{pond_id,
   seq, time_micros, author, request}`. The consumer is a mirror of the source,
   so it adopts the **source pond_id** and stamps each rebuilt row's `txn_seq`
@@ -454,7 +510,10 @@ re-hashing each object against its key), a set of `OplogEntry` rows whose live
 tree folds back to the remote `root_tree_hash` (the rebuild is correct iff the
 read-side fold of the rebuilt pond equals the tip's `root_tree_hash`), and a
 local tip ref equal to the remote tip. That fold-equals-tip check is the
-rebuild's acceptance test and the natural first integration test.
+rebuild's acceptance test and the natural first integration test. Because the
+consumer adopted the manifest's node_ids, it is additionally **row-identical**
+to the source, so the node_id-keyed fsck Merkle matches across replicas -- a
+stronger check than the content fold alone.
 
 ---
 
@@ -568,20 +627,27 @@ the node kind:
   manifests, symlinks, and recipes are inline `objects` rows. Same BLAKE3 hash
   either way, so reachability/dedup/walk are uniform and large files never load
   into memory or the remote row table (Section 8.4).
+- **D8 -- Consumer adopts the source's node_ids via a commit manifest.** A
+  pulled object graph is reconstructed under the **source's real `node_id`s**,
+  not locally-minted or derived ones. Each commit references a content-addressed
+  **node manifest** listing `node_id -> (parent_node_id, name, entry_type,
+  child_hash)` for every node in the tree; the consumer (a read-only mirror,
+  D9) adopts those ids verbatim via explicit-id creation. Incremental pull is
+  then a `node_id`-keyed diff -- create / delete / new-version / rename fall out
+  as set arithmetic, with renames and deletions handled without path search or
+  re-materialization, and the consumer ends up row-identical to the source. The
+  pure objects (blob/tree/series) stay node_id-free so dedup and the
+  transparency log are unaffected; identity lives only in the commit-referenced
+  manifest. Rejected: *deriving* `node_id = H(parent_node_id, name)` (buys
+  cross-consumer id agreement the content-tree hash already gives, breaks on
+  rename) and *locally minting* ids (forces fragile path resolution; rename
+  degrades to delete-and-recreate). See Section 8.5.2.
 
 ### Open
 
 - **D5 -- Checkpoint cadence and the SHA-256 publish format.** When the log
   materializes tiles and emits checkpoints; deferred together with signing
   (Section 10).
-- **D8 -- Consumer node identity on rebuild.** How a pulled object graph is
-  assigned `node_id`s (Section 8.5.2). Recommendation: deterministic
-  path-derived ids (`H(parent_node_id, name)` with the entry-type nibble in
-  byte[6]), because it is the only choice that makes a second pull an in-place
-  update with preserved version history and makes rebuilt ponds reproducible
-  across consumers. The alternative -- fresh random ids -- is simpler but
-  breaks incremental pull. Content comparison and the transparency log are
-  unaffected either way.
 - **D9 -- Mirror vs writable fork.** Whether a consumer is only a read-only
   mirror of the source (adopts the source pond_id, replays its commits) or may
   also be a writable fork that lands its own commits on a pulled base
