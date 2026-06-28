@@ -164,6 +164,17 @@ async fn fetch_returns_verified_closure() {
         graph.objects.contains_key(&root),
         "root tree must be fetched"
     );
+
+    // The node manifest is fetched and carries one entry per node: the root,
+    // both files, and the subdirectory (4 nodes).
+    assert_eq!(graph.manifest.len(), 4, "manifest must cover every node");
+    assert!(
+        graph
+            .manifest
+            .iter()
+            .any(|e| e.parent_node_id.is_empty() && e.name.is_empty()),
+        "manifest must contain the root entry"
+    );
 }
 
 /// Fetching a non-existent ref yields an empty graph, not an error.

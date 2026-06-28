@@ -22,7 +22,8 @@ use std::collections::BTreeMap;
 
 use sync_store::ContentRemote;
 use sync_store::content::{
-    Commit, ObjectHash, TreeEntry, decode_recipe, decode_series, decode_tree,
+    Commit, ManifestEntry, ObjectHash, TreeEntry, decode_manifest, decode_recipe, decode_series,
+    decode_tree,
 };
 use tinyfs::EntryType;
 use tinyfs::async_helpers::convenience::create_file_path_with_type;
@@ -56,6 +57,12 @@ pub struct FetchedGraph {
     pub objects: BTreeMap<ObjectHash, FetchedObject>,
     /// Raw bytes of every fetched object, keyed by content hash.
     pub bytes: BTreeMap<ObjectHash, Vec<u8>>,
+    /// The tip commit's node manifest: one entry per node, recording the
+    /// source's `node_id` alongside its parent, name, type, and content
+    /// address (Section 4.5).  Empty when the graph is empty.  Kept out of
+    /// `objects`/`bytes` because the manifest is pond-specific identity, not
+    /// part of the dedup-shareable pure-content closure.
+    pub manifest: Vec<ManifestEntry>,
 }
 
 impl FetchedGraph {
@@ -129,10 +136,22 @@ pub async fn fetch_object_graph(
     // Descend the tip commit's root tree, fetching the full reachable closure.
     if let Some((_, tip_commit)) = graph.commits.first() {
         let root = tip_commit.root_tree_hash;
+        let manifest_hash = tip_commit.node_manifest_hash;
         fetch_tree(remote, root, &mut graph).await?;
+        graph.manifest = fetch_manifest(remote, manifest_hash).await?;
     }
 
     Ok(graph)
+}
+
+/// Fetch and decode the tip commit's node manifest, verifying its bytes hash to
+/// the commit's `node_manifest_hash` (Section 4.5).
+async fn fetch_manifest(
+    remote: &ContentRemote,
+    manifest_hash: ObjectHash,
+) -> Result<Vec<ManifestEntry>, StewardError> {
+    let bytes = fetch_verified(remote, manifest_hash).await?;
+    decode_manifest(&bytes).map_err(|e| StewardError::Content(format!("decode manifest: {e}")))
 }
 
 /// Recursively fetch a tree object and everything reachable from its entries.
