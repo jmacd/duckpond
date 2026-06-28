@@ -366,7 +366,103 @@ impl WD {
         self.child_wd(&node).await
     }
 
-    /// Creates a directory and all parent directories as needed (mkdir -p semantics).
+    /// Adopt a directory child under `name` with an explicit `node_id`,
+    /// returning a working directory for it.
+    ///
+    /// Used by content-addressed pull to mirror a source pond's node
+    /// identities (Decision D8): the consumer adopts the source's `node_id`
+    /// so the rebuilt pond is row-identical and later pulls are a
+    /// `node_id`-keyed diff.  `name` must be a direct child of this directory
+    /// and must not already exist.  The child's partition is derived from the
+    /// adopted `node_id` (physical directories are self-partitioned).
+    pub async fn insert_directory_with_id(&self, name: &str, node_id: NodeID) -> Result<WD> {
+        self.check_writable()?;
+        if self.dref.get(name).await?.is_some() {
+            return Err(Error::already_exists(name));
+        }
+        let id = self.id().child_id(node_id);
+        let node = self.fs.persistence.create_directory_node(id).await?;
+        self.fs.persistence.store_node(&node).await?;
+        self.dref.insert(name.to_string(), node.clone()).await?;
+        let np = NodePath::new(node, self.dref.path().join(name));
+        self.child_wd(&np).await
+    }
+
+    /// Adopt an empty file or table child under `name` with an explicit
+    /// `node_id`, returning a streaming writer for its first version.
+    ///
+    /// The entry type is carried by the `node_id` nibble, so a series node
+    /// adopts the series type automatically.  Mirrors
+    /// [`create_file_path_streaming_with_type`] but adopts a caller-supplied
+    /// id; the returned writer must be used to write the first version (a
+    /// pending file has no row to re-resolve by path yet).  `name` must be a
+    /// direct child of this directory and must not already exist.
+    ///
+    /// [`create_file_path_streaming_with_type`]: WD::create_file_path_streaming_with_type
+    pub async fn create_file_with_id(
+        &self,
+        name: &str,
+        node_id: NodeID,
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
+        self.check_writable()?;
+        if self.dref.get(name).await?.is_some() {
+            return Err(Error::already_exists(name));
+        }
+        let id = self.id().child_id(node_id);
+        let node = self.fs.persistence.create_file_node(id).await?;
+        self.fs.persistence.store_node(&node).await?;
+        self.dref.insert(name.to_string(), node.clone()).await?;
+        let np = NodePath::new(node, self.dref.path().join(name));
+        let file_handle = np.as_file().await?;
+        file_handle.async_writer().await
+    }
+
+    /// Adopt a symlink child under `name` with an explicit `node_id`, pointing
+    /// at `target`.  `name` must be a direct child of this directory and must
+    /// not already exist.
+    pub async fn insert_symlink_with_id(
+        &self,
+        name: &str,
+        node_id: NodeID,
+        target: &str,
+    ) -> Result<()> {
+        self.check_writable()?;
+        if self.dref.get(name).await?.is_some() {
+            return Err(Error::already_exists(name));
+        }
+        let id = self.id().child_id(node_id);
+        let node = self
+            .fs
+            .persistence
+            .create_symlink_node(id, Path::new(target))
+            .await?;
+        self.fs.persistence.store_node(&node).await?;
+        self.dref.insert(name.to_string(), node).await?;
+        Ok(())
+    }
+
+    /// Adopt a dynamic child under `name` with an explicit `node_id`, from its
+    /// factory type and config.  `name` must be a direct child of this
+    /// directory and must not already exist.
+    pub async fn insert_dynamic_with_id(
+        &self,
+        name: &str,
+        node_id: NodeID,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<()> {
+        self.check_writable()?;
+        if self.dref.get(name).await?.is_some() {
+            return Err(Error::already_exists(name));
+        }
+        let id = self.id().child_id(node_id);
+        let node = self
+            .fs
+            .create_dynamic_node(id, factory_type, config_content)
+            .await?;
+        self.dref.insert(name.to_string(), node).await?;
+        Ok(())
+    }
     /// If the directory already exists, returns Ok with a WD to that directory.
     /// Note: Parent directory references (..) in the path are not supported and will error.
     pub async fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<WD> {

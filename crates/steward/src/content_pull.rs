@@ -18,15 +18,14 @@
 //! series objects whose version blobs are leaves; dynamic and computed nodes
 //! are recipe leaves whose generated children are not in the graph.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use sync_store::ContentRemote;
 use sync_store::content::{
     Commit, ManifestEntry, ObjectHash, TreeEntry, decode_manifest, decode_recipe, decode_series,
     decode_tree,
 };
-use tinyfs::EntryType;
-use tinyfs::async_helpers::convenience::create_file_path_with_type;
+use tinyfs::{EntryType, NodeID, WD};
 use tlogfs::PondUserMetadata;
 use tokio::io::AsyncWriteExt;
 
@@ -262,78 +261,104 @@ fn verify(hash: ObjectHash, bytes: &[u8]) -> Result<(), StewardError> {
     Ok(())
 }
 
-/// One filesystem operation in a rebuild plan, in apply order.
-#[derive(Debug, Clone)]
-enum RebuildOp {
-    /// Create a physical directory at this path.
-    Dir(String),
-    /// Create a physical file or table at this path with these bytes.
-    File {
-        path: String,
-        entry_type: EntryType,
-        bytes: Vec<u8>,
-    },
-    /// Create a symlink at this path pointing at this target.
-    Symlink { path: String, target: String },
-    /// Recreate a multi-version series at this path, one version per element,
-    /// in ascending version order.  Each version's bytes are written as a new
-    /// series version, exactly reproducing the source's per-version blobs (and
-    /// therefore their `blake3` hashes) so the read-side fold's `series_hash`
-    /// matches the source (design Section 8.5.3).
-    Series {
-        path: String,
-        entry_type: EntryType,
-        versions: Vec<Vec<u8>>,
-    },
-    /// Recreate a dynamic node at this path from its recipe: the factory type
-    /// and stored config bytes.  The consumer recomputes the node's output on
-    /// read, so its generated children are not part of the plan (Section
-    /// 8.5.4).
-    Dynamic {
-        path: String,
-        entry_type: EntryType,
-        factory: String,
-        config: Vec<u8>,
-    },
-}
-
-/// The result of rebuilding a pond from a fetched object graph.
+/// The result of rebuilding a pond from a fetched object graph.  Counts reflect
+/// nodes *created* in this rebuild; an incremental pull that only versions or
+/// renames existing nodes reports zeros here.
 #[derive(Debug, Clone, Default)]
 pub struct RebuildOutcome {
     /// The tip commit's root tree hash that was rebuilt.
     pub root_tree_hash: Option<ObjectHash>,
     /// Number of directories created.
     pub dirs: usize,
-    /// Number of files/tables created.
+    /// Number of single-version files/tables created.
     pub files: usize,
     /// Number of symlinks created.
     pub symlinks: usize,
-    /// Number of multi-version series recreated.
+    /// Number of multi-version series created.
     pub series: usize,
-    /// Number of dynamic nodes recreated.
+    /// Number of dynamic nodes created.
     pub dynamic: usize,
 }
 
-/// Rebuild a fresh tlogfs pond from a fetched object graph (design Section
-/// 8.5).
+/// One filesystem operation in an incremental rebuild plan, in apply order.
 ///
-/// Walks the tip commit's root tree and replays it into `target` as ordinary
-/// tinyfs writes in a single transaction, reusing the tested write paths rather
-/// than synthesizing rows directly.  This is the read-only mirror first cut
-/// (Decision D9): node identity is freshly minted, so the rebuilt pond is
-/// content-equal to the source (the read-side fold of the result equals the
-/// remote tip's `root_tree_hash`) but not row-identical.  Path-derived identity
-/// for incremental pull (Decision D8) is a later refinement.
+/// The plan is a `node_id`-keyed diff of the fetched source manifest against
+/// the target's current node state (Decision D8).  Deletions come first
+/// (deepest-first), then creates/renames/versions in breadth-first order so a
+/// parent directory is always materialized before its children.
+#[derive(Debug, Clone)]
+enum ApplyOp {
+    /// Rename a node within its parent (identity and history preserved).
+    Rename {
+        parent: String,
+        old: String,
+        new: String,
+    },
+    /// Ensure a directory exists under `parent` as `name` with the adopted
+    /// `node_id`, then register its working directory for descent.  `create`
+    /// distinguishes adopting a new node from opening an existing one.
+    Dir {
+        parent: String,
+        name: String,
+        node_id: String,
+        create: bool,
+    },
+    /// Create (adopting `node_id`) or append to a physical file / table /
+    /// series node.  `versions` are the version blobs to write in order: every
+    /// version on create, only the appended suffix on update.  `entry_type`
+    /// drives writer finalization (series infer temporal bounds).
+    File {
+        parent: String,
+        name: String,
+        node_id: String,
+        create: bool,
+        entry_type: EntryType,
+        versions: Vec<Vec<u8>>,
+    },
+    /// Create (adopting `node_id`) or rewrite a symlink.  A rewrite re-adopts
+    /// the same `node_id` after unlinking, so identity is preserved.
+    Symlink {
+        parent: String,
+        name: String,
+        node_id: String,
+        create: bool,
+        target: String,
+    },
+    /// Create (adopting `node_id`) or rewrite a dynamic node from its recipe.
+    Dynamic {
+        parent: String,
+        name: String,
+        node_id: String,
+        create: bool,
+        factory: String,
+        config: Vec<u8>,
+    },
+    /// Unlink a target node that is absent from the source.
+    Delete { parent_path: String, name: String },
+}
+
+/// Rebuild or incrementally update a tlogfs pond from a fetched object graph
+/// (design Section 8.5).
 ///
-/// `target` must be an empty pond.
+/// The fetched node manifest carries the source's real `node_id`s; the consumer
+/// adopts them so the rebuilt pond is row-identical to the source and every
+/// later pull is a `node_id`-keyed diff (Decision D8).  The target need not be
+/// empty: this computes the target's current node state, diffs it against the
+/// source manifest by `node_id`, and applies the difference -- creating new
+/// nodes (with adopted ids), appending file/series versions, renaming moved
+/// nodes in place, and deleting nodes absent from the source -- in a single
+/// transaction.
 ///
 /// # Errors
 ///
-/// Returns an error if the graph is empty, if the graph references an object it
-/// does not contain, if a symlink target is not valid UTF-8, if a recipe object
-/// fails to decode, or if a write fails.  After a successful rebuild, the
-/// read-side fold of `target` is verified to equal the tip's root tree hash; a
-/// mismatch is an error.
+/// Returns an error if the graph is empty or carries no manifest, if the graph
+/// references an object it does not contain, if a node's `entry_type` changed
+/// or it was reparented (both unsupported), if an incoming series is not an
+/// append-only extension of the one held, if a symlink target is not valid
+/// UTF-8, if a recipe fails to decode, or if a write fails.  After applying,
+/// the read-side fold of `target` must equal the tip's root tree hash and the
+/// rebuilt node manifest hash must equal the tip commit's `node_manifest_hash`;
+/// a mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
     graph: &FetchedGraph,
@@ -341,78 +366,27 @@ pub async fn rebuild_pond(
     let root = graph
         .root_tree_hash()
         .ok_or_else(|| StewardError::Content("cannot rebuild from an empty graph".to_string()))?;
-
-    let ops = plan_rebuild(graph, root)?;
-
-    let mut outcome = RebuildOutcome {
-        root_tree_hash: Some(root),
-        ..RebuildOutcome::default()
-    };
-    for op in &ops {
-        match op {
-            RebuildOp::Dir(_) => outcome.dirs += 1,
-            RebuildOp::File { .. } => outcome.files += 1,
-            RebuildOp::Symlink { .. } => outcome.symlinks += 1,
-            RebuildOp::Series { .. } => outcome.series += 1,
-            RebuildOp::Dynamic { .. } => outcome.dynamic += 1,
-        }
+    if graph.manifest.is_empty() {
+        return Err(StewardError::Content(
+            "fetched graph has no node manifest".to_string(),
+        ));
     }
+    let tip_manifest_hash = graph
+        .commits
+        .first()
+        .map(|(_, c)| c.node_manifest_hash)
+        .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
 
-    let plan = ops.clone();
+    let (target_nodes, target_series) = crate::content_tree::build_target_state(target).await?;
+
+    let (ops, outcome) = plan_node_diff(graph, root, &target_nodes, &target_series)?;
+
+    let root_node_id = src_root_id(graph)?.to_string();
     target
         .write_transaction(
             &PondUserMetadata::new(vec!["pull".to_string()]),
             async move |fs| {
-                let wd = fs.root().await?;
-                for op in plan {
-                    match op {
-                        RebuildOp::Dir(path) => {
-                            let _ = wd.create_dir_all(&path).await?;
-                        }
-                        RebuildOp::File {
-                            path,
-                            entry_type,
-                            bytes,
-                        } => {
-                            let _ =
-                                create_file_path_with_type(&wd, &path, &bytes, entry_type).await?;
-                        }
-                        RebuildOp::Symlink { path, target } => {
-                            let _ = wd.create_symlink_path(&path, &target).await?;
-                        }
-                        RebuildOp::Series {
-                            path,
-                            entry_type,
-                            versions,
-                        } => {
-                            // Append each version in order; the first write
-                            // creates the series node, subsequent writes add
-                            // versions.  Table series re-infer temporal bounds
-                            // from the parquet footer (which also shuts the
-                            // writer down); raw-byte series just close.
-                            for version in versions {
-                                let mut writer =
-                                    wd.async_writer_path_with_type(&path, entry_type).await?;
-                                writer.write_all(&version).await?;
-                                if entry_type == EntryType::TablePhysicalSeries {
-                                    let _ = writer.infer_temporal_bounds().await?;
-                                } else {
-                                    writer.shutdown().await?;
-                                }
-                            }
-                        }
-                        RebuildOp::Dynamic {
-                            path,
-                            entry_type,
-                            factory,
-                            config,
-                        } => {
-                            let _ = wd
-                                .create_dynamic_path(&path, entry_type, &factory, config)
-                                .await?;
-                        }
-                    }
-                }
+                apply_ops(fs, &root_node_id, &ops).await?;
                 Ok(())
             },
         )
@@ -427,82 +401,430 @@ pub async fn rebuild_pond(
         )));
     }
 
+    let pond_id = target.data_persistence().pond_id().to_string();
+    let table = target.data_persistence().table().clone();
+    let (_, manifest_root) =
+        crate::content_tree::compute_commit_roots_for_table(table, &pond_id).await?;
+    if manifest_root != tip_manifest_hash {
+        return Err(StewardError::Content(format!(
+            "rebuilt node manifest hashes to {} but the tip commit's manifest is {}",
+            manifest_root.to_hex(),
+            tip_manifest_hash.to_hex()
+        )));
+    }
+
     Ok(outcome)
 }
 
-/// Produce the pre-order list of filesystem operations that recreates the tree
-/// rooted at `root`, so that every directory precedes its children.
-fn plan_rebuild(graph: &FetchedGraph, root: ObjectHash) -> Result<Vec<RebuildOp>, StewardError> {
+/// The source manifest's root entry id (the node with no parent and no name).
+fn src_root_id(graph: &FetchedGraph) -> Result<&str, StewardError> {
+    graph
+        .manifest
+        .iter()
+        .find(|e| e.parent_node_id.is_empty() && e.name.is_empty())
+        .map(|e| e.node_id.as_str())
+        .ok_or_else(|| StewardError::Content("manifest has no root entry".to_string()))
+}
+
+/// Diff the fetched source manifest against the target's current node state,
+/// keyed by `node_id`, producing the ordered apply plan and the create counts.
+fn plan_node_diff(
+    graph: &FetchedGraph,
+    root: ObjectHash,
+    target_nodes: &HashMap<String, ManifestEntry>,
+    target_series: &HashMap<String, Vec<ObjectHash>>,
+) -> Result<(Vec<ApplyOp>, RebuildOutcome), StewardError> {
+    let root_id = src_root_id(graph)?.to_string();
+
+    // Index the source manifest by node_id and by parent for breadth-first
+    // ordering (parents before children).
+    let mut source_by_id: HashMap<&str, &ManifestEntry> = HashMap::new();
+    let mut children: HashMap<&str, Vec<&ManifestEntry>> = HashMap::new();
+    for entry in &graph.manifest {
+        let _ = source_by_id.insert(entry.node_id.as_str(), entry);
+        if entry.node_id != root_id {
+            children
+                .entry(entry.parent_node_id.as_str())
+                .or_default()
+                .push(entry);
+        }
+    }
+    for kids in children.values_mut() {
+        kids.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
     let mut ops = Vec::new();
-    // Worklist of (path prefix, tree hash). The root prefix is empty so a
-    // top-level child resolves to "/name".
-    let mut stack = vec![(String::new(), root)];
-    while let Some((prefix, tree_hash)) = stack.pop() {
-        let entries = match graph.objects.get(&tree_hash) {
-            Some(FetchedObject::Tree(entries)) => entries,
-            Some(_) => {
-                return Err(StewardError::Content(format!(
-                    "expected a tree at {} but found a non-tree object",
-                    tree_hash.to_hex()
-                )));
-            }
-            None => {
-                return Err(StewardError::Content(format!(
-                    "tree object {} missing from graph",
-                    tree_hash.to_hex()
-                )));
-            }
+    let mut outcome = RebuildOutcome {
+        root_tree_hash: Some(root),
+        ..RebuildOutcome::default()
+    };
+
+    // Deletions first: target nodes absent from the source, deepest-first so a
+    // directory is emptied before it is unlinked.
+    let mut deletions: Vec<&ManifestEntry> = target_nodes
+        .values()
+        .filter(|t| t.node_id != root_id && !source_by_id.contains_key(t.node_id.as_str()))
+        .collect();
+    deletions.sort_by_key(|t| std::cmp::Reverse(target_depth(&t.node_id, target_nodes)));
+    for t in deletions {
+        ops.push(ApplyOp::Delete {
+            parent_path: target_path(&t.parent_node_id, target_nodes),
+            name: t.name.clone(),
+        });
+    }
+
+    // Creates / renames / versions in breadth-first order from the root.
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    queue.push_back(root_id.as_str());
+    while let Some(parent_id) = queue.pop_front() {
+        let Some(kids) = children.get(parent_id) else {
+            continue;
         };
-        for entry in entries {
-            let path = format!("{prefix}/{}", entry.name);
-            match entry.entry_type {
-                EntryType::DirectoryPhysical => {
-                    ops.push(RebuildOp::Dir(path.clone()));
-                    stack.push((path, entry.child_hash));
-                }
-                EntryType::FilePhysicalVersion | EntryType::TablePhysicalVersion => {
-                    let bytes = blob_bytes(graph, entry.child_hash)?;
-                    ops.push(RebuildOp::File {
-                        path,
-                        entry_type: entry.entry_type,
-                        bytes,
-                    });
-                }
-                EntryType::Symlink => {
-                    let bytes = blob_bytes(graph, entry.child_hash)?;
-                    let target = String::from_utf8(bytes).map_err(|e| {
-                        StewardError::Content(format!("symlink target is not utf-8: {e}"))
-                    })?;
-                    ops.push(RebuildOp::Symlink { path, target });
-                }
-                EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
-                    let versions = series_version_bytes(graph, entry.child_hash)?;
-                    ops.push(RebuildOp::Series {
-                        path,
-                        entry_type: entry.entry_type,
-                        versions,
-                    });
-                }
-                EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
-                    // A dynamic node's child_hash is its recipe object; decode
-                    // it into factory + config and stop -- its generated
-                    // children are recomputed on read, not stored (Section
-                    // 8.5.4).
-                    let bytes = blob_bytes(graph, entry.child_hash)?;
-                    let (factory, config) = decode_recipe(&bytes).map_err(|e| {
-                        StewardError::Content(format!("decode recipe at {path}: {e}"))
-                    })?;
-                    ops.push(RebuildOp::Dynamic {
-                        path,
-                        entry_type: entry.entry_type,
-                        factory,
-                        config,
-                    });
-                }
+        for entry in kids {
+            plan_one(
+                entry,
+                graph,
+                target_nodes,
+                target_series,
+                &mut ops,
+                &mut outcome,
+            )?;
+            if entry.entry_type == EntryType::DirectoryPhysical {
+                queue.push_back(entry.node_id.as_str());
             }
         }
     }
-    Ok(ops)
+
+    Ok((ops, outcome))
+}
+
+/// Plan the operations for a single source node against its target twin.
+fn plan_one(
+    entry: &ManifestEntry,
+    graph: &FetchedGraph,
+    target_nodes: &HashMap<String, ManifestEntry>,
+    target_series: &HashMap<String, Vec<ObjectHash>>,
+    ops: &mut Vec<ApplyOp>,
+    outcome: &mut RebuildOutcome,
+) -> Result<(), StewardError> {
+    let existing = target_nodes.get(&entry.node_id);
+    let create = existing.is_none();
+
+    if let Some(t) = existing {
+        if t.parent_node_id != entry.parent_node_id {
+            return Err(StewardError::Content(format!(
+                "node {} was reparented from {} to {}; reparenting is not supported",
+                entry.node_id, t.parent_node_id, entry.parent_node_id
+            )));
+        }
+        if t.entry_type != entry.entry_type {
+            return Err(StewardError::Content(format!(
+                "node {} changed entry type from {:?} to {:?}; this is not supported",
+                entry.node_id, t.entry_type, entry.entry_type
+            )));
+        }
+        if t.name != entry.name {
+            ops.push(ApplyOp::Rename {
+                parent: entry.parent_node_id.clone(),
+                old: t.name.clone(),
+                new: entry.name.clone(),
+            });
+        }
+    }
+
+    let content_changed = existing.is_none_or(|t| t.child_hash != entry.child_hash);
+
+    match entry.entry_type {
+        EntryType::DirectoryPhysical => {
+            if create {
+                outcome.dirs += 1;
+            }
+            ops.push(ApplyOp::Dir {
+                parent: entry.parent_node_id.clone(),
+                name: entry.name.clone(),
+                node_id: entry.node_id.clone(),
+                create,
+            });
+        }
+        EntryType::FilePhysicalVersion | EntryType::TablePhysicalVersion => {
+            if create {
+                outcome.files += 1;
+            }
+            let versions = if content_changed {
+                vec![blob_bytes(graph, entry.child_hash)?]
+            } else {
+                Vec::new()
+            };
+            ops.push(ApplyOp::File {
+                parent: entry.parent_node_id.clone(),
+                name: entry.name.clone(),
+                node_id: entry.node_id.clone(),
+                create,
+                entry_type: entry.entry_type,
+                versions,
+            });
+        }
+        EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
+            if create {
+                outcome.series += 1;
+            }
+            let versions =
+                plan_series_versions(entry, graph, target_series, existing.map(|t| t.child_hash))?;
+            ops.push(ApplyOp::File {
+                parent: entry.parent_node_id.clone(),
+                name: entry.name.clone(),
+                node_id: entry.node_id.clone(),
+                create,
+                entry_type: entry.entry_type,
+                versions,
+            });
+        }
+        EntryType::Symlink => {
+            if create {
+                outcome.symlinks += 1;
+            }
+            if create || content_changed {
+                let bytes = blob_bytes(graph, entry.child_hash)?;
+                let target = String::from_utf8(bytes).map_err(|e| {
+                    StewardError::Content(format!("symlink target is not utf-8: {e}"))
+                })?;
+                ops.push(ApplyOp::Symlink {
+                    parent: entry.parent_node_id.clone(),
+                    name: entry.name.clone(),
+                    node_id: entry.node_id.clone(),
+                    create,
+                    target,
+                });
+            }
+        }
+        EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
+            if create {
+                outcome.dynamic += 1;
+            }
+            if create || content_changed {
+                let bytes = blob_bytes(graph, entry.child_hash)?;
+                let (factory, config) = decode_recipe(&bytes).map_err(|e| {
+                    StewardError::Content(format!("decode recipe for {}: {e}", entry.name))
+                })?;
+                ops.push(ApplyOp::Dynamic {
+                    parent: entry.parent_node_id.clone(),
+                    name: entry.name.clone(),
+                    node_id: entry.node_id.clone(),
+                    create,
+                    factory,
+                    config,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decide which series version blobs to write: all of them on create, or only
+/// the appended suffix on update.  An update requires the versions already held
+/// to be a prefix of the incoming list -- series are append-only (Section
+/// 8.5.3), so any divergence is a hard error.
+fn plan_series_versions(
+    entry: &ManifestEntry,
+    graph: &FetchedGraph,
+    target_series: &HashMap<String, Vec<ObjectHash>>,
+    existing_child_hash: Option<ObjectHash>,
+) -> Result<Vec<Vec<u8>>, StewardError> {
+    let incoming = series_hashes(graph, entry.child_hash)?;
+
+    let held = match existing_child_hash {
+        None => &[][..],
+        Some(child_hash) if child_hash == entry.child_hash => return Ok(Vec::new()),
+        Some(_) => target_series
+            .get(&entry.node_id)
+            .map(Vec::as_slice)
+            .ok_or_else(|| {
+                StewardError::Content(format!(
+                    "series node {} changed but its current versions are unknown",
+                    entry.node_id
+                ))
+            })?,
+    };
+
+    if incoming.len() < held.len() || incoming[..held.len()] != *held {
+        return Err(StewardError::Content(format!(
+            "series node {} is not an append-only extension of the versions held ({} held, {} incoming)",
+            entry.node_id,
+            held.len(),
+            incoming.len()
+        )));
+    }
+
+    incoming[held.len()..]
+        .iter()
+        .map(|hash| blob_bytes(graph, *hash))
+        .collect()
+}
+
+/// Apply an ordered plan within an open transaction, adopting source node ids.
+async fn apply_ops(
+    fs: &tinyfs::FS,
+    root_node_id: &str,
+    ops: &[ApplyOp],
+) -> Result<(), StewardError> {
+    let root_wd = fs.root().await?;
+    let mut dir_wd: HashMap<String, WD> = HashMap::new();
+    let _ = dir_wd.insert(root_node_id.to_string(), root_wd.clone());
+
+    for op in ops {
+        match op {
+            ApplyOp::Delete { parent_path, name } => {
+                let pwd = if parent_path.is_empty() {
+                    root_wd.clone()
+                } else {
+                    root_wd.open_dir_path(parent_path).await?
+                };
+                pwd.remove_entry(name).await?;
+            }
+            ApplyOp::Rename { parent, old, new } => {
+                parent_wd(&dir_wd, parent)?.rename_entry(old, new).await?;
+            }
+            ApplyOp::Dir {
+                parent,
+                name,
+                node_id,
+                create,
+            } => {
+                let pwd = parent_wd(&dir_wd, parent)?.clone();
+                let child = if *create {
+                    pwd.insert_directory_with_id(name, parse_node_id(node_id)?)
+                        .await?
+                } else {
+                    pwd.open_dir_path(name).await?
+                };
+                let _ = dir_wd.insert(node_id.clone(), child);
+            }
+            ApplyOp::File {
+                parent,
+                name,
+                node_id,
+                create,
+                entry_type,
+                versions,
+            } => {
+                let pwd = parent_wd(&dir_wd, parent)?;
+                let mut remaining = versions.iter();
+                if *create {
+                    // The first version is written through the writer returned
+                    // at creation: a pending file has no row to re-resolve by
+                    // path yet.  An adopted file always has at least one
+                    // version, but tolerate an empty create defensively.
+                    if let Some(first) = remaining.next() {
+                        let mut writer = pwd
+                            .create_file_with_id(name, parse_node_id(node_id)?)
+                            .await?;
+                        writer.write_all(first).await?;
+                        finalize_writer(writer, *entry_type).await?;
+                    }
+                }
+                for bytes in remaining {
+                    let mut writer = pwd.async_writer_path_with_type(name, *entry_type).await?;
+                    writer.write_all(bytes).await?;
+                    finalize_writer(writer, *entry_type).await?;
+                }
+            }
+            ApplyOp::Symlink {
+                parent,
+                name,
+                node_id,
+                create,
+                target,
+            } => {
+                let pwd = parent_wd(&dir_wd, parent)?;
+                if !create {
+                    pwd.remove_entry(name).await?;
+                }
+                pwd.insert_symlink_with_id(name, parse_node_id(node_id)?, target)
+                    .await?;
+            }
+            ApplyOp::Dynamic {
+                parent,
+                name,
+                node_id,
+                create,
+                factory,
+                config,
+            } => {
+                let pwd = parent_wd(&dir_wd, parent)?;
+                if !create {
+                    pwd.remove_entry(name).await?;
+                }
+                pwd.insert_dynamic_with_id(name, parse_node_id(node_id)?, factory, config.clone())
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Finalize a version writer: a table series infers its temporal bounds from
+/// the parquet footer (which also shuts the writer down); every other kind just
+/// closes.
+async fn finalize_writer(
+    mut writer: std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>,
+    entry_type: EntryType,
+) -> Result<(), StewardError> {
+    if entry_type == EntryType::TablePhysicalSeries {
+        let _ = writer.infer_temporal_bounds().await?;
+    } else {
+        writer.shutdown().await?;
+    }
+    Ok(())
+}
+
+/// Look up a parent directory's working directory by `node_id`, erroring if it
+/// was not materialized earlier in the breadth-first plan.
+fn parent_wd<'a>(dir_wd: &'a HashMap<String, WD>, node_id: &str) -> Result<&'a WD, StewardError> {
+    dir_wd.get(node_id).ok_or_else(|| {
+        StewardError::Content(format!(
+            "parent directory {node_id} was not materialized before its child"
+        ))
+    })
+}
+
+/// Parse a manifest `node_id` string into a [`NodeID`].
+fn parse_node_id(node_id: &str) -> Result<NodeID, StewardError> {
+    NodeID::from_hex_string(node_id)
+        .map_err(|e| StewardError::Content(format!("invalid node_id {node_id}: {e}")))
+}
+
+/// Depth of a target node from the root (root is 0), by walking parents.
+fn target_depth(node_id: &str, target_nodes: &HashMap<String, ManifestEntry>) -> usize {
+    let mut depth = 0;
+    let mut current = node_id;
+    while let Some(entry) = target_nodes.get(current) {
+        if entry.parent_node_id.is_empty() {
+            break;
+        }
+        depth += 1;
+        current = &entry.parent_node_id;
+    }
+    depth
+}
+
+/// Reconstruct the absolute path of a target directory node from its manifest
+/// parent chain (empty string for the root).
+fn target_path(node_id: &str, target_nodes: &HashMap<String, ManifestEntry>) -> String {
+    let mut names = Vec::new();
+    let mut current = node_id;
+    while let Some(entry) = target_nodes.get(current) {
+        if entry.parent_node_id.is_empty() {
+            break;
+        }
+        names.push(entry.name.as_str());
+        current = &entry.parent_node_id;
+    }
+    names.reverse();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", names.join("/"))
+    }
 }
 
 /// Look up a leaf blob's bytes in the fetched graph.
@@ -520,30 +842,20 @@ fn blob_bytes(graph: &FetchedGraph, hash: ObjectHash) -> Result<Vec<u8>, Steward
     }
 }
 
-/// Resolve a series object to its ordered list of version blobs.  Looks up the
-/// series manifest at `series_hash`, then each version blob it references, in
-/// ascending version order (design Section 8.5.3).
-fn series_version_bytes(
+/// Resolve a series object to its ordered list of version blob hashes.
+fn series_hashes(
     graph: &FetchedGraph,
     series_hash: ObjectHash,
-) -> Result<Vec<Vec<u8>>, StewardError> {
-    let versions = match graph.objects.get(&series_hash) {
-        Some(FetchedObject::Series(versions)) => versions,
-        Some(_) => {
-            return Err(StewardError::Content(format!(
-                "expected a series at {} but found a non-series object",
-                series_hash.to_hex()
-            )));
-        }
-        None => {
-            return Err(StewardError::Content(format!(
-                "series object {} missing from graph",
-                series_hash.to_hex()
-            )));
-        }
-    };
-    versions
-        .iter()
-        .map(|hash| blob_bytes(graph, *hash))
-        .collect()
+) -> Result<&[ObjectHash], StewardError> {
+    match graph.objects.get(&series_hash) {
+        Some(FetchedObject::Series(versions)) => Ok(versions),
+        Some(_) => Err(StewardError::Content(format!(
+            "expected a series at {} but found a non-series object",
+            series_hash.to_hex()
+        ))),
+        None => Err(StewardError::Content(format!(
+            "series object {} missing from graph",
+            series_hash.to_hex()
+        ))),
+    }
 }

@@ -156,7 +156,10 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestEntry>, String> {
         ));
     }
     if !cur.is_empty() {
-        return Err(format!("{} trailing byte(s) after manifest", cur.remaining()));
+        return Err(format!(
+            "{} trailing byte(s) after manifest",
+            cur.remaining()
+        ));
     }
     Ok(entries)
 }
@@ -196,7 +199,10 @@ mod tests {
             EntryType::FilePhysicalVersion,
             h("DIFFERENT"),
         )];
-        assert_ne!(manifest_hash(&base).unwrap(), manifest_hash(&changed).unwrap());
+        assert_ne!(
+            manifest_hash(&base).unwrap(),
+            manifest_hash(&changed).unwrap()
+        );
     }
 
     #[test]
@@ -211,14 +217,20 @@ mod tests {
             EntryType::FilePhysicalVersion,
             h("old"),
         )];
-        assert_ne!(manifest_hash(&before).unwrap(), manifest_hash(&after).unwrap());
+        assert_ne!(
+            manifest_hash(&before).unwrap(),
+            manifest_hash(&after).unwrap()
+        );
     }
 
     #[test]
     fn manifest_hash_changes_with_reparent() {
         let before = vec![file("n1", "dirA", "x")];
         let after = vec![file("n1", "dirB", "x")];
-        assert_ne!(manifest_hash(&before).unwrap(), manifest_hash(&after).unwrap());
+        assert_ne!(
+            manifest_hash(&before).unwrap(),
+            manifest_hash(&after).unwrap()
+        );
     }
 
     #[test]

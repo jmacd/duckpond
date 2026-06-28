@@ -142,6 +142,10 @@ pub(crate) struct ContentTreeIndex {
     pub root_key: NodeKey,
     /// Per physical-directory child lists, in name order.
     pub dirs: HashMap<NodeKey, Vec<ChildRef>>,
+    /// Per series node, its ordered version blob hashes (ascending version).
+    /// Lets an incremental rebuild compute the suffix it must append to a
+    /// series it already holds (design Section 8.5.3).
+    pub series_versions: HashMap<NodeKey, Vec<ObjectHash>>,
     /// Number of distinct nodes folded into the root.
     pub nodes_hashed: usize,
 }
@@ -241,6 +245,7 @@ pub(crate) async fn build_content_tree_for_table(
 /// consumer can adopt these ids and mirror the source row-for-row (Decision
 /// D8).
 pub(crate) fn node_manifest_entries(index: &ContentTreeIndex) -> Vec<ManifestEntry> {
+    let local_pond = &index.root_key.0;
     let mut entries = Vec::with_capacity(index.nodes_hashed.max(1));
     entries.push(ManifestEntry::new(
         index.root_key.1.clone(),
@@ -250,8 +255,19 @@ pub(crate) fn node_manifest_entries(index: &ContentTreeIndex) -> Vec<ManifestEnt
         index.root_tree_hash,
     ));
     for (dir_key, children) in &index.dirs {
+        if &dir_key.0 != local_pond {
+            continue;
+        }
         let parent_node_id = &dir_key.1;
         for child in children {
+            // Skip cross-pond mount points: a child resolving into a foreign
+            // pond belongs to that pond's own manifest, and its root shares the
+            // well-known ROOT_UUID, which would collide here.
+            if let Some((child_pond, _)) = &child.child_dir_key
+                && child_pond != local_pond
+            {
+                continue;
+            }
             entries.push(ManifestEntry::new(
                 child.child_node_id.clone(),
                 parent_node_id.clone(),
@@ -280,6 +296,41 @@ pub(crate) async fn compute_commit_roots_for_table(
     let manifest = node_manifest_entries(&index);
     let manifest_root = manifest_hash(&manifest).map_err(StewardError::Content)?;
     Ok((index.root_tree_hash, manifest_root))
+}
+
+/// Build a target pond's current node state for an incremental rebuild: a map
+/// from `node_id` to its [`ManifestEntry`], and a map from each series
+/// `node_id` to its ordered version blob hashes.
+///
+/// The maps are keyed by `node_id` alone (not the full `NodeKey`) because an
+/// incremental pull operates within a single mirror pond; the diff against the
+/// fetched source manifest is `node_id`-keyed (Decision D8).
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read or folded.
+pub(crate) async fn build_target_state(
+    ship: &Ship,
+) -> Result<
+    (
+        HashMap<String, ManifestEntry>,
+        HashMap<String, Vec<ObjectHash>>,
+    ),
+    StewardError,
+> {
+    let local_pond_id = ship.data_persistence().pond_id().to_string();
+    let table = ship.data_persistence().table().clone();
+    let index = build_content_tree_for_table(table, &local_pond_id).await?;
+    let by_id = node_manifest_entries(&index)
+        .into_iter()
+        .map(|e| (e.node_id.clone(), e))
+        .collect();
+    let series = index
+        .series_versions
+        .into_iter()
+        .map(|((_pond, node_id), versions)| (node_id, versions))
+        .collect();
+    Ok((by_id, series))
 }
 
 /// Materialize the content objects reachable from a pond's root tree.
@@ -391,10 +442,16 @@ async fn scan_and_fold(
         sink,
     )?;
 
+    let series_version_hashes = series_versions
+        .into_iter()
+        .map(|(key, versions)| (key, versions.values().map(|v| v.hash).collect()))
+        .collect();
+
     Ok(ContentTreeIndex {
         root_tree_hash,
         root_key,
         dirs,
+        series_versions: series_version_hashes,
         nodes_hashed: memo.len(),
     })
 }
@@ -449,16 +506,24 @@ fn hash_directory(
         // foreign pond_id (a cross-pond import mount point).
         let child_pond = entry.pond_id.clone().unwrap_or_else(|| key.0.clone());
         let child_key = (child_pond, entry.child_node_id.to_string());
-        let child_hash = hash_child(
-            &child_key,
-            entry.entry_type,
-            latest,
-            series_versions,
-            memo,
-            in_progress,
-            dirs,
-            sink.as_deref_mut(),
-        )?;
+        // A foreign-pond mount whose subtree was not replicated here is opaque:
+        // its content lives in its own pond's tree, so fold by mount identity
+        // rather than recursing into rows that are absent locally.
+        let is_unresolved_mount = child_key.0 != key.0 && !latest.contains_key(&child_key);
+        let child_hash = if is_unresolved_mount {
+            ObjectHash::of_bytes(format!("mount:{}/{}", child_key.0, child_key.1).as_bytes())
+        } else {
+            hash_child(
+                &child_key,
+                entry.entry_type,
+                latest,
+                series_versions,
+                memo,
+                in_progress,
+                dirs,
+                sink.as_deref_mut(),
+            )?
+        };
         let child_node_id = child_key.1.clone();
         let child_dir_key = if entry.entry_type == EntryType::DirectoryPhysical {
             Some(child_key)

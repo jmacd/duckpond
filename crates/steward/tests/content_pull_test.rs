@@ -134,6 +134,51 @@ async fn push(ship: &Ship) -> (tempfile::TempDir, ContentRemote) {
     (remote_dir, remote)
 }
 
+/// Push again to an already-created remote (used by incremental-pull tests).
+async fn repush(ship: &Ship, remote: &mut ContentRemote) {
+    let _ = push_content_to_remote(ship, remote, "main")
+        .await
+        .expect("repush");
+}
+
+async fn rename(ship: &mut Ship, old: &str, new: &str) {
+    let old = old.to_string();
+    let new = new.to_string();
+    ship.write_transaction(&meta("rename"), async move |fs| {
+        let root = fs.root().await?;
+        root.rename_entry(old.trim_start_matches('/'), new.trim_start_matches('/'))
+            .await?;
+        Ok(())
+    })
+    .await
+    .expect("rename transaction");
+}
+
+async fn delete(ship: &mut Ship, path: &str) {
+    let path = path.to_string();
+    ship.write_transaction(&meta("delete"), async move |fs| {
+        let root = fs.root().await?;
+        root.remove_entry(path.trim_start_matches('/')).await?;
+        Ok(())
+    })
+    .await
+    .expect("delete transaction");
+}
+
+async fn read_to_string(ship: &mut Ship, path: &str) -> String {
+    let tx = ship.begin_read(&meta("read")).await.expect("begin read");
+    let root = tx.root().await.expect("root");
+    let bytes = root.read_file_path_to_vec(path).await.expect("read");
+    String::from_utf8(bytes).expect("utf8")
+}
+
+async fn root_hash(ship: &Ship) -> ObjectHash {
+    steward::compute_content_tree(ship)
+        .await
+        .expect("fold")
+        .root_tree_hash
+}
+
 /// Fetching a pushed pond returns a verified closure whose tip and root tree
 /// are present, and every object's bytes hash to its key.
 #[tokio::test]
@@ -380,4 +425,131 @@ async fn rebuild_empty_graph_errors() {
         .expect("create dst pond");
     let empty = steward::FetchedGraph::default();
     assert!(steward::rebuild_pond(&mut dst, &empty).await.is_err());
+}
+
+/// Re-pulling an unchanged pond is a no-op: nothing is created and no spurious
+/// version is appended.  The second rebuild reports zero creates and the fold
+/// still matches the source.
+#[tokio::test]
+async fn incremental_repull_is_idempotent() {
+    let (_t, mut src) = new_pond("idem-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    mkdir_and_file(&mut src, "/sub", "/sub/b.txt", b"beta").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "idem-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    // Push and pull again with no source changes.
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("re-pull");
+
+    assert_eq!(outcome.dirs, 0);
+    assert_eq!(outcome.files, 0);
+    assert_eq!(outcome.series, 0);
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// Appending a version to a source series is mirrored as a suffix-append, not a
+/// recreate: the consumer keeps the prior versions and adds only the new one.
+#[tokio::test]
+async fn series_repull_appends_only_suffix() {
+    let (_t, mut src) = new_pond("ser-src").await;
+    write_series(&mut src, "/r.series", &[(1_000, "v1"), (2_000, "v2")]).await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "ser-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+    assert_eq!(outcome.series, 1);
+
+    // Append a third version, push, and re-pull.
+    write_series(&mut src, "/r.series", &[(3_000, "v3")]).await;
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("re-pull");
+
+    // No new series node is created; the existing one is appended in place.
+    assert_eq!(outcome.series, 0);
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// Renaming a node in the source preserves its identity on pull: the consumer
+/// renames in place rather than deleting and recreating, so no new file node is
+/// created.
+#[tokio::test]
+async fn rename_preserves_node_identity() {
+    let (_t, mut src) = new_pond("ren-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "ren-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    rename(&mut src, "/a.txt", "/b.txt").await;
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("re-pull");
+
+    // A rename is not a create -- a path-keyed mirror would have made a new file.
+    assert_eq!(outcome.files, 0);
+    assert_eq!(read_to_string(&mut dst, "/b.txt").await, "alpha");
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// Deleting a node in the source propagates on pull: the absent node is
+/// unlinked from the mirror.
+#[tokio::test]
+async fn deletion_propagates() {
+    let (_t, mut src) = new_pond("del-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_file(&mut src, "/b.txt", b"beta").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "del-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    delete(&mut src, "/b.txt").await;
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("re-pull");
+
+    assert_eq!(read_to_string(&mut dst, "/a.txt").await, "alpha");
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
 }

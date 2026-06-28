@@ -208,7 +208,12 @@ mod tests {
     #[test]
     fn root_tree_changes_hash() {
         let base = Commit::new(root(), None, manifest(), prov());
-        let changed = Commit::new(ObjectHash::of_bytes(b"other-root"), None, manifest(), prov());
+        let changed = Commit::new(
+            ObjectHash::of_bytes(b"other-root"),
+            None,
+            manifest(),
+            prov(),
+        );
         assert_ne!(base.hash(), changed.hash());
     }
 
@@ -217,8 +222,12 @@ mod tests {
         // The node manifest is part of lineage, so changing it (even with the
         // same content tree) must change the commit hash.
         let base = Commit::new(root(), None, manifest(), prov());
-        let changed =
-            Commit::new(root(), None, ObjectHash::of_bytes(b"other-manifest"), prov());
+        let changed = Commit::new(
+            root(),
+            None,
+            ObjectHash::of_bytes(b"other-manifest"),
+            prov(),
+        );
         assert_ne!(base.hash(), changed.hash());
     }
 
