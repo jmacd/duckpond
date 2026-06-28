@@ -98,6 +98,30 @@ async fn write_series(ship: &mut Ship, path: &str, versions: &[(i64, &str)]) {
     .expect("series transaction");
 }
 
+/// Create a dynamic node (factory + config) at `path` with the given entry
+/// type, exercising the recipe path directly without the provider's factory
+/// registry (rebuild only needs the stored factory string and config bytes).
+async fn write_dynamic(
+    ship: &mut Ship,
+    path: &str,
+    entry_type: tinyfs::EntryType,
+    factory: &str,
+    config: &[u8],
+) {
+    let path = path.to_string();
+    let factory = factory.to_string();
+    let config = config.to_vec();
+    ship.write_transaction(&meta("mknod"), async move |fs| {
+        let root = fs.root().await?;
+        let _ = root
+            .create_dynamic_path(&path, entry_type, &factory, config)
+            .await?;
+        Ok(())
+    })
+    .await
+    .expect("dynamic transaction");
+}
+
 async fn push(ship: &Ship) -> (tempfile::TempDir, ContentRemote) {
     let pond_id = uuid::Uuid::parse_str(ship.data_persistence().pond_id()).expect("pond id");
     let remote_dir = tempdir().expect("remote dir");
@@ -276,6 +300,63 @@ async fn rebuild_reproduces_multi_version_series() {
     assert_eq!(
         dst_root, src_root,
         "rebuilt pond with a multi-version series must be content-equal to the source"
+    );
+}
+
+/// A pond containing dynamic nodes (factory + config recipes) survives the
+/// round trip: rebuild recreates each recipe and the read-side fold's
+/// `recipe_hash` matches the source (Section 8.5.4 / D4).  A dynamic directory
+/// is a leaf recipe -- its generated children are recomputed on read and are
+/// not part of the graph.
+#[tokio::test]
+async fn rebuild_reproduces_dynamic_nodes() {
+    let (_t, mut src) = new_pond("dyn-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_dynamic(
+        &mut src,
+        "/derived",
+        tinyfs::EntryType::TableDynamic,
+        "sql-derived-series",
+        b"sql: SELECT * FROM source\n",
+    )
+    .await;
+    write_dynamic(
+        &mut src,
+        "/gen",
+        tinyfs::EntryType::DirectoryDynamic,
+        "dynamic-dir",
+        b"pattern: '*.series'\n",
+    )
+    .await;
+
+    let src_root = steward::compute_content_tree(&src)
+        .await
+        .expect("source fold")
+        .root_tree_hash;
+
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "dyn-dst")
+        .await
+        .expect("create dst pond");
+
+    let outcome = steward::rebuild_pond(&mut dst, &graph)
+        .await
+        .expect("rebuild");
+
+    assert_eq!(outcome.root_tree_hash, Some(src_root));
+    assert_eq!(outcome.files, 1);
+    assert_eq!(outcome.dynamic, 2);
+
+    let dst_root = steward::compute_content_tree(&dst)
+        .await
+        .expect("dst fold")
+        .root_tree_hash;
+    assert_eq!(
+        dst_root, src_root,
+        "rebuilt pond with dynamic nodes must be content-equal to the source"
     );
 }
 

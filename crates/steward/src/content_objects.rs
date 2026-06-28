@@ -40,7 +40,8 @@ pub enum ObjectKind {
     Series,
     /// A symlink target object (`blake3` of the target bytes).
     Symlink,
-    /// A dynamic-node recipe object (`blake3` of the stored config bytes).
+    /// A dynamic-node recipe object (`blake3` of the factory type plus config
+    /// bytes; see [`sync_store::content::recipe_hash`]).
     Recipe,
 }
 

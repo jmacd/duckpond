@@ -36,6 +36,9 @@ const TREE_MAGIC: &[u8] = b"dp.tree.1\n";
 /// Magic header for the cumulative series hash (D2).
 const SERIES_MAGIC: &[u8] = b"dp.series.1\n";
 
+/// Magic header for a dynamic-node recipe object (D2/D4).
+const RECIPE_MAGIC: &[u8] = b"dp.recipe.1\n";
+
 /// One entry in a tree: a named child with its type and content address.
 ///
 /// The triple `(name, entry_type, child_hash)` is the entire value an entry
@@ -204,6 +207,54 @@ pub fn decode_series(bytes: &[u8]) -> Result<Vec<ObjectHash>, String> {
     Ok(hashes)
 }
 
+/// Encode a dynamic node's recipe -- its factory type plus configuration bytes
+/// -- into its content-object bytes.
+///
+/// The layout is:
+///
+/// ```text
+/// RECIPE_MAGIC
+/// u32 LE  factory_type length
+/// factory_type bytes (UTF-8)
+/// config bytes (to the end of the buffer)
+/// ```
+///
+/// Unlike the earlier definition (config bytes alone), the recipe object
+/// commits to *both* the factory type and its config, so two dynamic nodes
+/// that share config bytes but invoke different factories hash differently and
+/// a consumer can reconstruct which factory to instantiate (design Section 9 /
+/// Decision D4).  The config bytes are taken as-is, byte-for-byte, with no
+/// canonicalization (D2).
+#[must_use]
+pub fn encode_recipe(factory_type: &str, config: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(RECIPE_MAGIC.len() + 4 + factory_type.len() + config.len());
+    buf.extend_from_slice(RECIPE_MAGIC);
+    push_len_prefixed(&mut buf, factory_type.as_bytes());
+    buf.extend_from_slice(config);
+    buf
+}
+
+/// Compute a dynamic node's recipe hash: `blake3` over [`encode_recipe`].
+#[must_use]
+pub fn recipe_hash(factory_type: &str, config: &[u8]) -> ObjectHash {
+    ObjectHash::of_bytes(&encode_recipe(factory_type, config))
+}
+
+/// Decode a recipe object into its `(factory_type, config)` parts (the inverse
+/// of [`encode_recipe`]).
+///
+/// # Errors
+///
+/// Returns an error if the magic header is wrong, the buffer is truncated, or
+/// the factory type is not valid UTF-8.
+pub fn decode_recipe(bytes: &[u8]) -> Result<(String, Vec<u8>), String> {
+    let mut cur = Cursor::new(bytes);
+    cur.expect_tag(RECIPE_MAGIC)?;
+    let factory_type = cur.take_len_prefixed_string()?;
+    let config = cur.take_rest().to_vec();
+    Ok((factory_type, config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +399,43 @@ mod tests {
         let bytes = encode_series(&versions);
         assert_eq!(&bytes[..SERIES_MAGIC.len()], SERIES_MAGIC);
         assert_eq!(bytes.len(), SERIES_MAGIC.len() + 4 + versions.len() * 32);
+    }
+
+    #[test]
+    fn decode_recipe_round_trips_encode() {
+        let config = b"format: csv\npath: /tmp/x\n";
+        let bytes = encode_recipe("sql-derived-series", config);
+        let (factory, decoded) = decode_recipe(&bytes).unwrap();
+        assert_eq!(factory, "sql-derived-series");
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn recipe_hash_commits_to_factory_not_just_config() {
+        // Identical config under different factories must hash differently --
+        // the whole point of folding the factory into the recipe object (D4).
+        let config = b"shared config";
+        assert_ne!(
+            recipe_hash("factory-a", config),
+            recipe_hash("factory-b", config)
+        );
+        // And it is blake3 of the encoded recipe bytes.
+        assert_eq!(
+            recipe_hash("factory-a", config),
+            ObjectHash::of_bytes(&encode_recipe("factory-a", config))
+        );
+    }
+
+    #[test]
+    fn recipe_config_may_be_empty() {
+        let bytes = encode_recipe("dynamic-dir", b"");
+        let (factory, config) = decode_recipe(&bytes).unwrap();
+        assert_eq!(factory, "dynamic-dir");
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn decode_recipe_rejects_bad_magic() {
+        assert!(decode_recipe(b"not a recipe").is_err());
     }
 }

@@ -438,12 +438,14 @@ This is **Decision D8 (open)**.
 
 #### 8.5.4 Dynamic nodes and large blobs
 
-A dynamic node's `child_hash` is its recipe hash (Section 9), and its generated
-children are not in the graph. Rebuild writes the recipe back as a dynamic-node
-row (`factory` + config bytes) and stops -- the consumer recomputes downstream
-on read, exactly as the producer would. Large blobs are referenced by hash and
-fetched through the external `_large_files` path (Section 8.4); the rebuilt row
-is a large-file row whose `blake3` names the external object.
+A dynamic node's `child_hash` is its recipe hash (Section 9): a recipe object
+encoding the factory type and the stored config bytes. Its generated children
+are not in the graph. Rebuild decodes the recipe back into `(factory, config)`
+and writes a dynamic-node row (`factory` + config bytes), then stops -- the
+consumer recomputes downstream on read, exactly as the producer would. Large
+blobs are referenced by hash and fetched through the external `_large_files`
+path (Section 8.4); the rebuilt row is a large-file row whose `blake3` names the
+external object.
 
 #### 8.5.5 What rebuild establishes
 
@@ -467,26 +469,30 @@ the node kind:
 | series / multi-version file | cumulative content-and-history hash (a stable bao root over all versions), not any single version's hash |
 | directory | `tree_hash` -- the recursive fold |
 | symlink | `blake3(target path)` |
-| dynamic dir / read-time `table:dynamic` | `blake3(stored config bytes)` -- the recipe, hashed byte-for-byte |
+| dynamic dir / read-time `table:dynamic` | `recipe_hash` -- `blake3` of a recipe object encoding the factory type **and** the stored config bytes |
 
 - **Series.** Uses the cumulative hash above so the entry commits to the whole
   history, stable across appends.
 - **Dynamic and computed nodes.** Nodes whose content is computed on read have
-  no stored bytes. Their `child_hash` is the hash of their **definition**
-  (factory type plus configuration), not their output. The semantics are
-  explicit: for a dynamic node, tree-hash equality means *the recipe is
-  identical*, not that the output bytes are. Its dynamically generated children
-  are derived, not stored, so they are **not** folded into its hash. This is
-  correct for sync -- the recipe and its real upstream source data (ordinary
-  blobs/series that sync normally) transfer, and the consumer recomputes
-  downstream. An *executed* factory that writes real data (for example, a
-  collector that materializes a `table:series`) produces physical blobs and is
-  hashed as a series, not by this rule; only genuinely read-time-computed nodes
-  use the recipe hash. The recipe is hashed **byte-for-byte over the stored
-  config bytes** -- no canonicalization. This is the same byte-equality stance
-  the whole design takes (Section 4.1): reformatting a config (whitespace, key
-  order) reads as a change, which is accepted as simpler than defining a
-  canonical form. See Decision D2 in Section 11.
+  no stored output bytes. Their `child_hash` is the hash of their
+  **definition** -- a *recipe object* that encodes the factory type **and** the
+  stored config bytes. The semantics are explicit: for a dynamic node,
+  tree-hash equality means *the recipe is identical*, not that the output bytes
+  are. Two nodes that share config bytes but invoke different factories
+  therefore hash differently, and a consumer can reconstruct which factory to
+  instantiate -- the factory type is *in* the hashed object, not carried
+  out-of-band. Its dynamically generated children are derived, not stored, so
+  they are **not** folded into its hash. This is correct for sync -- the recipe
+  and its real upstream source data (ordinary blobs/series that sync normally)
+  transfer, and the consumer recomputes downstream. An *executed* factory that
+  writes real data (for example, a collector that materializes a
+  `table:series`) produces physical blobs and is hashed as a series, not by this
+  rule; only genuinely read-time-computed nodes use the recipe hash. Within the
+  recipe object the config bytes are taken **as-is**, byte-for-byte, with no
+  canonicalization. This is the same byte-equality stance the whole design takes
+  (Section 4.1): reformatting a config (whitespace, key order) reads as a
+  change, which is accepted as simpler than defining a canonical form. See
+  Decision D2 in Section 11.
 - **Compaction / rewrite.** Reorganizing storage legitimately produces new
   blobs and trees and therefore a new content hash. That is recorded honestly
   as a new commit whose trees were rewritten, with a rewrite relationship to
@@ -525,14 +531,21 @@ the node kind:
   (children read from the persisted table) is the cheap, incremental way to
   produce it (Sections 5.3, 7).
 - **D4 -- Dynamic-node `child_hash` is the recipe hash.** Read-time-computed
-  nodes hash `blake3(stored config bytes)`; tree equality means recipe
-  equality, not output equality; generated children are not folded (Section 9).
-- **D2 -- Encodings start simple and are not frozen.** Two byte encodings are
+  nodes hash a *recipe object* that encodes the **factory type and the stored
+  config bytes** (`recipe_hash`), not the config bytes alone. Folding the
+  factory into the hash is required for correctness and for rebuild: config
+  bytes alone do not identify the factory, so two nodes with identical config
+  under different factories would collide and a consumer could not know which
+  factory to instantiate. Tree equality means recipe equality, not output
+  equality; generated children are not folded (Section 9).
+- **D2 -- Encodings start simple and are not frozen.** Three byte encodings are
   needed: (a) the **tree wire format** -- the byte layout of a tree's entry
   list (delimiters, `entry_type` representation, name encoding, sort
-  collation); and (b) the **config bytes** for D4, which are taken **as-is**,
-  byte-for-byte, with no canonicalization. Both start with the simplest
-  reasonable choice. Because the project allows a **clean reset at will** (no
+  collation); (b) the **recipe object** for D4 -- magic header, length-prefixed
+  factory type, then the config bytes taken **as-is**, byte-for-byte, with no
+  canonicalization; and (c) the **series object** -- magic header plus the
+  ordered version blob hashes. All start with the simplest reasonable choice.
+  Because the project allows a **clean reset at will** (no
   legacy ponds to migrate), these formats are *not* permanently frozen -- they
   can be improved later by resetting. The one constraint: any two ponds that
   sync, and any one pond across a format change, must share the same encoding

@@ -28,17 +28,19 @@
 //! | physical file / table (single version)      | the version blob hash (`blake3`)      |
 //! | physical series (multi-version)             | [`series_hash`] over version blobs    |
 //! | symlink                                     | `blake3(target bytes)`                |
-//! | dynamic dir / file / `table:dynamic`        | `blake3(stored config bytes)` (recipe)|
+//! | dynamic dir / file / `table:dynamic`        | [`recipe_hash`] (factory + config)    |
 //!
-//! Dynamic nodes hash their stored definition, not their computed output, and
-//! their generated children are not folded in.
+//! Dynamic nodes hash their stored definition (factory type plus config), not
+//! their computed output, and their generated children are not folded in.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datafusion::execution::context::SessionContext;
 
-use sync_store::content::{ObjectHash, TreeEntry, encode_series, encode_tree, series_hash};
+use sync_store::content::{
+    ObjectHash, TreeEntry, encode_recipe, encode_series, encode_tree, recipe_hash, series_hash,
+};
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
 
@@ -143,6 +145,10 @@ struct NodeFacts {
     content: Option<Vec<u8>>,
     /// The recorded `blake3` of this version, if any.
     blake3: Option<String>,
+    /// The factory type for a dynamic node (`None` for physical nodes).  Folded
+    /// into the recipe hash so the content commits to the factory, not just its
+    /// config (Decision D4).
+    factory: Option<String>,
 }
 
 /// One version of a series: its blob hash plus the inline bytes when the
@@ -286,6 +292,7 @@ async fn scan_and_fold(
                 NodeFacts {
                     content: row.content,
                     blake3: row.blake3,
+                    factory: row.factory,
                 },
             );
         }
@@ -439,18 +446,32 @@ fn hash_child(
             }
             Ok(series)
         }
-        // Dynamic nodes hash their stored definition (recipe), and symlinks
-        // hash their target bytes; both are the node's content bytes.
-        EntryType::DirectoryDynamic
-        | EntryType::FileDynamic
-        | EntryType::TableDynamic
-        | EntryType::Symlink => {
+        // Symlinks hash their target bytes; dynamic nodes hash their recipe
+        // (factory type plus config), so the content commits to the factory and
+        // a consumer can reconstruct which factory to instantiate (D4).
+        EntryType::Symlink => {
             let facts = leaf_facts(key, latest)?;
             let bytes = facts.content.as_deref().unwrap_or(&[]);
             let hash = ObjectHash::of_bytes(bytes);
             if let Some(sink) = sink {
-                // Recipes and symlink targets are small; always inline.
+                // Symlink targets are small; always inline.
                 sink.put_inline(hash, bytes.to_vec());
+            }
+            Ok(hash)
+        }
+        EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
+            let facts = leaf_facts(key, latest)?;
+            let factory = facts.factory.as_deref().ok_or_else(|| {
+                StewardError::DeltaLake(format!(
+                    "dynamic node {}/{} is missing its factory type",
+                    key.0, key.1
+                ))
+            })?;
+            let config = facts.content.as_deref().unwrap_or(&[]);
+            let hash = recipe_hash(factory, config);
+            if let Some(sink) = sink {
+                // Recipes (factory + config) are small; always inline.
+                sink.put_inline(hash, encode_recipe(factory, config));
             }
             Ok(hash)
         }

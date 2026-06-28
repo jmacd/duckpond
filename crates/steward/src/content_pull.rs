@@ -21,7 +21,9 @@
 use std::collections::BTreeMap;
 
 use sync_store::ContentRemote;
-use sync_store::content::{Commit, ObjectHash, TreeEntry, decode_series, decode_tree};
+use sync_store::content::{
+    Commit, ObjectHash, TreeEntry, decode_recipe, decode_series, decode_tree,
+};
 use tinyfs::EntryType;
 use tinyfs::async_helpers::convenience::create_file_path_with_type;
 use tlogfs::PondUserMetadata;
@@ -264,6 +266,16 @@ enum RebuildOp {
         entry_type: EntryType,
         versions: Vec<Vec<u8>>,
     },
+    /// Recreate a dynamic node at this path from its recipe: the factory type
+    /// and stored config bytes.  The consumer recomputes the node's output on
+    /// read, so its generated children are not part of the plan (Section
+    /// 8.5.4).
+    Dynamic {
+        path: String,
+        entry_type: EntryType,
+        factory: String,
+        config: Vec<u8>,
+    },
 }
 
 /// The result of rebuilding a pond from a fetched object graph.
@@ -279,6 +291,8 @@ pub struct RebuildOutcome {
     pub symlinks: usize,
     /// Number of multi-version series recreated.
     pub series: usize,
+    /// Number of dynamic nodes recreated.
+    pub dynamic: usize,
 }
 
 /// Rebuild a fresh tlogfs pond from a fetched object graph (design Section
@@ -297,10 +311,10 @@ pub struct RebuildOutcome {
 /// # Errors
 ///
 /// Returns an error if the graph is empty, if the graph references an object it
-/// does not contain, if a symlink target is not valid UTF-8, if the graph
-/// contains a dynamic node (not yet supported by rebuild), or if a write fails.
-/// After a successful rebuild, the read-side fold of `target` is verified to
-/// equal the tip's root tree hash; a mismatch is an error.
+/// does not contain, if a symlink target is not valid UTF-8, if a recipe object
+/// fails to decode, or if a write fails.  After a successful rebuild, the
+/// read-side fold of `target` is verified to equal the tip's root tree hash; a
+/// mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
     graph: &FetchedGraph,
@@ -321,6 +335,7 @@ pub async fn rebuild_pond(
             RebuildOp::File { .. } => outcome.files += 1,
             RebuildOp::Symlink { .. } => outcome.symlinks += 1,
             RebuildOp::Series { .. } => outcome.series += 1,
+            RebuildOp::Dynamic { .. } => outcome.dynamic += 1,
         }
     }
 
@@ -366,6 +381,16 @@ pub async fn rebuild_pond(
                                     writer.shutdown().await?;
                                 }
                             }
+                        }
+                        RebuildOp::Dynamic {
+                            path,
+                            entry_type,
+                            factory,
+                            config,
+                        } => {
+                            let _ = wd
+                                .create_dynamic_path(&path, entry_type, &factory, config)
+                                .await?;
                         }
                     }
                 }
@@ -440,10 +465,20 @@ fn plan_rebuild(graph: &FetchedGraph, root: ObjectHash) -> Result<Vec<RebuildOp>
                     });
                 }
                 EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
-                    return Err(StewardError::Content(format!(
-                        "rebuild does not yet support entry type {:?} at {path}",
-                        entry.entry_type
-                    )));
+                    // A dynamic node's child_hash is its recipe object; decode
+                    // it into factory + config and stop -- its generated
+                    // children are recomputed on read, not stored (Section
+                    // 8.5.4).
+                    let bytes = blob_bytes(graph, entry.child_hash)?;
+                    let (factory, config) = decode_recipe(&bytes).map_err(|e| {
+                        StewardError::Content(format!("decode recipe at {path}: {e}"))
+                    })?;
+                    ops.push(RebuildOp::Dynamic {
+                        path,
+                        entry_type: entry.entry_type,
+                        factory,
+                        config,
+                    });
                 }
             }
         }

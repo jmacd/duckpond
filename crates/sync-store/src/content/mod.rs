@@ -36,7 +36,8 @@ mod tree;
 
 pub use commit::{Commit, Provenance};
 pub use tree::{
-    TreeEntry, decode_series, decode_tree, encode_series, encode_tree, series_hash, tree_hash,
+    TreeEntry, decode_recipe, decode_series, decode_tree, encode_recipe, encode_series,
+    encode_tree, recipe_hash, series_hash, tree_hash,
 };
 
 use std::fmt;
@@ -205,6 +206,15 @@ impl<'a> Cursor<'a> {
     pub(crate) fn take_len_prefixed_string(&mut self) -> Result<String, String> {
         let bytes = self.take_len_prefixed()?;
         String::from_utf8(bytes.to_vec()).map_err(|e| format!("invalid utf-8: {e}"))
+    }
+
+    /// Consume and return all remaining bytes, leaving the cursor at the end.
+    /// Used for trailing variable-length payloads (for example, a recipe's
+    /// config bytes).
+    pub(crate) fn take_rest(&mut self) -> &'a [u8] {
+        let out = &self.buf[self.pos..];
+        self.pos = self.buf.len();
+        out
     }
 }
 
