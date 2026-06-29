@@ -1104,15 +1104,35 @@ impl<'a> StewardTransactionGuard<'a> {
 
         for (name, attachment) in to_push {
             info!("post-commit auto-push: {} -> {}", name, attachment.url);
-            match crate::push_pending_to_remote(ship, &attachment).await {
+            if attachment.url.starts_with("s3://") {
+                sync_remote::register_s3_handlers();
+            }
+            let storage_options = match attachment.to_storage_options() {
+                Ok(o) => o,
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} bad storage options: {}", name, e);
+                    continue;
+                }
+            };
+            let mut remote = match sync_store::ContentRemote::open_at_url(
+                &attachment.url,
+                storage_options,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} open failed: {}", name, e);
+                    continue;
+                }
+            };
+            match crate::push_content_to_remote(ship, &mut remote, "main").await {
                 Ok(outcome) => {
                     info!(
-                        "post-commit auto-push: {} done (pushed={}, skipped={}, range={}..={})",
+                        "post-commit auto-push: {} done (objects_pushed={}, tip={})",
                         name,
-                        outcome.pushed,
-                        outcome.skipped,
-                        outcome.previous_last_pushed + 1,
-                        outcome.upper_seq
+                        outcome.objects_pushed,
+                        outcome.tip.to_hex()
                     );
                 }
                 Err(e) => {

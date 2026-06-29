@@ -235,89 +235,32 @@ async fn add_remote_attachment_internal(
         sync_remote::register_s3_handlers();
     }
     let storage_options = attachment.to_storage_options()?;
-    match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
-        Ok(remote) => match mode {
-            RemoteMode::Pull => {
+    let is_import = mode == RemoteMode::Pull && matches!(mount_path, Some(p) if p != "/");
+    if is_import {
+        // Cross-pond import: bundle pipeline (content subtree-import pending).
+        match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
+            Ok(remote) => {
                 let remote_store_id = remote.store_id();
-                // PATH-aware validation:
-                //   mount_path == "/"   => mirror restart (remote must equal local)
-                //   mount_path != "/"   => cross-pond import (remote must differ)
-                // For non-pull modes the contract is enforced above (push/both
-                // refuse foreign remotes outright).
-                match mount_path {
-                    Some("/") if remote_store_id != local_pond_id => {
-                        return Err(anyhow!(
-                            "remote `{}` at {} has store_id {} which does not match this \
-                             pond's pond_id {}; mount path `/` is reserved for mirror \
-                             restarts (foreign store_id must match). Use a non-root mount \
-                             path like `/imports/{}` for a cross-pond import.",
-                            name,
-                            attachment.url,
-                            remote_store_id,
-                            local_pond_id,
-                            name
-                        ));
-                    }
-                    Some(path) if path != "/" && remote_store_id == local_pond_id => {
-                        return Err(anyhow!(
-                            "remote `{}` at {} has store_id {} which matches this pond's \
-                             pond_id; mount path `{}` is reserved for cross-pond imports \
-                             (foreign store_id must differ). Use `/` to attach this remote \
-                             as a mirror restart.",
-                            name,
-                            attachment.url,
-                            remote_store_id,
-                            path
-                        ));
-                    }
-                    _ => {}
+                if remote_store_id == local_pond_id {
+                    return Err(anyhow!(
+                        "remote `{}` at {} has store_id {} which matches this pond's pond_id; \
+                         mount path is reserved for cross-pond imports (foreign store_id must \
+                         differ). Use `/` to attach this remote as a mirror restart.",
+                        name,
+                        attachment.url,
+                        remote_store_id
+                    ));
                 }
+                validate_no_foreign_store_id_collision(&mut ship, name, remote_store_id, overwrite)
+                    .await?;
                 log::info!(
-                    "remote {} ({}) already initialized (store_id={})",
+                    "remote {} ({}) ready for import (store_id={})",
                     name,
                     attachment.url,
                     remote_store_id
                 );
-
-                // D5.7b.5: refuse if another pull-mode attachment is
-                // already mounting this same foreign store_id (would
-                // create two mount entries pointing at the same
-                // foreign pond, with ambiguous resolution semantics).
-                // --overwrite of THIS attachment under the same name
-                // is OK; a *different* name pointing at the same
-                // store_id is not.
-                if remote_store_id != local_pond_id {
-                    validate_no_foreign_store_id_collision(
-                        &mut ship,
-                        name,
-                        remote_store_id,
-                        overwrite,
-                    )
-                    .await?;
-                }
             }
-            RemoteMode::Push | RemoteMode::Both => {
-                if remote.store_id() != local_pond_id {
-                    return Err(anyhow!(
-                        "remote `{}` at {} already exists but its store_id ({}) does not match \
-                         this pond's pond_id ({}); refusing to push into a foreign pond. Use a \
-                         different URL, or remove the existing remote contents first.",
-                        name,
-                        attachment.url,
-                        remote.store_id(),
-                        local_pond_id
-                    ));
-                }
-                log::info!(
-                    "remote {} ({}) already initialized for this pond (store_id={})",
-                    name,
-                    attachment.url,
-                    local_pond_id
-                );
-            }
-        },
-        Err(RemoteError::Delta(deltalake::DeltaTableError::NotATable(_))) => match mode {
-            RemoteMode::Pull => {
+            Err(RemoteError::Delta(deltalake::DeltaTableError::NotATable(_))) => {
                 return Err(anyhow!(
                     "remote `{}` at {} is not a Delta table; pull-mode remotes must point at an \
                      existing pond. The consumer cannot initialize an empty upstream remote.",
@@ -325,32 +268,69 @@ async fn add_remote_attachment_internal(
                     attachment.url
                 ));
             }
-            RemoteMode::Push | RemoteMode::Both => {
-                let _ = Remote::create_at_url(&attachment.url, local_pond_id, storage_options)
-                    .await
-                    .map_err(|e| {
-                        anyhow!(
-                            "failed to initialize remote `{}` at {}: {}",
-                            name,
-                            attachment.url,
-                            e
-                        )
-                    })?;
+            Err(e) => {
+                return Err(anyhow!(
+                    "failed to open remote `{}` at {}: {}",
+                    name,
+                    attachment.url,
+                    e
+                ));
+            }
+        }
+    } else {
+        // Mirror restart, backup, or push/both: content-addressed remote.
+        match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options.clone()).await
+        {
+            Ok(remote) => {
+                if remote.pond_id() != local_pond_id {
+                    return Err(anyhow!(
+                        "remote `{}` at {} has pond_id {} which does not match this pond's \
+                         pond_id {}; mirror/backup requires the same pond. Use a non-root mount \
+                         path like `/imports/{}` for a cross-pond import.",
+                        name,
+                        attachment.url,
+                        remote.pond_id(),
+                        local_pond_id,
+                        name
+                    ));
+                }
                 log::info!(
-                    "[OK] initialized remote {} at {} (store_id={})",
+                    "remote {} ({}) already initialized (pond_id={})",
                     name,
                     attachment.url,
                     local_pond_id
                 );
             }
-        },
-        Err(e) => {
-            return Err(anyhow!(
-                "failed to open remote `{}` at {}: {}",
-                name,
-                attachment.url,
-                e
-            ));
+            Err(_) if mode == RemoteMode::Pull => {
+                return Err(anyhow!(
+                    "remote `{}` at {} is not a content remote; pull-mode mirrors must point at \
+                     an existing pond. The consumer cannot initialize an empty upstream remote.",
+                    name,
+                    attachment.url
+                ));
+            }
+            Err(_) => {
+                let _ = sync_store::ContentRemote::create_at_url(
+                    &attachment.url,
+                    local_pond_id,
+                    storage_options,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "failed to initialize remote `{}` at {}: {}",
+                        name,
+                        attachment.url,
+                        e
+                    )
+                })?;
+                log::info!(
+                    "[OK] initialized remote {} at {} (pond_id={})",
+                    name,
+                    attachment.url,
+                    local_pond_id
+                );
+            }
         }
     }
 

@@ -881,6 +881,7 @@ dependencies = [
  "sitegen",
  "steward",
  "sync-remote",
+ "sync-store",
  "tempfile",
  "tinyfs",
  "tlogfs",
