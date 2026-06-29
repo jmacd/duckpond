@@ -176,7 +176,6 @@ async fn pond_remote_push_pull_roundtrip() {
 /// the push bundle.  This test pushes such a file and verifies the
 /// replica sees the full byte content via `read_file_path_to_vec`.
 #[tokio::test]
-#[ignore = "content push does not yet transfer external large-file blobs (D7); re-enable after wiring"]
 async fn pond_remote_push_pull_large_file_roundtrip() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");

@@ -927,6 +927,35 @@ impl OpLogPersistence {
         &self.path
     }
 
+    /// Read the full content of an externalized large file by its BLAKE3 hash.
+    ///
+    /// Returns the reconstructed bytes from `_large_files/`. Errors if no
+    /// externalized blob with the given hash exists or if it cannot be read.
+    pub async fn read_large_file_bytes(&self, blake3: &str) -> Result<Vec<u8>, TLogFSError> {
+        use tokio::io::AsyncReadExt;
+        let path = crate::large_files::find_large_file_path(&self.path, blake3)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("locate large file {blake3}: {e}")))?
+            .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: format!("_large_files/blake3={blake3}"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "large file not found"),
+            })?;
+        let mut reader = crate::large_files::ParquetFileReader::new(path.clone())
+            .await
+            .map_err(|e| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        let mut buf = Vec::new();
+        let _ = reader
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("read large file {blake3}: {e}")))?;
+        Ok(buf)
+    }
+
     /// Query OpLog records by transaction sequence for testing
     ///
     /// Returns tuples of (node_id_hex, part_id_hex, version) for verification purposes.

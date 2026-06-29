@@ -13,12 +13,10 @@
 //! The objects are: the inline tree closure from
 //! [`materialize_content_objects`], the node manifest that commit references,
 //! plus the tip commit object reproduced verbatim from the persisted commit
-//! spine.  Large blobs do not travel here; they transfer by hash through the
-//! external `_large_files` path, so a pond that references any large blob is
-//! rejected until that path is wired rather than pushed with a silently
-//! incomplete closure.
-
-use std::collections::BTreeSet;
+//! spine.  Large blobs (>64KB) live externally under `_large_files`, recorded
+//! only by hash (Decision D7); this module reads each one's bytes locally and
+//! sends it as a blob object keyed by its content hash, so the closure is
+//! complete.
 
 use sync_store::ContentRemote;
 use sync_store::content::ObjectHash;
@@ -56,8 +54,8 @@ pub struct ContentPushOutcome {
 ///
 /// Returns an error if the pond has no commit spine at its latest write seq,
 /// if the persisted commit object does not hash to the recorded commit hash,
-/// if the pond references any large blob whose external transfer is not yet
-/// wired, or if reading the content tree or writing to the remote fails.
+/// if any external large blob is missing or its bytes do not hash to the
+/// recorded key, or if reading the content tree or writing to the remote fails.
 pub async fn push_content_to_remote(
     ship: &Ship,
     remote: &mut ContentRemote,
@@ -96,22 +94,30 @@ pub async fn push_content_to_remote(
 
     let materialized = materialize_content_objects(ship).await?;
 
-    if !materialized.external_blobs.is_empty() {
-        let listed: BTreeSet<String> = materialized
-            .external_blobs
-            .iter()
-            .map(ObjectHash::to_hex)
-            .collect();
-        return Err(StewardError::Content(format!(
-            "pond references {} large blob(s) whose external transfer is not yet wired: {:?}",
-            listed.len(),
-            listed
-        )));
-    }
-
-    let mut objects: Vec<(ObjectHash, Vec<u8>)> = Vec::with_capacity(materialized.inline.len() + 2);
+    let mut objects: Vec<(ObjectHash, Vec<u8>)> =
+        Vec::with_capacity(materialized.inline.len() + materialized.external_blobs.len() + 2);
     for (hash, bytes) in materialized.inline {
         objects.push((hash, bytes));
+    }
+    // Large blobs (>64KB) live externally under `_large_files/` and are recorded
+    // only by hash (Decision D7).  Read each one's bytes locally and transfer it
+    // as a blob object keyed by its content hash; verify the bytes hash to the
+    // recorded key so a consumer can never adopt a body the source disagrees with.
+    for hash in &materialized.external_blobs {
+        let bytes = ship
+            .data_persistence()
+            .read_large_file_bytes(&hash.to_hex())
+            .await
+            .map_err(|e| StewardError::Content(format!("read external blob: {e}")))?;
+        let recomputed = ObjectHash::of_bytes(&bytes);
+        if recomputed != *hash {
+            return Err(StewardError::Content(format!(
+                "external blob bytes hash to {} but the tree references {}",
+                recomputed.to_hex(),
+                hash.to_hex()
+            )));
+        }
+        objects.push((*hash, bytes));
     }
     // The node manifest the commit references (Section 4.5); a consumer fetches
     // it to adopt the source's node_ids.  Verify it hashes to the commit's
