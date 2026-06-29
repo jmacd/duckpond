@@ -62,6 +62,24 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         sync_remote::register_s3_handlers();
     }
 
+    let ship_pre = ship
+        .as_pond()
+        .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
+    let mount_path: Option<String> = ship_pre
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
+        .await
+        .map_err(|e| anyhow!("read mount_path for `{}`: {}", name, e))?
+        .filter(|s| !s.is_empty() && s != "/");
+
+    // Mirror restart / backup restore (root or no mount): pull the full
+    // content graph and rebuild the local pond by node_id.  Cross-pond
+    // import (non-root mount) still uses the bundle pipeline below until
+    // the content subtree-import is built.
+    if mount_path.is_none() {
+        return pull_mirror(ship, name, &attachment).await;
+    }
+
     let storage_options = attachment.to_storage_options()?;
     let remote = Remote::open_at_url(&attachment.url, storage_options)
         .await
@@ -74,15 +92,8 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     let local_pond_id = ship_ref.control_table().pond_id_uuid();
     let foreign_pond_id = remote.store_id();
 
-    // Look up the mount path BEFORE the pull, so we can materialize the
-    // mount entry afterwards.  Empty / missing / "/" => no mount entry
-    // (push-only backup or mirror restart).
-    let mount_path: Option<String> = ship_ref
-        .control_table()
-        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
-        .await
-        .map_err(|e| anyhow!("read mount_path for `{}`: {}", name, e))?
-        .filter(|s| !s.is_empty() && s != "/");
+    // This is the import path: mount_path is guaranteed non-root here.
+    let mount_path = Some(mount_path.expect("import path requires a non-root mount_path"));
 
     // First-pull bootstrap: if `last_pulled_seq:<url>` is unset, seed it to
     // one below the remote's oldest available bundle so the pull applies
@@ -141,6 +152,37 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         materialize_mount(ship_ref, name, &path, foreign_pond_id).await?;
     }
 
+    Ok(())
+}
+
+/// Mirror restart / backup restore: fetch the remote's full content graph
+/// for ref `main` and rebuild the local pond by node_id.  Used when the
+/// attachment has no mount path (or `/`).
+async fn pull_mirror(
+    ship: &mut steward::Steward,
+    name: &str,
+    attachment: &steward::RemoteAttachment,
+) -> Result<()> {
+    let storage_options = attachment.to_storage_options()?;
+    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
+        .await
+        .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
+
+    let ship_ref = ship
+        .as_pond_mut()
+        .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
+
+    let graph = steward::fetch_object_graph(&remote, "main")
+        .await
+        .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
+    if graph.is_empty() {
+        log::info!("pull {}: remote ref `main` is empty; nothing to rebuild", name);
+        return Ok(());
+    }
+    let outcome = steward::rebuild_pond(ship_ref, &graph)
+        .await
+        .map_err(|e| anyhow!("rebuild from `{}`: {}", attachment.url, e))?;
+    log::info!("[OK] pull {} complete (mirror rebuild: {:?})", name, outcome);
     Ok(())
 }
 
