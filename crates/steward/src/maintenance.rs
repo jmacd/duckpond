@@ -57,6 +57,17 @@ const VACUUM_INTERVAL: u64 = 10;
 /// only ever needs files from the most recent checkpoint onward.
 pub const CONTROL_LOG_RETENTION_MINUTES: i64 = 5;
 
+/// Setting key (under the `"setting:"` prefix) for the control-table `_delta_log`
+/// retention, in minutes. Unset/unparseable falls back to
+/// [`CONTROL_LOG_RETENTION_MINUTES`].
+pub const KEY_CONTROL_LOG_RETENTION_MINUTES: &str = "maintenance.control_log_retention_minutes";
+
+/// Setting key (under the `"setting:"` prefix) for the data-table `_delta_log`
+/// retention, in minutes. Unset keeps the table's 30-day default (`None`), which
+/// is safe for replicated ponds. Set it on high-churn, fully-pushed instances
+/// (e.g. selfmon) to bound the data commit log instead of letting it grow.
+pub const KEY_DATA_LOG_RETENTION_MINUTES: &str = "maintenance.data_log_retention_minutes";
+
 /// Default target size for compaction (128 MB).
 const COMPACT_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
