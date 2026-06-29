@@ -176,13 +176,20 @@ async fn pull_mirror(
         .await
         .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
     if graph.is_empty() {
-        log::info!("pull {}: remote ref `main` is empty; nothing to rebuild", name);
+        log::info!(
+            "pull {}: remote ref `main` is empty; nothing to rebuild",
+            name
+        );
         return Ok(());
     }
     let outcome = steward::rebuild_pond(ship_ref, &graph)
         .await
         .map_err(|e| anyhow!("rebuild from `{}`: {}", attachment.url, e))?;
-    log::info!("[OK] pull {} complete (mirror rebuild: {:?})", name, outcome);
+    log::info!(
+        "[OK] pull {} complete (mirror rebuild: {:?})",
+        name,
+        outcome
+    );
     Ok(())
 }
 
