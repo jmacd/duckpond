@@ -111,26 +111,13 @@ async fn pond_remote_push_pull_roundtrip() {
     .await
     .expect("write hello.txt");
 
-    // 2) Create the remote bucket as a fresh Delta table.  In production
-    // this is what `pond remote add` -> first `pond push` would set up;
-    // here we do it directly so the test stays focused on the CLI.
-    {
-        let store_id = {
-            let ship = src_ctx.open_pond().await.expect("open src");
-            ship.control_table().pond_id_uuid()
-        };
-        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-            .await
-            .expect("create remote");
-    }
-
-    // 3) `pond backup add origin file://...`
+    // 2) `pond backup add origin file://...` auto-initializes a fresh
+    // ContentRemote at the URL; first push sends the content closure.
     add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        false, // push-only
+        false,
         None,
         None,
         None,
@@ -140,59 +127,18 @@ async fn pond_remote_push_pull_roundtrip() {
     )
     .await
     .expect("remote add");
-
-    // Verify the YAML actually landed in /sys/remotes/origin.
-    {
-        let bytes = read_small_file(&src_ctx, &remote_config_path("origin"))
-            .await
-            .expect("read attachment yaml");
-        let s = String::from_utf8(bytes).unwrap();
-        assert!(
-            s.contains(&format!("url: {}", remote_url)),
-            "yaml should contain url; got:\n{}",
-            s
-        );
-    }
-
-    // Mode was persisted via raw_config.
-    {
-        let ship = src_ctx.open_pond().await.expect("open src");
-        let mode = ship
-            .control_table()
-            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}origin"))
-            .await
-            .expect("get mode")
-            .expect("mode set");
-        assert_eq!(mode, "push");
-    }
-
-    // 4) `pond push` -- pushes everything > last_pushed_seq.
     push_command(&src_ctx, Some("origin".to_string()))
         .await
         .expect("push");
 
-    // 5) Bootstrap dst pond as a replica of src + first-pull via the
-    //    public APIs (D5.4).  No more manual `create_pond_for_restoration
-    //    + raw_config_set("last_pulled_seq:<url>", "1")` workaround.
-    let remote_for_pull = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+    // 3) Empty replica (same pond_id, minimal root v1), pull -> mirror rebuild.
+    let src_pond_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    let _ = steward::Ship::create_replica(&dst_pond, src_pond_id)
         .await
-        .expect("open remote for bootstrap");
-    {
-        let mut dst = steward::Ship::create_replica(&dst_pond, remote_for_pull.store_id())
-            .await
-            .expect("create dst replica");
-        let mut adapter = ShipRemoteSteward::new(&mut dst);
-        remote_for_pull
-            .bootstrap_consumer(&mut adapter)
-            .await
-            .expect("bootstrap dst from remote");
-    }
-
-    // Re-attach origin on dst as a pull-mode remote.  The bootstrap
-    // inherited it as mode=push from src (because remote attachment YAML
-    // is portable and pushed with every commit); override here so the
-    // default-pull dispatcher finds it.  PATH=`/` because dst is a
-    // mirror of src (same pond_id, populated via `create_replica`).
+        .expect("create dst replica");
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
     add_remote_command(
         &dst_ctx,
@@ -204,26 +150,18 @@ async fn pond_remote_push_pull_roundtrip() {
         None,
         None,
         false,
-        true, // overwrite the inherited attachment
+        true,
     )
     .await
     .expect("re-attach origin on dst");
-
-    // 6) Pull once more via the production command path -- after
-    //    bootstrap_consumer this is a no-op (already caught up), but
-    //    exercises the wired CLI plumbing.
     pull_command(&dst_ctx, Some("origin".to_string()))
         .await
         .expect("pull origin on dst");
 
-    // 7) The file pushed from src should be readable in dst.
     let bytes = read_small_file(&dst_ctx, "/hello.txt")
         .await
         .expect("read /hello.txt on dst");
     assert_eq!(bytes, b"hello from source pond");
-
-    // 8) `pond remote list` on the SRC pond runs cleanly (prints to
-    // stdout; smoke check that the YAML-backed listing works).
     list_remotes_command(&src_ctx, None)
         .await
         .expect("list src");

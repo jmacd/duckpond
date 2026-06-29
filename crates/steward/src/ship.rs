@@ -75,6 +75,17 @@ impl Ship {
         pond_path: P,
         birthplace: impl Into<String>,
     ) -> Result<Self, StewardError> {
+        Self::init_pond(pond_path, birthplace.into(), None).await
+    }
+
+    /// Shared root-initialization path for fresh ponds and replicas.  When
+    /// `preserve_metadata` is `Some`, the pond adopts that identity (replica
+    /// of a source pond); otherwise a fresh pond_id is minted.
+    async fn init_pond<P: AsRef<Path>>(
+        pond_path: P,
+        birthplace: String,
+        preserve_metadata: Option<PondMetadata>,
+    ) -> Result<Self, StewardError> {
         let meta = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
 
         // Create infrastructure (includes root directory initialization with txn_seq=1)
@@ -83,8 +94,8 @@ impl Ship {
             pond_path,
             true,
             Some(meta.clone()),
-            None, // No preserved metadata for fresh pond
-            Some(birthplace.into()),
+            preserve_metadata,
+            Some(birthplace),
         )
         .await?;
 
@@ -252,7 +263,9 @@ impl Ship {
             pond_id: pond_id_uuid7,
             ..PondMetadata::default()
         };
-        Self::create_pond_for_restoration(pond_path, metadata).await
+        // Initialize a minimal root v1 under the source pond_id so the
+        // content mirror pull (rebuild_pond) has a root to diff onto.
+        Self::init_pond(pond_path, String::new(), Some(metadata)).await
     }
 
     /// Open an existing, pre-initialized pond.
@@ -302,13 +315,15 @@ impl Ship {
         // but on disagreement the data table wins and the control table
         // cache is auto-healed to match.
         let (pond_id, control_table) = if create_new {
-            // Creating new pond - mint fresh identity and persist it to both
-            // the control table (cache) and, implicitly via the upcoming root
-            // initialization, the data table (canonical).
-            assert!(preserve_metadata.is_none());
-            let metadata = PondMetadata {
-                birthplace: birthplace.unwrap_or_default(),
-                ..PondMetadata::default()
+            // Creating new pond - use the preserved pond_id if restoring as a
+            // replica, otherwise mint a fresh identity.  Either way the root
+            // initialization below stamps it into the data table (canonical).
+            let metadata = match preserve_metadata {
+                Some(m) => m,
+                None => PondMetadata {
+                    birthplace: birthplace.unwrap_or_default(),
+                    ..PondMetadata::default()
+                },
             };
             let pond_id = metadata.pond_id.to_string();
             debug!(
