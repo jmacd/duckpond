@@ -464,11 +464,18 @@ hard cases collapse into set arithmetic over `node_id`:
 No path search, no per-directory name diff for deletion, and no rename
 ambiguity. Because the consumer adopts source ids it becomes **row-identical**
 to the source, so the node_id-keyed fsck Merkle now genuinely matches across
-replicas. This is **Decision D8 (decided)**: adopt source node_ids via the
-commit manifest. The two alternatives are rejected -- *deriving*
+replicas. This is **Decision D8 (decided, implemented)**: adopt source node_ids
+via the commit manifest. The two alternatives are rejected -- *deriving*
 `node_id = H(parent_node_id, name)` buys cross-consumer id agreement that the
 content-tree hash already provides and breaks on rename; *locally minting* ids
 forces the fragile path-resolution scheme above.
+
+Cross-pond mounts are scoped out of the manifest. A pond that imports another
+mounts a foreign root, whose well-known `ROOT_UUID` would otherwise collide with
+the local root, so the manifest covers only local-pond nodes; the foreign pond
+ships its own manifest. A mount whose subtree was not replicated locally folds by
+mount identity rather than recursing into absent rows, so multi-hop imports do
+not re-replicate.
 
 #### 8.5.3 Versions, series, and provenance
 
@@ -638,7 +645,9 @@ the node kind:
   re-materialization, and the consumer ends up row-identical to the source. The
   pure objects (blob/tree/series) stay node_id-free so dedup and the
   transparency log are unaffected; identity lives only in the commit-referenced
-  manifest. Rejected: *deriving* `node_id = H(parent_node_id, name)` (buys
+  manifest. Cross-pond mounts are scoped out of the manifest and unresolved
+  foreign mounts fold by mount identity. Rejected: *deriving*
+  `node_id = H(parent_node_id, name)` (buys
   cross-consumer id agreement the content-tree hash already gives, breaks on
   rename) and *locally minting* ids (forces fragile path resolution; rename
   degrades to delete-and-recreate). See Section 8.5.2.
