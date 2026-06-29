@@ -40,6 +40,10 @@ use crate::store::{Op, Store};
 const OBJECTS_PARTITION: &str = "objects";
 /// Partition holding refs, keyed by ref name; value is the 32-byte tip hash.
 const REFS_PARTITION: &str = "refs";
+/// Partition holding remote metadata; the source pond_id is stored here under
+/// the nil pond partition so a consumer can discover it without knowing it.
+const META_PARTITION: &str = "meta";
+const POND_ID_KEY: &str = "pond_id";
 
 /// The delta-managed content-addressed remote for one source pond.
 ///
@@ -57,13 +61,59 @@ impl ContentRemote {
     /// exists there.
     pub async fn create_at(path: impl AsRef<Path>, pond_id: Uuid) -> Result<Self> {
         let store = Store::create(path).await?;
-        Ok(Self { store, pond_id })
+        let mut me = Self { store, pond_id };
+        me.write_pond_id().await?;
+        Ok(me)
     }
 
     /// Open an existing remote at `path`.
     pub async fn open_at(path: impl AsRef<Path>, pond_id: Uuid) -> Result<Self> {
         let store = Store::open(path).await?;
         Ok(Self { store, pond_id })
+    }
+
+    /// Create a fresh remote at `url` with `storage_options` (e.g. S3 creds),
+    /// recording `pond_id`.  Errors if a table already exists.
+    pub async fn create_at_url(
+        url: &str,
+        pond_id: Uuid,
+        storage_options: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
+        let store = Store::create_at_url(url, storage_options).await?;
+        let mut me = Self { store, pond_id };
+        me.write_pond_id().await?;
+        Ok(me)
+    }
+
+    /// Open an existing remote at `url`, discovering its source pond_id from
+    /// the recorded metadata.
+    pub async fn open_at_url(
+        url: &str,
+        storage_options: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
+        let store = Store::open_at_url(url, storage_options).await?;
+        let bytes = store
+            .get(Uuid::nil(), META_PARTITION, POND_ID_KEY)
+            .await?
+            .ok_or_else(|| StoreError::Invariant("remote has no recorded pond_id".to_string()))?;
+        let s = String::from_utf8(bytes)
+            .map_err(|e| StoreError::Invariant(format!("pond_id not utf8: {e}")))?;
+        let pond_id =
+            Uuid::parse_str(&s).map_err(|e| StoreError::Invariant(format!("bad pond_id: {e}")))?;
+        Ok(Self { store, pond_id })
+    }
+
+    async fn write_pond_id(&mut self) -> Result<()> {
+        let _ = self
+            .store
+            .put(
+                Uuid::nil(),
+                META_PARTITION,
+                POND_ID_KEY,
+                self.pond_id.to_string().into_bytes(),
+            )
+            .await?;
+        Ok(())
     }
 
     /// The pond whose objects this remote holds.
@@ -136,5 +186,25 @@ impl ContentRemote {
     /// True if the object with the given hash is present on the remote.
     pub async fn has_object(&self, hash: ObjectHash) -> Result<bool> {
         Ok(self.get_object(hash).await?.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn url_remote_persists_and_discovers_pond_id() {
+        let dir = tempdir().unwrap();
+        let url = format!("file://{}/remote", dir.path().display());
+        let pond = Uuid::new_v4();
+        let _ = ContentRemote::create_at_url(&url, pond, Default::default())
+            .await
+            .unwrap();
+        let opened = ContentRemote::open_at_url(&url, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(opened.pond_id(), pond);
     }
 }
