@@ -229,6 +229,27 @@ async fn pond_remote_push_pull_large_file_roundtrip() {
         .await
         .expect("push");
 
+    // D7 streaming: the large blob must transfer out-of-row -- present in the
+    // remote's sibling `_blobs/` store, absent from the Delta row table -- so a
+    // multi-gigabyte value never bloats the remote's parquet rows.
+    {
+        let blobs_dir = remote_path.join("_blobs");
+        assert!(
+            blobs_dir.exists(),
+            "remote should hold the large blob under _blobs/: {:?}",
+            blobs_dir
+        );
+        let n_blobs = std::fs::read_dir(&blobs_dir)
+            .expect("read _blobs")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("blob="))
+            .count();
+        assert!(
+            n_blobs >= 1,
+            "expected at least one external blob, got {n_blobs}"
+        );
+    }
+
     // 3) Replica + mirror pull.
     let src_pond_id = {
         let ship = src_ctx.open_pond().await.expect("open src");

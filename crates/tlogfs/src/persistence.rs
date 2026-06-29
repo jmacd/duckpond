@@ -956,6 +956,32 @@ impl OpLogPersistence {
         Ok(buf)
     }
 
+    /// Open a streaming reader for an externalized large file by BLAKE3 hash.
+    ///
+    /// Yields raw bytes (the file content, not the parquet wrapper) without
+    /// loading the whole blob into memory.  Errors if no externalized blob with
+    /// the given hash exists.
+    pub async fn open_large_file_reader_by_hash(
+        &self,
+        blake3: &str,
+    ) -> Result<crate::large_files::ParquetFileReader, TLogFSError> {
+        let path = crate::large_files::find_large_file_path(&self.path, blake3)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("locate large file {blake3}: {e}")))?
+            .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: format!("_large_files/blake3={blake3}"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "large file not found"),
+            })?;
+        crate::large_files::ParquetFileReader::new(path.clone())
+            .await
+            .map_err(|e| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: path.display().to_string(),
+                source: e,
+            })
+    }
+
     /// Query OpLog records by transaction sequence for testing
     ///
     /// Returns tuples of (node_id_hex, part_id_hex, version) for verification purposes.

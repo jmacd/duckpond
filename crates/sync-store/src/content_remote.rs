@@ -187,6 +187,92 @@ impl ContentRemote {
     pub async fn has_object(&self, hash: ObjectHash) -> Result<bool> {
         Ok(self.get_object(hash).await?.is_some())
     }
+
+    /// Object-store key for an external blob, sibling to the Delta log.  Large
+    /// blobs (>64KB) live here rather than as inline `objects` rows so a
+    /// multi-gigabyte value never lands in the Delta table (Decision D7).
+    fn blob_path(hash: ObjectHash) -> object_store::path::Path {
+        object_store::path::Path::from(format!("_blobs/blob={}", hash.to_hex()))
+    }
+
+    /// True if the external blob `hash` is already present in the remote blob
+    /// store, so a producer can skip re-uploading it.
+    pub async fn has_blob(&self, hash: ObjectHash) -> Result<bool> {
+        match self.store.object_store().head(&Self::blob_path(hash)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(StoreError::Invariant(format!("blob head: {e}"))),
+        }
+    }
+
+    /// Stream a large blob's raw bytes from `reader` into the remote blob store,
+    /// keyed by `hash`.  Chunks flow through a bounded buffer to a multipart
+    /// upload; the bytes are hashed as they pass so a value can never be stored
+    /// under a key it does not equal.  Never collects the whole blob in memory.
+    pub async fn put_blob<R>(&self, hash: ObjectHash, mut reader: R) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let path = Self::blob_path(hash);
+        let upload = self
+            .store
+            .object_store()
+            .put_multipart(&path)
+            .await
+            .map_err(|e| StoreError::Invariant(format!("blob put_multipart: {e}")))?;
+        let mut writer = object_store::WriteMultipart::new(upload);
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .await
+                .map_err(|e| StoreError::Invariant(format!("blob read: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            writer.write(&buf[..n]);
+        }
+        writer
+            .finish()
+            .await
+            .map_err(|e| StoreError::Invariant(format!("blob finish: {e}")))?;
+        let computed = ObjectHash::from_bytes(*hasher.finalize().as_bytes());
+        if computed != hash {
+            return Err(StoreError::Invariant(format!(
+                "blob bytes hash to {} but were stored under {}",
+                computed.to_hex(),
+                hash.to_hex()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Fetch a large blob's raw bytes by hash, verifying integrity, or `None`
+    /// if absent.  The body is streamed from object storage.
+    pub async fn get_blob(&self, hash: ObjectHash) -> Result<Option<Vec<u8>>> {
+        let path = Self::blob_path(hash);
+        let res = match self.store.object_store().get(&path).await {
+            Ok(r) => r,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(e) => return Err(StoreError::Invariant(format!("blob get: {e}"))),
+        };
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|e| StoreError::Invariant(format!("blob body: {e}")))?;
+        let computed = ObjectHash::of_bytes(&bytes);
+        if computed != hash {
+            return Err(StoreError::Invariant(format!(
+                "blob bytes hash to {} but were fetched as {}",
+                computed.to_hex(),
+                hash.to_hex()
+            )));
+        }
+        Ok(Some(bytes.to_vec()))
+    }
 }
 
 #[cfg(test)]

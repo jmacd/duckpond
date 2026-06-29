@@ -94,30 +94,33 @@ pub async fn push_content_to_remote(
 
     let materialized = materialize_content_objects(ship).await?;
 
-    let mut objects: Vec<(ObjectHash, Vec<u8>)> =
-        Vec::with_capacity(materialized.inline.len() + materialized.external_blobs.len() + 2);
+    let mut objects: Vec<(ObjectHash, Vec<u8>)> = Vec::with_capacity(materialized.inline.len() + 2);
     for (hash, bytes) in materialized.inline {
         objects.push((hash, bytes));
     }
     // Large blobs (>64KB) live externally under `_large_files/` and are recorded
-    // only by hash (Decision D7).  Read each one's bytes locally and transfer it
-    // as a blob object keyed by its content hash; verify the bytes hash to the
-    // recorded key so a consumer can never adopt a body the source disagrees with.
+    // only by hash (Decision D7).  They are NOT inlined as `objects` rows: a
+    // multi-gigabyte value would bloat the remote Delta table.  Instead each is
+    // streamed local->remote into the remote's content-addressed blob store,
+    // keyed by its content hash, never loading the whole blob into memory.  Skip
+    // blobs the remote already holds so re-pushes stay cheap.
     for hash in &materialized.external_blobs {
-        let bytes = ship
-            .data_persistence()
-            .read_large_file_bytes(&hash.to_hex())
+        if remote
+            .has_blob(*hash)
             .await
-            .map_err(|e| StewardError::Content(format!("read external blob: {e}")))?;
-        let recomputed = ObjectHash::of_bytes(&bytes);
-        if recomputed != *hash {
-            return Err(StewardError::Content(format!(
-                "external blob bytes hash to {} but the tree references {}",
-                recomputed.to_hex(),
-                hash.to_hex()
-            )));
+            .map_err(|e| StewardError::Content(e.to_string()))?
+        {
+            continue;
         }
-        objects.push((*hash, bytes));
+        let reader = ship
+            .data_persistence()
+            .open_large_file_reader_by_hash(&hash.to_hex())
+            .await
+            .map_err(|e| StewardError::Content(format!("open external blob: {e}")))?;
+        remote
+            .put_blob(*hash, reader)
+            .await
+            .map_err(|e| StewardError::Content(format!("stream external blob: {e}")))?;
     }
     // The node manifest the commit references (Section 4.5); a consumer fetches
     // it to adopt the source's node_ids.  Verify it hashes to the commit's

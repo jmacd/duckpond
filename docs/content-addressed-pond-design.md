@@ -382,14 +382,17 @@ blob's bytes physically live. This keeps the streaming, do-not-collect
 discipline: multi-gigabyte files never materialize into memory or into the
 remote's row table.
 
-**Implementation status (D7, fe614cfe).** Push reads each external blob's bytes
-locally (`OpLogPersistence::read_large_file_bytes`), verifies they hash to the
-recorded key, and sends them as blob objects in the same atomic push commit; the
-remote `Store` re-externalizes any value above its threshold, so large blobs do
-not bloat the remote row table. Pull fetches them by tree descent like any blob
-and re-externalizes on rebuild. The full closure is therefore complete and
-content-addressed. The streaming "never load the whole blob into memory" goal is
-a future refinement -- today each blob round-trips through a `Vec<u8>`.
+**Implementation status (D7, fe614cfe + streaming refinement).** Large blobs
+transfer out-of-row through a sibling content-addressed blob store on the remote
+(`_blobs/blob=<hash>`), never as inline `objects` rows: push streams each blob
+local->remote via a multipart upload (skipping blobs the remote already holds),
+hashing as it goes so a value can never be stored under a key it does not equal;
+pull's tree descent finds them by hash in the blob store when they are not an
+inline row and re-externalizes locally. A multi-gigabyte blob therefore never
+bloats the remote Delta table and the producer side never collects it into one
+`Vec<u8>`. The full closure is complete and content-addressed. (The consumer's
+local rebuild still buffers each version blob; fully streaming ingest is a later
+refinement.)
 
 ### 8.5 Pull and consumer rebuild (Fork 2)
 

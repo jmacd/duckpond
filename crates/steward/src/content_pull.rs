@@ -215,7 +215,10 @@ async fn fetch_series(
     Ok(())
 }
 
-/// Fetch a leaf blob object.
+/// Fetch a leaf blob object.  A blob may be inline (small, an `objects` row) or
+/// external (large, in the remote blob store by hash); try the row table first,
+/// then the blob store.  Large blobs are kept out of the Delta row table by
+/// living externally, but the rebuild still adopts the bytes by hash either way.
 async fn fetch_blob(
     remote: &ContentRemote,
     hash: ObjectHash,
@@ -224,7 +227,24 @@ async fn fetch_blob(
     if graph.objects.contains_key(&hash) {
         return Ok(());
     }
-    let bytes = fetch_verified(remote, hash).await?;
+    let bytes = match remote
+        .get_object(hash)
+        .await
+        .map_err(|e| StewardError::Content(e.to_string()))?
+    {
+        Some(b) => b,
+        None => remote
+            .get_blob(hash)
+            .await
+            .map_err(|e| StewardError::Content(e.to_string()))?
+            .ok_or_else(|| {
+                StewardError::Content(format!(
+                    "object {} is absent from the remote (inline and blob store)",
+                    hash.to_hex()
+                ))
+            })?,
+    };
+    verify(hash, &bytes)?;
     let _ = graph
         .objects
         .insert(hash, FetchedObject::Blob(bytes.clone()));

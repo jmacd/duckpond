@@ -163,6 +163,14 @@ impl Store {
         &self.path
     }
 
+    /// The backing object store rooted at the Delta table directory.  Used to
+    /// read and write sibling content under prefixes outside the Delta log
+    /// (e.g. a content-addressed large-blob store), keeping multi-gigabyte
+    /// values out of the Delta row table.
+    pub fn object_store(&self) -> Arc<dyn object_store::ObjectStore> {
+        self.table.object_store()
+    }
+
     /// Current Delta table version (incremented on every successful
     /// commit, including writes that resulted in zero new rows).
     pub fn delta_version(&self) -> i64 {
