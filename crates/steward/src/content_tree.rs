@@ -319,8 +319,38 @@ pub(crate) async fn build_target_state(
     StewardError,
 > {
     let local_pond_id = ship.data_persistence().pond_id().to_string();
+    build_target_state_for_pond(ship, &local_pond_id).await
+}
+
+/// Build the target's current node state for a named pond, keyed by `node_id`,
+/// for a cross-pond import: the foreign pond's rows live under their own
+/// `pond_id` partition, so the diff against the source manifest is computed
+/// over that pond_id rather than the local one.  Returns empty maps when the
+/// foreign pond has no root row yet (a first import has nothing to diff).
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be read or folded for a non-empty
+/// foreign pond.
+pub(crate) async fn build_target_state_for_pond(
+    ship: &Ship,
+    pond_id: &str,
+) -> Result<
+    (
+        HashMap<String, ManifestEntry>,
+        HashMap<String, Vec<ObjectHash>>,
+    ),
+    StewardError,
+> {
     let table = ship.data_persistence().table().clone();
-    let index = build_content_tree_for_table(table, &local_pond_id).await?;
+    let index = match build_content_tree_for_table(table, pond_id).await {
+        Ok(index) => index,
+        // A foreign pond with no root row yet: first import, empty target.
+        Err(StewardError::DeltaLake(msg)) if msg.contains("no root directory row") => {
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+        Err(e) => return Err(e),
+    };
     let by_id = node_manifest_entries(&index)
         .into_iter()
         .map(|e| (e.node_id.clone(), e))

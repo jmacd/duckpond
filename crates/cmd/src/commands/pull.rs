@@ -2,16 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `pond pull [<name>]` -- pull new bundles from one or more remotes via
-//! the D4 [`sync_remote::Remote`] pipeline.
+//! `pond pull [<name>]` -- pull the content-addressed object graph from one or
+//! more remotes.  A root (or absent) mount path mirrors the source into the
+//! local pond; a non-root mount path is a cross-pond import that rebuilds the
+//! foreign pond's tree under its own pond_id and mounts it at the path.
 
 use crate::commands::remote::{
     RemoteMode, list_remote_names, load_remote_attachment, remote_mode_for,
 };
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
-use steward::{REMOTE_MOUNT_PATH_PREFIX, ShipRemoteSteward, StewardError};
-use sync_remote::Remote;
+use steward::{REMOTE_MOUNT_PATH_PREFIX, StewardError};
 use uuid::Uuid;
 
 /// Pull from `name`, or from every remote in `pull`/`both` mode when `name`
@@ -73,15 +74,15 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .filter(|s| !s.is_empty() && s != "/");
 
     // Mirror restart / backup restore (root or no mount): pull the full
-    // content graph and rebuild the local pond by node_id.  Cross-pond
-    // import (non-root mount) still uses the bundle pipeline below until
-    // the content subtree-import is built.
+    // content graph and rebuild the local pond by node_id.  Cross-pond import
+    // (non-root mount): fetch the foreign content graph and rebuild it under
+    // the foreign pond_id, then mount it.
     if mount_path.is_none() {
         return pull_mirror(ship, name, &attachment).await;
     }
 
     let storage_options = attachment.to_storage_options()?;
-    let remote = Remote::open_at_url(&attachment.url, storage_options)
+    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
 
@@ -90,67 +91,43 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
 
     let local_pond_id = ship_ref.control_table().pond_id_uuid();
-    let foreign_pond_id = remote.store_id();
+    let foreign_pond_id = remote.pond_id();
 
     // This is the import path: mount_path is guaranteed non-root here.
-    let mount_path = Some(mount_path.expect("import path requires a non-root mount_path"));
-
-    // First-pull bootstrap: if `last_pulled_seq:<url>` is unset, seed it to
-    // one below the remote's oldest available bundle so the pull applies
-    // every bundle the remote has.  A current producer replicates its
-    // pond_init txn (txn_seq=1) as a normal bundle, so the consumer
-    // receives the identity-bearing root-dir rows and matches on `verify`
-    // (P2-VERIFY-BOOTSTRAP-DRIFT); a legacy producer's oldest bundle is 2,
-    // so the seed is 1 (the old skip-the-bootstrap behavior).  Works for
-    // both mirror restart (foreign==local) and cross-pond import.  If the
-    // producer has already compacted+pruned past the oldest the consumer
-    // needs, the pull returns `BehindRetention` and the operator should use
-    // `pond restart-from-compact`.
-    let last_pulled_key = format!("last_pulled_seq:{}", attachment.url);
-    let already_pulled = ship_ref
-        .control_table()
-        .raw_config_get(&last_pulled_key)
-        .await
-        .map_err(|e| anyhow!("read last_pulled_seq for `{}`: {}", name, e))?
-        .is_some();
-    if !already_pulled {
-        let oldest = remote
-            .oldest_available_seq()
-            .await
-            .map_err(|e| anyhow!("read oldest bundle seq for `{}`: {}", name, e))?
-            .unwrap_or(1);
-        let seed = (oldest - 1).max(0);
-        seed_initial_last_pulled(ship_ref, &attachment.url, name, seed).await?;
+    let mount_path = mount_path.expect("import path requires a non-root mount_path");
+    if foreign_pond_id == local_pond_id {
+        return Err(anyhow!(
+            "remote `{}` has mount_path `{}` but its store_id matches this pond's \
+             pond_id; cross-pond import requires a foreign store_id",
+            name,
+            mount_path
+        ));
     }
 
-    let mut adapter = ShipRemoteSteward::new(ship_ref);
-    let report = remote
-        .pull(&mut adapter)
+    // Fetch the foreign object graph and rebuild it under the foreign pond_id
+    // partition, then mount it.  The local allocator stays contiguous; only the
+    // foreign pond's seq frontier advances inside `import_pond`.
+    let graph = steward::fetch_object_graph(&remote, "main")
         .await
-        .map_err(|e| anyhow!("pull from `{}`: {}", attachment.url, e))?;
-
+        .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
+    if graph.is_empty() {
+        log::info!(
+            "pull {}: remote ref `main` is empty; nothing to import",
+            name
+        );
+        return Ok(());
+    }
+    let foreign_uuid7 = uuid7::Uuid::from(*foreign_pond_id.as_bytes());
+    let outcome = steward::import_pond(ship_ref, &graph, foreign_uuid7)
+        .await
+        .map_err(|e| anyhow!("import from `{}`: {}", attachment.url, e))?;
     log::info!(
-        "[OK] pull {}: applied {} bundle(s) from {}",
+        "[OK] pull {} complete (cross-pond import: {:?})",
         name,
-        report.bundles_applied.len(),
-        attachment.url
+        outcome
     );
 
-    // Materialize the cross-pond mount entry, if any.  Runs after the
-    // pull so the foreign data is already in our Delta table.  Skipped
-    // for mirror restarts (foreign pond_id == local pond_id) since
-    // the mount path is "/" -- already filtered to None above.
-    if let Some(path) = mount_path {
-        if foreign_pond_id == local_pond_id {
-            return Err(anyhow!(
-                "remote `{}` has mount_path `{}` but its store_id matches this pond's \
-                 pond_id; cross-pond import requires a foreign store_id",
-                name,
-                path
-            ));
-        }
-        materialize_mount(ship_ref, name, &path, foreign_pond_id).await?;
-    }
+    materialize_mount(ship_ref, name, &mount_path, foreign_pond_id).await?;
 
     Ok(())
 }
@@ -190,24 +167,6 @@ async fn pull_mirror(
         name,
         outcome
     );
-    Ok(())
-}
-
-/// Seed `last_pulled_seq:<url>` to `seed` on first pull so the subsequent
-/// pull applies every bundle from `seed + 1` onward.  `seed` is normally
-/// `oldest_available_seq - 1` so the consumer starts at the remote's
-/// oldest bundle (the producer's replicated pond_init for current
-/// producers, or the first Write bundle for legacy ones).
-async fn seed_initial_last_pulled(
-    ship: &mut steward::Ship,
-    url: &str,
-    name: &str,
-    seed: i64,
-) -> Result<()> {
-    ship.control_table_mut()
-        .raw_config_set(&format!("last_pulled_seq:{}", url), &seed.to_string())
-        .await
-        .map_err(|e| anyhow!("seed last_pulled_seq for `{}` ({}): {}", name, url, e))?;
     Ok(())
 }
 

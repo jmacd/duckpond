@@ -54,6 +54,14 @@ pub trait PersistenceLayer: Send + Sync {
 
     async fn create_directory_node(&self, id: FileID) -> Result<Node>;
 
+    /// Initialize an empty root directory for a *foreign* pond_id, so a
+    /// cross-pond import can rebuild its tree before any rows exist.  The
+    /// default is a no-op for persistence layers that have no notion of
+    /// foreign ponds (memory, hostmount).
+    async fn initialize_foreign_root(&self, _pond_id: uuid7::Uuid) -> Result<()> {
+        Ok(())
+    }
+
     async fn create_symlink_node(&self, id: FileID, target: &Path) -> Result<Node>;
 
     async fn create_dynamic_node(

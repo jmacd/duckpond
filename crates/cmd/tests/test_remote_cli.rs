@@ -329,7 +329,7 @@ async fn pond_verify_ok_after_push() {
             ship.control_table().pond_id_uuid()
         };
         std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
             .await
             .expect("create remote");
     }
@@ -405,7 +405,7 @@ async fn pond_status_with_backup() {
             ship.control_table().pond_id_uuid()
         };
         std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
             .await
             .expect("create remote");
     }
@@ -455,7 +455,7 @@ async fn pond_restart_from_compact_no_restart_point() {
             ship.control_table().pond_id_uuid()
         };
         std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
             .await
             .expect("create remote");
     }
@@ -804,7 +804,7 @@ async fn pond_remote_add_pull_refuses_empty_remote() {
     .expect_err("pull-mode add against empty remote should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("not a Delta table") && msg.contains("pull-mode"),
+        msg.contains("not a content remote") && msg.contains("pull-mode"),
         "expected empty-remote-refusal error, got: {}",
         msg
     );
@@ -831,7 +831,7 @@ async fn pond_remote_add_persists_mount_path() {
     // Initialize upstream remote with a foreign store_id so the pull
     // attach is allowed (any store_id is OK for pull).
     let foreign_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&upstream_url, foreign_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&upstream_url, foreign_id, Default::default())
         .await
         .expect("init upstream");
 
@@ -998,7 +998,7 @@ async fn pond_remote_remove_clears_mount_path_key() {
 
     // Pre-init the remote with a foreign store_id (pull attach).
     let foreign_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, foreign_id, Default::default())
         .await
         .expect("create foreign remote");
 
@@ -1100,7 +1100,7 @@ async fn pond_remote_add_nonroot_path_refuses_matching_store_id() {
         let ship = ctx.open_pond().await.expect("open");
         ship.control_table().pond_id_uuid()
     };
-    let _ = sync_remote::Remote::create_at_url(&remote_url, local_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, local_id, Default::default())
         .await
         .expect("create remote with our pond_id");
 
@@ -1138,7 +1138,6 @@ async fn pond_remote_add_nonroot_path_refuses_matching_store_id() {
 ///   5. pond B `pond pull upstream`.
 ///   6. pond B can read /imports/A/<file> as foreign data.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn cross_pond_pull_materializes_mount_entry() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -1165,7 +1164,7 @@ async fn cross_pond_pull_materializes_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1276,7 +1275,6 @@ async fn cross_pond_pull_materializes_mount_entry() {
 /// untouched, and a subsequent local write takes the next CONTIGUOUS
 /// local seq -- not `foreign_frontier + 1`.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn cross_pond_pull_does_not_inflate_local_seq() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -1310,7 +1308,7 @@ async fn cross_pond_pull_does_not_inflate_local_seq() {
 
     // 2) Pond A pushes to its remote.
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1406,7 +1404,6 @@ async fn cross_pond_pull_does_not_inflate_local_seq() {
 /// with `ReadOnlyImport`.  This covers create_file_path,
 /// async_writer_path, create_dir_path, rename, remove, and insert_node.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn foreign_mount_writes_are_refused() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -1426,7 +1423,7 @@ async fn foreign_mount_writes_are_refused() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1528,7 +1525,6 @@ async fn foreign_mount_writes_are_refused() {
 /// the wrong pond_id; with the filter, the foreign entry is silently
 /// skipped.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn foreign_post_commit_factories_skipped_in_auto_exec() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -1558,7 +1554,7 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1678,7 +1674,6 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
 /// but the mount entry at `mount_path` is preserved so the imported
 /// data snapshot stays readable.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn pond_remote_remove_detach_preserves_mount_entry() {
     use cmd::commands::remove_remote_command;
     init_log();
@@ -1699,7 +1694,7 @@ async fn pond_remote_remove_detach_preserves_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1794,7 +1789,6 @@ async fn pond_remote_remove_detach_preserves_mount_entry() {
 /// attachment config AND the mount entry at `mount_path`.  After
 /// purge, the imported data is no longer reachable by path.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn pond_remote_remove_purge_drops_mount_entry() {
     use cmd::commands::remove_remote_command;
     init_log();
@@ -1814,7 +1808,7 @@ async fn pond_remote_remove_purge_drops_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1900,7 +1894,6 @@ async fn pond_remote_remove_purge_drops_mount_entry() {
 /// no-op for the mount (backups have no mount_path) but the config
 /// and watermarks still get cleared.  This documents the symmetry.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
 async fn pond_backup_remove_purge_is_no_op_for_mount() {
     use cmd::commands::remove_remote_command;
     init_log();
@@ -1916,7 +1909,7 @@ async fn pond_backup_remove_purge_is_no_op_for_mount() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, pond_id, Default::default())
         .await
         .expect("create remote");
     add_backup_command(
@@ -1974,10 +1967,10 @@ async fn pond_remote_add_refuses_duplicate_mount_path() {
     // Two distinct foreign upstreams.
     let foreign_a = uuid::Uuid::new_v4();
     let foreign_b = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_a, foreign_a, Default::default())
         .await
         .expect("create remote a");
-    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_b, foreign_b, Default::default())
         .await
         .expect("create remote b");
 
@@ -2037,10 +2030,10 @@ async fn pond_remote_add_refuses_duplicate_mount_path_trailing_slash() {
 
     let foreign_a = uuid::Uuid::new_v4();
     let foreign_b = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_a, foreign_a, Default::default())
         .await
         .expect("create remote a");
-    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_b, foreign_b, Default::default())
         .await
         .expect("create remote b");
 
@@ -2095,7 +2088,7 @@ async fn pond_remote_add_refuses_duplicate_foreign_store_id() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let foreign = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url, foreign, Default::default())
         .await
         .expect("create remote");
 
@@ -2151,7 +2144,7 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let foreign = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url, foreign, Default::default())
         .await
         .expect("create remote");
 
@@ -2221,7 +2214,7 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
 /// loudly.  Shell-level coverage lives in
 /// `testsuite/tests/531-recursive-cross-pond-import.sh`.
 #[tokio::test]
-#[ignore = "cross-pond import still uses bundles; pending content subtree-import"]
+#[ignore = "content-native multi-hop import: sub-mount placeholder not yet recreated, fold mismatch"]
 async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -2244,7 +2237,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&a_remote_path).expect("mkdir a_remote");
-    let _ = sync_remote::Remote::create_at_url(&a_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&a_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -2292,7 +2285,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         .await
         .expect("write b.txt on B");
     std::fs::create_dir_all(&b_remote_path).expect("mkdir b_remote");
-    let _ = sync_remote::Remote::create_at_url(&b_url, b_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&b_url, b_pond_id, Default::default())
         .await
         .expect("create B's remote");
     add_backup_command(

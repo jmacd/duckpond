@@ -80,6 +80,21 @@ impl FS {
             .await
     }
 
+    /// Initialize an empty root directory for a foreign pond, so a cross-pond
+    /// import can populate its tree.  Must be called within a write
+    /// transaction; the empty root commits with the import's other writes.
+    pub async fn initialize_foreign_root(&self, foreign_pond_id: uuid7::Uuid) -> Result<()> {
+        let foreign_root_id = FileID::root_for(foreign_pond_id);
+        let root_node = self
+            .persistence
+            .create_directory_node(foreign_root_id)
+            .await?;
+        self.persistence.store_node(&root_node).await?;
+        self.persistence
+            .initialize_foreign_root(foreign_pond_id)
+            .await
+    }
+
     /// Create a new node with persistence
     pub(crate) async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);

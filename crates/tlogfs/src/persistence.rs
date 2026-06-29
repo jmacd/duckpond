@@ -1508,6 +1508,15 @@ impl PersistenceLayer for State {
             .await
     }
 
+    async fn initialize_foreign_root(&self, pond_id: uuid7::Uuid) -> TinyFSResult<()> {
+        self.inner
+            .lock()
+            .await
+            .initialize_root_directory(pond_id)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
+    }
+
     async fn create_symlink_node(&self, id: FileID, target: &Path) -> TinyFSResult<Node> {
         self.inner
             .lock()
@@ -2616,7 +2625,9 @@ impl InnerState {
 
         if has_records {
             for record in &mut records {
-                record.pond_id = pond_id.clone();
+                if record.pond_id.is_empty() {
+                    record.pond_id = pond_id.clone();
+                }
             }
         }
 
@@ -3162,14 +3173,17 @@ impl InnerState {
 
             // Create full snapshot OplogEntry
             let now = Utc::now().timestamp_micros();
-            let record = OplogEntry::new_directory_full_snapshot(
+            let mut record = OplogEntry::new_directory_full_snapshot(
                 dir_id,
                 now,
                 next_version,
                 content_bytes,
                 self.txn_seq,
             );
-
+            // Stamp the row's pond_id from the directory's own FileID so a
+            // cross-pond import's foreign-rooted rows persist under the foreign
+            // pond_id partition rather than the local committing pond.
+            record.pond_id = dir_id.pond_id().to_string();
             debug!(
                 "[NOTE] FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}",
                 record.part_id,
@@ -3190,7 +3204,6 @@ impl InnerState {
 
         Ok(())
     }
-
     /// Create a dynamic directory node with factory configuration
     /// Create a dynamic node with factory configuration (used by `mknod` command)
     ///

@@ -18,7 +18,6 @@
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
 use steward::{REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
-use sync_remote::{Remote, RemoteError};
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
 
@@ -237,10 +236,13 @@ async fn add_remote_attachment_internal(
     let storage_options = attachment.to_storage_options()?;
     let is_import = mode == RemoteMode::Pull && matches!(mount_path, Some(p) if p != "/");
     if is_import {
-        // Cross-pond import: bundle pipeline (content subtree-import pending).
-        match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
+        // Cross-pond import: content-addressed pull (ContentRemote graph
+        // fetch + foreign-pond rebuild + mount).  The remote must be a
+        // content remote whose store_id is a foreign pond.
+        match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options.clone()).await
+        {
             Ok(remote) => {
-                let remote_store_id = remote.store_id();
+                let remote_store_id = remote.pond_id();
                 if remote_store_id == local_pond_id {
                     return Err(anyhow!(
                         "remote `{}` at {} has store_id {} which matches this pond's pond_id; \
@@ -260,20 +262,12 @@ async fn add_remote_attachment_internal(
                     remote_store_id
                 );
             }
-            Err(RemoteError::Delta(deltalake::DeltaTableError::NotATable(_))) => {
+            Err(_) => {
                 return Err(anyhow!(
-                    "remote `{}` at {} is not a Delta table; pull-mode remotes must point at an \
-                     existing pond. The consumer cannot initialize an empty upstream remote.",
+                    "remote `{}` at {} is not a content remote; pull-mode remotes must point at \
+                     an existing pond. The consumer cannot initialize an empty upstream remote.",
                     name,
                     attachment.url
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "failed to open remote `{}` at {}: {}",
-                    name,
-                    attachment.url,
-                    e
                 ));
             }
         }
@@ -511,10 +505,11 @@ async fn validate_no_foreign_store_id_collision(
         if attachment.url.starts_with("s3://") {
             sync_remote::register_s3_handlers();
         }
-        let existing_store_id = match Remote::open_at_url(&attachment.url, storage_options).await {
-            Ok(r) => r.store_id(),
-            Err(_) => continue,
-        };
+        let existing_store_id =
+            match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options).await {
+                Ok(r) => r.pond_id(),
+                Err(_) => continue,
+            };
         if existing_store_id == new_store_id {
             if overwrite {
                 return Err(anyhow!(

@@ -32,7 +32,7 @@ mod write_lock;
 pub use content_diff::{ContentComparison, ContentDiff, DiffKind, compare_content_trees};
 pub use content_objects::{ObjectInventory, ObjectKind, inventory_content_objects};
 pub use content_pull::{
-    FetchedGraph, FetchedObject, RebuildOutcome, fetch_object_graph, rebuild_pond,
+    FetchedGraph, FetchedObject, RebuildOutcome, fetch_object_graph, import_pond, rebuild_pond,
 };
 pub use content_push::{ContentPushOutcome, push_content_to_remote};
 pub use content_tree::{

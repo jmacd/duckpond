@@ -386,7 +386,8 @@ pub async fn rebuild_pond(
         .write_transaction(
             &PondUserMetadata::new(vec!["pull".to_string()]),
             async move |fs| {
-                apply_ops(fs, &root_node_id, &ops).await?;
+                let root_wd = fs.root().await?;
+                apply_ops(&root_node_id, root_wd, &ops).await?;
                 Ok(())
             },
         )
@@ -416,7 +417,99 @@ pub async fn rebuild_pond(
     Ok(outcome)
 }
 
-/// The source manifest's root entry id (the node with no parent and no name).
+/// Cross-pond import: rebuild a *foreign* pond's tree under its own `pond_id`
+/// partition (Section 8.5.2, mount scoping), so a mount entry at the import
+/// path resolves into it.  Unlike [`rebuild_pond`] -- which mirrors the source
+/// at the local root and adopts the local pond_id -- this writes the source's
+/// nodes beneath the foreign pond's well-known root, diffing against whatever of
+/// the foreign tree is already present, and advances only the foreign pond's
+/// seq allocator so the local pond's contiguous numbering is untouched.
+///
+/// # Errors
+///
+/// Same conditions as [`rebuild_pond`], computed over `foreign_pond_id`: the
+/// graph must carry a manifest, references must resolve, and the rebuilt tree
+/// must fold to the tip root tree hash with a matching node manifest.
+pub async fn import_pond(
+    target: &mut Ship,
+    graph: &FetchedGraph,
+    foreign_pond_id: uuid7::Uuid,
+) -> Result<RebuildOutcome, StewardError> {
+    let root = graph
+        .root_tree_hash()
+        .ok_or_else(|| StewardError::Content("cannot import an empty graph".to_string()))?;
+    if graph.manifest.is_empty() {
+        return Err(StewardError::Content(
+            "fetched graph has no node manifest".to_string(),
+        ));
+    }
+    let tip_manifest_hash = graph
+        .commits
+        .first()
+        .map(|(_, c)| c.node_manifest_hash)
+        .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
+
+    let foreign_id = foreign_pond_id.to_string();
+    let (target_nodes, target_series) =
+        crate::content_tree::build_target_state_for_pond(target, &foreign_id).await?;
+    let (ops, outcome) = plan_node_diff(graph, root, &target_nodes, &target_series)?;
+
+    let root_node_id = src_root_id(graph)?.to_string();
+    let first_import = target_nodes.is_empty();
+    target
+        .write_transaction(
+            &PondUserMetadata::new(vec!["pull".to_string(), "import".to_string()]),
+            async move |fs| {
+                if first_import {
+                    fs.initialize_foreign_root(foreign_pond_id).await?;
+                }
+                let foreign_node = fs.foreign_root_node(foreign_pond_id).await?;
+                let foreign_np = tinyfs::NodePath {
+                    node: foreign_node,
+                    path: "/".into(),
+                };
+                let root_wd = fs.wd(&foreign_np, foreign_np.clone()).await?;
+                apply_ops(&root_node_id, root_wd, &ops).await?;
+                Ok(())
+            },
+        )
+        .await?;
+
+    let table = target.data_persistence().table().clone();
+    let report =
+        crate::content_tree::compute_content_tree_for_table(table.clone(), &foreign_id).await?;
+    if report.root_tree_hash != root {
+        return Err(StewardError::Content(format!(
+            "imported foreign tree folds to {} but the tip root tree is {}",
+            report.root_tree_hash.to_hex(),
+            root.to_hex()
+        )));
+    }
+
+    let (_, manifest_root) =
+        crate::content_tree::compute_commit_roots_for_table(table, &foreign_id).await?;
+    if manifest_root != tip_manifest_hash {
+        return Err(StewardError::Content(format!(
+            "imported node manifest hashes to {} but the tip commit's manifest is {}",
+            manifest_root.to_hex(),
+            tip_manifest_hash.to_hex()
+        )));
+    }
+
+    // Advance only the foreign pond's seq frontier so the local allocator stays
+    // contiguous; the highest source seq is the foreign tip's commit seq.
+    let foreign_seq = graph
+        .commits
+        .iter()
+        .map(|(_, c)| c.provenance.seq)
+        .max()
+        .unwrap_or(0);
+    target
+        .data_persistence_mut()
+        .sync_last_txn_seq(&foreign_id, foreign_seq);
+
+    Ok(outcome)
+}
 fn src_root_id(graph: &FetchedGraph) -> Result<&str, StewardError> {
     graph
         .manifest
@@ -662,12 +755,7 @@ fn plan_series_versions(
 }
 
 /// Apply an ordered plan within an open transaction, adopting source node ids.
-async fn apply_ops(
-    fs: &tinyfs::FS,
-    root_node_id: &str,
-    ops: &[ApplyOp],
-) -> Result<(), StewardError> {
-    let root_wd = fs.root().await?;
+async fn apply_ops(root_node_id: &str, root_wd: WD, ops: &[ApplyOp]) -> Result<(), StewardError> {
     let mut dir_wd: HashMap<String, WD> = HashMap::new();
     let _ = dir_wd.insert(root_node_id.to_string(), root_wd.clone());
 

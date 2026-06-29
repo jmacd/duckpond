@@ -486,6 +486,17 @@ ships its own manifest. A mount whose subtree was not replicated locally folds b
 mount identity rather than recursing into absent rows, so multi-hop imports do
 not re-replicate.
 
+**Implementation status.** Cross-pond import is content-native: `pond pull` on a
+non-root mount opens the foreign `ContentRemote`, fetches its object graph, and
+`steward::import_pond` rebuilds the foreign tree under its own `pond_id`
+partition (initializing a foreign root v1, adopting source node_ids, advancing
+only the foreign seq frontier), then mounts the foreign root. Rows now carry
+their FileID's pond_id at rest, so foreign-rooted writes persist under the
+foreign partition. Open: recreating a *sub-mount* placeholder so a 3-deep import
+(C imports B which imports A) folds equal to B's tip; that one multi-hop case is
+deferred.
+
+
 #### 8.5.3 Versions, series, and provenance
 
 - **Single-version files.** One blob object becomes one `FilePhysicalVersion`
