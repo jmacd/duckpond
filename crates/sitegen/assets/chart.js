@@ -1012,6 +1012,7 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
       const plotDiv = document.createElement("div");
       plotDiv.className = "chart-plot";
+      plotDiv.style.width = "100%";
 
       const wrapper = document.createElement("div");
       wrapper.className = "chart";
@@ -1045,6 +1046,18 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
           String((e && e.message) || e) + "</div>";
         continue;
       }
+
+      // Vega's `width: "container"` reads plotDiv.clientWidth at embed time. If
+      // the element is laid out at zero width (fonts/layout not yet settled),
+      // every datum collapses to x=0 and the plot looks empty. Re-fit to the
+      // real width once and on every resize so the line spans the plot.
+      const refit = () => {
+        if (!view) return;
+        const w = plotDiv.clientWidth || (plotDiv.parentElement && plotDiv.parentElement.clientWidth) || 700;
+        view.width(w).resize().runAsync();
+      };
+      requestAnimationFrame(refit);
+      new ResizeObserver(refit).observe(plotDiv);
 
       // Attach brush-to-zoom on the rendered SVG, plus a hover crosshair that
       // reports each series' value at the pointed-to sample. The brush/hover
