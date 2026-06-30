@@ -354,6 +354,9 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
       $schema: "https://vega.github.io/schema/vega-lite/v5.json",
       width: "container",
       height: 340,
+      // Fit the y extent rather than forcing a zero baseline (meaningless for
+      // arbitrary-scale sensor readings); matches the gauge spec default.
+      config: { scale: { zero: false } },
       transform: multi ? [{ fold: cols, as: ["series", "value"] }] : [],
       mark: { type: "line", clip: true, tooltip: true },
       encoding: {

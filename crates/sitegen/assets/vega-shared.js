@@ -78,6 +78,9 @@ export function buildLineSpec(fields, rows, opts = {}) {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
     width: "container",
     height: opts.height || 340,
+    // Match the gauge default: fit the y extent rather than forcing a zero
+    // baseline, which is meaningless for arbitrary-scale sensor readings.
+    config: { scale: { zero: false } },
     transform: multi ? [{ fold: yCols.map(escapeField), as: ["series", "value"] }] : [],
     mark: { type: "line", clip: true, tooltip: true },
     encoding: {
@@ -236,6 +239,11 @@ function themeConfig(theme) {
   return {
     background: "transparent",
     view: { stroke: null },
+    // These charts plot arbitrary-scale sensor readings (depths, levels,
+    // pressures), not ratios, so a zero baseline is meaningless and just
+    // squashes the variation. Default every scale to fit its data extent; an
+    // individual encoding can still opt back in with `scale: { zero: true }`.
+    scale: { zero: false },
     axis: {
       labelColor: fg,
       titleColor: fg,
