@@ -127,7 +127,22 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         outcome
     );
 
-    materialize_mount(ship_ref, name, &mount_path, foreign_pond_id).await?;
+    // Materialize the mount and record the graft pin in ONE transaction.  The
+    // mount node is omitted from the content-tree fold (keeping the graft
+    // non-transitive); the pin file is ordinary pond-owned content -- covered
+    // by our commit hash and replicated to consumers as a content-addressed
+    // reference to the foreign tip.
+    let pinned_tip = graph
+        .tip
+        .ok_or_else(|| anyhow!("imported graph from `{}` has no tip commit", name))?;
+    materialize_mount(
+        ship_ref,
+        name,
+        &mount_path,
+        foreign_pond_id,
+        &pinned_tip.to_hex(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -170,20 +185,36 @@ async fn pull_mirror(
     Ok(())
 }
 
-/// Insert (idempotently) a directory entry at `mount_path` whose
-/// `pond_id` is the foreign pond's id.  Reading through this entry
-/// will yield the foreign pond's tree.
+/// Insert (idempotently) a directory entry at `mount_path` whose `pond_id` is
+/// the foreign pond's id, and record the graft pin at `/sys/grafts/<name>` --
+/// both in a SINGLE transaction so a cross-pond pull adds exactly one local
+/// commit.  Reading through the mount entry yields the foreign pond's tree; the
+/// pin file is ordinary pond-owned content (covered by our commit hash and
+/// replicated to consumers) that pins the foreign tip commit hash without
+/// re-replicating the foreign closure.
 async fn materialize_mount(
     ship: &mut steward::Ship,
     name: &str,
     mount_path: &str,
     foreign_pond_id: Uuid,
+    pinned_tip_hex: &str,
 ) -> Result<()> {
     let (parent, leaf) = split_mount_path(mount_path)?;
     let name_owned = name.to_string();
     let mount_owned = mount_path.to_string();
     let parent_owned = parent.to_string();
     let leaf_owned = leaf.to_string();
+
+    let pin = steward::GraftPin {
+        foreign_pond_id: foreign_pond_id.to_string(),
+        mount_path: mount_path.to_string(),
+        pinned_tip: pinned_tip_hex.to_string(),
+    };
+    let pin_yaml = pin
+        .to_yaml()
+        .map_err(|e| anyhow!("serialize graft pin for `{}`: {}", name, e))?;
+    let pin_path = steward::GraftPin::pin_path(name);
+    let pin_name = name_owned.clone();
 
     ship.write_transaction(
         &steward::PondUserMetadata::new(vec![
@@ -193,6 +224,9 @@ async fn materialize_mount(
             mount_owned,
         ]),
         async move |fs| {
+            use tinyfs::EntryType;
+            use tokio::io::AsyncWriteExt;
+
             let root = fs.root().await?;
             let _ = root.create_dir_all(&parent_owned).await?;
             let parent_wd = root.open_dir_path(&parent_owned).await?;
@@ -201,19 +235,39 @@ async fn materialize_mount(
 
             if let Some(existing) = parent_wd.get(&leaf_owned).await? {
                 let existing_pond = existing.node.id().pond_id();
-                if existing_pond == foreign_uuid7 {
-                    // Idempotent: mount already points at the right pond.
-                    return Ok(());
+                if existing_pond != foreign_uuid7 {
+                    return Err(StewardError::Aborted(format!(
+                        "mount path `{}/{}` already exists with pond_id {}; cannot \
+                         attach foreign pond {}",
+                        parent_owned, leaf_owned, existing_pond, foreign_uuid7
+                    )));
                 }
-                return Err(StewardError::Aborted(format!(
-                    "mount path `{}/{}` already exists with pond_id {}; cannot \
-                     attach foreign pond {}",
-                    parent_owned, leaf_owned, existing_pond, foreign_uuid7
-                )));
+                // Idempotent: mount already points at the right pond.
+            } else {
+                let foreign_node = fs.foreign_root_node(foreign_uuid7).await?;
+                let _ = parent_wd.insert_node(&leaf_owned, foreign_node).await?;
             }
 
-            let foreign_node = fs.foreign_root_node(foreign_uuid7).await?;
-            let _ = parent_wd.insert_node(&leaf_owned, foreign_node).await?;
+            // Record / refresh the graft pin in the same transaction.
+            let _ = root.create_dir_all(steward::SYS_DIR).await?;
+            let _ = root.create_dir_all(steward::SYS_GRAFTS_DIR).await?;
+            if root.exists(&pin_path).await {
+                let grafts_dir = root.open_dir_path(steward::SYS_GRAFTS_DIR).await?;
+                grafts_dir.remove_entry(&pin_name).await.map_err(|e| {
+                    StewardError::Aborted(format!("remove existing graft pin {}: {}", pin_path, e))
+                })?;
+            }
+            let mut writer = root
+                .async_writer_path_with_type(&pin_path, EntryType::FilePhysicalVersion)
+                .await?;
+            writer
+                .write_all(pin_yaml.as_bytes())
+                .await
+                .map_err(|e| StewardError::Aborted(format!("write graft pin: {}", e)))?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|e| StewardError::Aborted(format!("close graft pin: {}", e)))?;
             Ok(())
         },
     )

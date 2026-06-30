@@ -2459,4 +2459,40 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         .await
         .expect("B still reads A after C's pull");
     assert_eq!(b_view_of_a_after, b"from pond A");
+
+    // --- INVARIANT 5: the graft pin is a replicated content reference.
+    // B records `/sys/grafts/upstreamA` pinning A's tip; that file is
+    // B-owned content, so it is covered by B's commit and replicates to
+    // C.  C therefore holds a content-addressed reference to A's tip
+    // WITHOUT having fetched A's closure (invariants 2/3 still hold).
+    {
+        let a_tip = {
+            let a_remote = sync_store::ContentRemote::open_at_url(&a_url, Default::default())
+                .await
+                .expect("open A's remote");
+            a_remote
+                .get_tip("main")
+                .await
+                .expect("get A's tip")
+                .expect("A has a tip")
+        };
+
+        // B holds the pin it wrote.
+        let b_pin_bytes = read_small_file(&b_ctx, "/sys/grafts/upstreamA")
+            .await
+            .expect("B holds its graft pin for upstreamA");
+        let b_pin = steward::GraftPin::from_yaml_bytes(&b_pin_bytes).expect("parse B's graft pin");
+        assert_eq!(b_pin.foreign_pond_id, a_pond_id.to_string());
+        assert_eq!(b_pin.mount_path, "/imports/A");
+        assert_eq!(b_pin.pinned_tip, a_tip.to_hex());
+
+        // C, having imported B at /imports/B, sees B's graft pin under the
+        // mount -- a content reference revealing that B grafts A at tip T,
+        // learned WITHOUT C fetching A's content closure.
+        let c_pin_bytes = read_small_file(&c_ctx, "/imports/B/sys/grafts/upstreamA")
+            .await
+            .expect("C sees B's replicated graft pin under /imports/B");
+        let c_pin = steward::GraftPin::from_yaml_bytes(&c_pin_bytes).expect("parse C's graft pin");
+        assert_eq!(c_pin, b_pin, "C's replicated graft pin must equal B's");
+    }
 }

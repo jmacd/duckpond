@@ -21,6 +21,7 @@ mod content_verify;
 mod control_table;
 mod dispatch;
 pub mod fsck;
+mod graft;
 mod guard;
 mod host;
 pub mod maintenance;
@@ -44,6 +45,7 @@ pub use content_verify::{ContentVerifyReport, ContentVerifyState, verify_content
 pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
+pub use graft::{GraftPin, SYS_GRAFTS_DIR};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
 pub use rebuild::{RebuildReport, rebuild_control_table};

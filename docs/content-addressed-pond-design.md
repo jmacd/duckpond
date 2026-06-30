@@ -492,18 +492,33 @@ built from the same child lists, excludes it too. The local pond's content tree
 is therefore exactly its own data, independent of whether a foreign subtree
 happens to be replicated locally. This is what makes multi-hop imports
 non-transitive: when C imports B which imports A, B's published tree carries no
-record of A, so C's reconstruction folds equal to B's tip and never re-replicates
-A's content.
+record of A *in the fold*, so C's reconstruction folds equal to B's tip and never
+re-replicates A's content.
+
+Omitting the mount node from the fold would, by itself, leave nothing in the
+content graph recording *which* foreign tip B grafted. To keep the graft a
+first-class, content-addressed reference, each cross-pond import also writes a
+small pin file at `/sys/grafts/<name>` recording the foreign `pond_id`, the
+mount path, and the foreign tip commit hash. That pin is ordinary pond-owned
+content: it is covered by the importing pond's commit hash and replicates to
+consumers through the normal tree/push/pull path. A consumer therefore learns
+the pinned foreign tip without fetching the foreign closure -- an inert
+reference, exactly like a git submodule pointer whose submodule has not been
+checked out. The pin pins the tip; it does not bring the foreign mount node back
+into the fold, so non-transitivity is preserved.
 
 **Implementation status.** Cross-pond import is content-native: `pond pull` on a
 non-root mount opens the foreign `ContentRemote`, fetches its object graph, and
 `steward::import_pond` rebuilds the foreign tree under its own `pond_id`
 partition (initializing a foreign root v1, adopting source node_ids, advancing
-only the foreign seq frontier), then mounts the foreign root. Rows now carry
-their FileID's pond_id at rest, so foreign-rooted writes persist under the
-foreign partition. Multi-hop imports (C imports B which imports A) fold equal to
-B's tip because foreign mounts are omitted from the fold, so the case is closed
-(test `cross_pond_3deep_does_not_re_replicate_foreign_mount`).
+only the foreign seq frontier), then mounts the foreign root and writes the
+`/sys/grafts/<name>` pin. Rows now carry their FileID's pond_id at rest, so
+foreign-rooted writes persist under the foreign partition. Multi-hop imports
+(C imports B which imports A) fold equal to B's tip because foreign mounts are
+omitted from the fold; C still sees B's graft pin to A under the mount
+(`/imports/B/sys/grafts/<name>`) as a dangling content reference, without
+re-replicating A's content, so the case is closed (test
+`cross_pond_3deep_does_not_re_replicate_foreign_mount`).
 
 
 #### 8.5.3 Versions, series, and provenance
