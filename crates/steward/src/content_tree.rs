@@ -260,14 +260,6 @@ pub(crate) fn node_manifest_entries(index: &ContentTreeIndex) -> Vec<ManifestEnt
         }
         let parent_node_id = &dir_key.1;
         for child in children {
-            // Skip cross-pond mount points: a child resolving into a foreign
-            // pond belongs to that pond's own manifest, and its root shares the
-            // well-known ROOT_UUID, which would collide here.
-            if let Some((child_pond, _)) = &child.child_dir_key
-                && child_pond != local_pond
-            {
-                continue;
-            }
             entries.push(ManifestEntry::new(
                 child.child_node_id.clone(),
                 parent_node_id.clone(),
@@ -536,24 +528,30 @@ fn hash_directory(
         // foreign pond_id (a cross-pond import mount point).
         let child_pond = entry.pond_id.clone().unwrap_or_else(|| key.0.clone());
         let child_key = (child_pond, entry.child_node_id.to_string());
-        // A foreign-pond mount whose subtree was not replicated here is opaque:
-        // its content lives in its own pond's tree, so fold by mount identity
-        // rather than recursing into rows that are absent locally.
-        let is_unresolved_mount = child_key.0 != key.0 && !latest.contains_key(&child_key);
-        let child_hash = if is_unresolved_mount {
-            ObjectHash::of_bytes(format!("mount:{}/{}", child_key.0, child_key.1).as_bytes())
-        } else {
-            hash_child(
-                &child_key,
-                entry.entry_type,
-                latest,
-                series_versions,
-                memo,
-                in_progress,
-                dirs,
-                sink.as_deref_mut(),
-            )?
-        };
+        // A cross-pond mount point is a graft by reference, not this pond's
+        // content: its subtree lives in the foreign pond's own content tree and
+        // the push filters rows to this pond_id.  Omit it from the fold entirely
+        // -- it contributes no tree entry and no child object -- so the content
+        // tree is exactly this pond's own data.  This keeps the producer's
+        // published tree consistent with what any consumer reconstructs (which
+        // never receives the foreign subtree), and it is what blocks transitive
+        // re-replication of a foreign mount across a multi-hop import (C imports
+        // B imports A: C must not see A through B).  Because the omission happens
+        // here, the node manifest excludes these mounts too (it is built from
+        // the same child lists).
+        if child_key.0 != key.0 {
+            continue;
+        }
+        let child_hash = hash_child(
+            &child_key,
+            entry.entry_type,
+            latest,
+            series_versions,
+            memo,
+            in_progress,
+            dirs,
+            sink.as_deref_mut(),
+        )?;
         let child_node_id = child_key.1.clone();
         let child_dir_key = if entry.entry_type == EntryType::DirectoryPhysical {
             Some(child_key)

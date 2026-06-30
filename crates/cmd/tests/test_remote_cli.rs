@@ -2245,7 +2245,6 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
 /// loudly.  Shell-level coverage lives in
 /// `testsuite/tests/531-recursive-cross-pond-import.sh`.
 #[tokio::test]
-#[ignore = "content-native multi-hop import: sub-mount placeholder not yet recreated, fold mismatch"]
 async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");

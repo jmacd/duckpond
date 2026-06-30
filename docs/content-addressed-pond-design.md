@@ -482,12 +482,18 @@ via the commit manifest. The two alternatives are rejected -- *deriving*
 content-tree hash already provides and breaks on rename; *locally minting* ids
 forces the fragile path-resolution scheme above.
 
-Cross-pond mounts are scoped out of the manifest. A pond that imports another
-mounts a foreign root, whose well-known `ROOT_UUID` would otherwise collide with
-the local root, so the manifest covers only local-pond nodes; the foreign pond
-ships its own manifest. A mount whose subtree was not replicated locally folds by
-mount identity rather than recursing into absent rows, so multi-hop imports do
-not re-replicate.
+Cross-pond mounts are scoped out of the content tree entirely. A pond that
+imports another mounts a foreign root, whose well-known `ROOT_UUID` would
+otherwise collide with the local root. A foreign mount is a graft by reference:
+its subtree lives in the foreign pond's own content tree, and the push filters
+rows to the local `pond_id`. So the fold *omits* a foreign mount completely --
+it contributes neither a tree entry nor a child object -- and the node manifest,
+built from the same child lists, excludes it too. The local pond's content tree
+is therefore exactly its own data, independent of whether a foreign subtree
+happens to be replicated locally. This is what makes multi-hop imports
+non-transitive: when C imports B which imports A, B's published tree carries no
+record of A, so C's reconstruction folds equal to B's tip and never re-replicates
+A's content.
 
 **Implementation status.** Cross-pond import is content-native: `pond pull` on a
 non-root mount opens the foreign `ContentRemote`, fetches its object graph, and
@@ -495,9 +501,9 @@ non-root mount opens the foreign `ContentRemote`, fetches its object graph, and
 partition (initializing a foreign root v1, adopting source node_ids, advancing
 only the foreign seq frontier), then mounts the foreign root. Rows now carry
 their FileID's pond_id at rest, so foreign-rooted writes persist under the
-foreign partition. Open: recreating a *sub-mount* placeholder so a 3-deep import
-(C imports B which imports A) folds equal to B's tip; that one multi-hop case is
-deferred.
+foreign partition. Multi-hop imports (C imports B which imports A) fold equal to
+B's tip because foreign mounts are omitted from the fold, so the case is closed
+(test `cross_pond_3deep_does_not_re_replicate_foreign_mount`).
 
 
 #### 8.5.3 Versions, series, and provenance
