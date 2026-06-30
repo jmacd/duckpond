@@ -29,7 +29,6 @@
 | `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
-| `pond restart-from-compact` | Recover a consumer past the retention horizon (D6.4) | `pond restart-from-compact origin` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -563,8 +562,11 @@ pond pull upstream
 
 ### pond verify (D6.1)
 
-Compare this pond's CURRENT live data against one or more remotes'
-recorded partition checksums.
+Compare this pond's CURRENT content tip against one or more remotes'
+published tip.  The content-addressed remote holds a single object
+closure and one tip ref per pond -- there is no `(pond_id, seq)`
+frontier -- so verify reports the commit-graph relationship between the
+local tip and the remote's published tip.
 
 ```bash
 # Verify against every attached remote
@@ -575,22 +577,24 @@ pond verify origin
 ```
 
 Output (per remote):
-- `[OK] verify <name>: live data matches remote at seq=<N>` -- consumer
-  agrees with the remote's latest bundle.
-- `[OK] verify <name>: remote has no bundles (vacuous match)` -- remote
-  is empty and so is the consumer.
-- `[MISMATCH] verify <name>: <K> partition(s) diverge from remote at seq=<N>`
-  followed by one line per mismatching partition.  If the consumer
-  agrees with a prior bundle in the remote's history, the
-  `divergence boundary: ... seq=<B>` line identifies when drift began.
+- `[OK] verify <name>: live data matches remote tip at seq=<N>` -- the
+  remote's published tip equals the local tip (up to date).
+- `[OK] verify <name>: remote tip at seq=<N> is behind local by <K> commit(s); push to catch up`
+  -- the remote's tip is an ancestor of the local tip; the producer has
+  unpushed local commits (lag, not drift).
+- `[OK] verify <name>: remote has no published tip yet (nothing pushed)`
+  -- the remote holds no ref under `main`.
+- `[OK] verify <name>: no local commits and remote is empty` -- both
+  sides are empty.
+- `[MISMATCH] verify <name>: remote tip at seq=<N> is not in this pond's history (diverged)`
+  -- the remote published a commit this pond does not have.
 
-Exit code is non-zero if any remote reports a mismatch or fails to load.
+Each line is followed by the local and remote tip commit hashes.  Exit
+code is non-zero if any remote diverges or fails to load.
 
 > Verify is symmetric: a replica bootstrapped from a remote (via
-> `pond pull` or `restart-from-compact`) verifies cleanly against that
-> remote, because the producer's `pond_init` transaction is replicated as
-> a normal bundle so the replica is byte-identical (P2-VERIFY-BOOTSTRAP-DRIFT,
-> fixed).
+> `pond pull`) verifies cleanly against that remote, because it rebuilds
+> the same content closure and tip the producer published.
 
 ---
 
@@ -761,57 +765,12 @@ pond maintain --compact
 
 `--compact` compacts the pond's own-`pond_id` partitions as a **recorded,
 pushable transaction**: the merge is written to the control table as a
-`Compact` commit, so a subsequent `pond push` emits a **Compact bundle**.
-That bundle is the restart baseline used by
-[`pond restart-from-compact`](#pond-restart-from-compact-d64), and it lets
-`pond maintain --remote=<name>` retention prune the superseded `Write`
-bundles.
+`Compact` commit, so a subsequent `pond push` publishes the compacted
+content closure.
 
 Compaction never changes logical content -- duckpond snapshots each
 partition's checksum before and after the merge and aborts if they
 differ.  A run with nothing to merge is a clean no-op.
-
-> **Tip:** push before compacting (or push the compact baseline) -- the
-> Compact bundle is a full snapshot of the pond at the compacted version,
-> so consumers can restart from it alone.
-
----
-
-### pond restart-from-compact (D6.4)
-
-Recover a consumer that has fallen below a remote's retention horizon.
-
-When `pond pull` fails with `consumer is below retention horizon`
-([`BehindRetention`]), the bundles the consumer still needs have been
-pruned by retention.  The only recovery is to drop the affected pond's
-local footprint and re-apply the remote's oldest surviving **compact
-baseline**, then catch up to the latest bundle.
-
-```bash
-pond restart-from-compact <name>
-```
-
-Behavior depends on whether the remote is a mirror or a cross-pond
-import:
-
-- **Mirror** (`remote.store_id == local pond_id`): drops ALL local data
-  for the pond and rebuilds from the compact baseline.  Because the
-  `/sys/remotes/<name>` attachment and its mode/mount settings live
-  under the local pond_id, they are dropped too -- the command
-  re-persists them automatically afterwards so the remote stays usable.
-- **Cross-pond import** (`remote.store_id != local pond_id`): drops only
-  the foreign pond's footprint on the consumer; the consumer's own data
-  and any sibling imports are untouched.
-
-If the remote has no compact bundle, the command refuses with a clear
-error (nothing is dropped -- the safety check runs before any delete).
-
-> **Producing a compact baseline:** run `pond maintain --compact` on the
-> producer and then `pond push`.  Compaction is recorded as a Compact
-> transaction, so the next push emits a Compact bundle that becomes the
-> remote's restart baseline (and lets `pond maintain --remote` retention
-> prune the superseded Write bundles).  Cross-pond sources can also
-> supply a compact baseline.
 
 ---
 

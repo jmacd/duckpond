@@ -314,23 +314,17 @@ full recovery semantics.
 
 ### Consumer fell below the retention horizon
 
-If `pond pull` fails with "consumer is below retention horizon", the
-bundles you still need were pruned by retention.  Recover by
-re-bootstrapping from the remote's oldest compact baseline:
+Under content-addressed sync there is no per-transaction bundle to prune,
+so a consumer can always recover by re-fetching the objects reachable
+from the remote's current tip:
 
 ```
-$ pond restart-from-compact upstream
+$ pond pull upstream
 ```
 
-A mirror restart drops all local data and rebuilds (the attachment is
-re-persisted automatically); a cross-pond restart drops only the foreign
-pond's footprint.
-
-> Producing a baseline: run `pond maintain --compact` on the producer and
-> `pond push`.  The compaction is pushed as a Compact bundle that becomes
-> the remote's restart baseline.  A pure duckpond mirror with no compacted
-> push (and no compacting upstream) has no baseline yet, and the command
-> reports "no compact bundle".
+A mirror re-fetch rebuilds the local content closure from the remote's
+published tip; a cross-pond pull refreshes only the foreign pond's
+footprint.
 
 ### Destructive recovery
 
@@ -407,7 +401,7 @@ $ pond status
 ### "Replica pull says 'below retention horizon'"
 
 ```
-$ pond restart-from-compact upstream
+$ pond pull upstream
 ```
 
 ### "Control table is corrupt / pond won't open"
@@ -463,7 +457,6 @@ MONITORING
 RECOVERY
   pond recover                                Resolve incomplete transactions
   pond rebuild-control [--force]              Rebuild control table from data
-  pond restart-from-compact <name>            Recover past the retention horizon
   pond emergency ...                          Destructive recovery
 ```
 

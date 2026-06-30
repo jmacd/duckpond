@@ -17,6 +17,7 @@ mod content_objects;
 mod content_pull;
 mod content_push;
 mod content_tree;
+mod content_verify;
 mod control_table;
 mod dispatch;
 pub mod fsck;
@@ -39,6 +40,7 @@ pub use content_tree::{
     ContentTreeReport, MaterializedObjects, compute_content_tree, compute_content_tree_for_table,
     materialize_content_objects,
 };
+pub use content_verify::{ContentVerifyReport, ContentVerifyState, verify_content_against_remote};
 pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};

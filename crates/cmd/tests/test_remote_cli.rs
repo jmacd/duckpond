@@ -5,17 +5,10 @@
 //! D4 CLI integration test: `pond remote add` -> `pond push` -> `pond pull`
 //! roundtrip using a `file://` remote, exercised entirely through the
 //! library entry points (no spawned subprocesses).
-//!
-//! After D5.4, the destination pond is bootstrapped via the public
-//! [`steward::Ship::create_replica`] +
-//! [`sync_remote::Remote::bootstrap_consumer`] APIs (the
-//! sync_steward-only [`sync_remote::Remote::restart_from_compact`] is
-//! generic-equivalent via the shared [`sync_remote::Remote::restart_pond_from_compact`]).
 
 use cmd::commands::{
     add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
-    push_command, remote::remote_config_path, restart_from_compact_command, status_command,
-    verify_command,
+    push_command, remote::remote_config_path, status_command, verify_command,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
@@ -329,7 +322,6 @@ async fn pond_pull_no_remotes_is_noop() {
 /// data matches the bundle we just published, the report must come
 /// back `ok=true` with `remote_latest_seq=Some(_)`.
 #[tokio::test]
-#[ignore = "bundle/frontier verify/status/restart; needs content-native rework"]
 async fn pond_verify_ok_after_push() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -381,6 +373,91 @@ async fn pond_verify_ok_after_push() {
     verify_command(&ctx, None).await.expect("verify all");
 }
 
+/// Content-native verify reports the exact commit-graph relationship: when the
+/// remote's published tip is an ancestor of the local tip (the producer has
+/// local commits it has not published), verify reports `RemoteBehind`, which is
+/// still `ok` -- lag, not drift.
+///
+/// A Push-mode backup in `/system/run/` auto-pushes after every write, so a
+/// normal local write can never stay unpushed.  To construct genuine lag we
+/// write two commits with no remote attached, then publish with the remote ref
+/// pointed at the *earlier* commit -- exactly the state a stalled or
+/// behind-by-one publisher leaves behind.
+#[tokio::test]
+async fn pond_verify_reports_remote_behind_after_local_write() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx, "test-host").await.expect("init");
+    // Two local commits, no remote attached: no auto-push fires.
+    write_small_file(&ctx, "/a.txt", b"first", vec!["copy", "a.txt"])
+        .await
+        .expect("write a.txt");
+    write_small_file(&ctx, "/b.txt", b"second", vec!["copy", "b.txt"])
+        .await
+        .expect("write b.txt");
+
+    let ship = ctx.open_pond().await.expect("open");
+    let local_seq = ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
+        .expect("seq");
+
+    // The previous commit (one before the local tip) becomes the remote's
+    // published tip: an ancestor the local pond is exactly one commit ahead of.
+    let earlier_seq = local_seq - 1;
+    let earlier_hash_hex = ship
+        .control_table()
+        .commit_hash_at(earlier_seq)
+        .await
+        .expect("commit hash")
+        .expect("earlier commit recorded");
+    let earlier_obj_hex = ship
+        .control_table()
+        .commit_object_at(earlier_seq)
+        .await
+        .expect("commit object")
+        .expect("earlier commit object recorded");
+    let earlier_tip =
+        sync_store::content::ObjectHash::from_hex(&earlier_hash_hex).expect("tip hash");
+    let earlier_obj: Vec<u8> = (0..earlier_obj_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&earlier_obj_hex[i..i + 2], 16).expect("hex byte"))
+        .collect();
+
+    let store_id = ship.control_table().pond_id_uuid();
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let mut remote =
+        sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    // Publish the earlier commit object and point "main" at it.  verify only
+    // reads the tip ref and that one commit object, so this faithfully models a
+    // remote that is behind by one commit.
+    let _published_seq = remote
+        .push_commit(&[(earlier_tip, earlier_obj)], "main", earlier_tip)
+        .await
+        .expect("publish earlier tip");
+
+    let report =
+        steward::verify_content_against_remote(ship.as_pond().expect("pond"), &remote, "main")
+            .await
+            .expect("verify content");
+    assert!(report.ok, "remote-behind is still ok (lag, not corruption)");
+    assert_eq!(
+        report.state,
+        steward::ContentVerifyState::RemoteBehind { local_unpushed: 1 },
+        "exactly one unpushed local commit"
+    );
+    assert_eq!(report.remote_tip, Some(earlier_tip));
+    assert_eq!(report.remote_seq, Some(earlier_seq));
+}
+
 /// `pond verify` with no remotes attached is a no-op success.
 #[tokio::test]
 async fn pond_verify_no_remotes_is_noop() {
@@ -407,7 +484,6 @@ async fn pond_status_fresh_pond() {
 /// pushing (exercises identity, last_write_seq, remote enumeration,
 /// and the push-watermark lag formatting).
 #[tokio::test]
-#[ignore = "bundle/frontier verify/status/restart; needs content-native rework"]
 async fn pond_status_with_backup() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
@@ -449,72 +525,6 @@ async fn pond_status_with_backup() {
         .expect("push");
 
     status_command(&ctx).await.expect("status with backup");
-}
-
-/// D6.4: `pond restart-from-compact` reports a friendly error when the
-/// remote has no compact bundle to restart from.  This exercises the
-/// full command wiring (open pond, load attachment, open remote,
-/// mirror detection, capture attachment, delegate to
-/// `restart_pond_from_compact`) up to the `NoRestartPoint` mapping.
-#[tokio::test]
-#[ignore = "bundle/frontier verify/status/restart; needs content-native rework"]
-async fn pond_restart_from_compact_no_restart_point() {
-    init_log();
-    let scratch = TempDir::new().expect("tempdir");
-    let pond_path = scratch.path().join("pond");
-    let remote_path = scratch.path().join("remote_bucket");
-    let remote_url = format!("file://{}", remote_path.display());
-
-    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx, "test-host").await.expect("init");
-    write_small_file(&ctx, "/r.txt", b"restart", vec!["copy", "r.txt"])
-        .await
-        .expect("write r.txt");
-    {
-        let store_id = {
-            let ship = ctx.open_pond().await.expect("open");
-            ship.control_table().pond_id_uuid()
-        };
-        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
-            .await
-            .expect("create remote");
-    }
-    // Attach + push a Write bundle, but never create a Compact bundle.
-    add_backup_command(
-        &ctx,
-        "origin",
-        &remote_url,
-        false,
-        None,
-        None,
-        None,
-        None,
-        false,
-        false,
-    )
-    .await
-    .expect("backup add");
-    push_command(&ctx, Some("origin".to_string()))
-        .await
-        .expect("push");
-
-    let err = restart_from_compact_command(&ctx, "origin".to_string())
-        .await
-        .expect_err("restart must fail with no compact bundle");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("no compact bundle"),
-        "expected a no-compact-bundle error, got: {}",
-        msg
-    );
-
-    // The attachment must still be intact after the failed restart
-    // (a mirror restart captures it up-front but never drops it because
-    // the restart aborted before drop_pond_data).
-    list_remotes_command(&ctx, None)
-        .await
-        .expect("remote list still works after failed restart");
 }
 
 /// `pond remote add` rejects duplicate names without --overwrite.

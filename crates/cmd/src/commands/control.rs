@@ -875,8 +875,8 @@ pub async fn compute_prune_horizon(
             return Err(anyhow!(
                 "no push-mode remote attached; refusing to prune unreplicated history. \
                  Re-run with --allow-no-remote to prune by retention only. Pruned history \
-                 is then unrecoverable and any future remote must bootstrap via \
-                 restart-from-compact."
+                is then unrecoverable and any future remote must bootstrap via a fresh \
+                `pond pull`."
             ));
         }
         None

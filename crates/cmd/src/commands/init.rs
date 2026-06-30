@@ -14,7 +14,7 @@ use std::path::Path;
 ///
 /// Replica bootstrap (formerly `--from-backup` / `--config`) is going
 /// away in the D4 redesign: use `pond init` + `pond remote add` +
-/// `pond pull` (or the future `pond restart-from-compact`) instead.
+/// `pond pull` instead.
 pub async fn init_command(ship_context: &ShipContext, birthplace: &str) -> Result<()> {
     let pond_path = ship_context.resolve_pond_path()?;
     let pond_path_display = pond_path.display().to_string();
