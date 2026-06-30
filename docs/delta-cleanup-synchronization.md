@@ -623,21 +623,25 @@ pub async fn maintain_table(
 ) -> (DeltaTable, MaintenanceResult)
 ```
 
-- `None` -- replicated tables (the data table) keep the table-default 30-day
-  `cleanup_metadata` behaviour; their commit log may still be needed for remote
-  version diffing.
+- `None` -- replicated tables keep the table-default 30-day `cleanup_metadata`
+  behaviour; their commit log may still be needed for remote version diffing.
+  This is the data table's default, overridable per-instance (see below).
 - `Some(retention)` -- the never-replicated control table calls
   `checkpoints::cleanup_expired_logs_for` with `cutoff = now - retention`. This
   is checkpoint-aligned: it never deletes below the most recent checkpoint, so
   the current version always reconstructs. The control table's transaction
   history lives in parquet rows, not the delta log, so `pond log` is unaffected.
 
-`Ship::maintain` passes `Some(Duration::minutes(CONTROL_LOG_RETENTION_MINUTES))`
-(5 minutes) for the control table, bounding its `_delta_log` to roughly one
-window of churn while staying clear of in-flight concurrent readers. This is
+`Ship::maintain` resolves both the control retention (default
+`CONTROL_LOG_RETENTION_MINUTES` = 5 min) and the data retention (default `None`
+= 30 days) from control-table settings
+(`maintenance.control_log_retention_minutes`,
+`maintenance.data_log_retention_minutes`), bounding the `_delta_log` to roughly
+one window of churn while staying clear of in-flight concurrent readers. This is
 independent of, and complementary to, `--prune --keep-txns` which trims control
 *rows* rather than delta-log metadata.
 
-The retention is currently a code constant. Making it an operator-tunable
-default managed via `pond config set` is described in
+A high-churn, fully-pushed instance (selfmon commits every minute) must bound the
+DATA log too, or resolving the table external-sorts weeks of commit JSONs and
+OOMs; set `maintenance.data_log_retention_minutes` there. See
 `configurable-settings.md`.

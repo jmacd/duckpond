@@ -447,14 +447,27 @@ impl TemporalReduceSqlFile {
                 .await
                 .map_other()?;
 
+            // Per-version partials only sum correctly when each source version
+            // contributes a DISJOINT row set, because the read-side merge is a
+            // GROUP BY time_bucket over every version's partial. FilePhysicalSeries
+            // and TablePhysicalSeries store append-only deltas (concatenated on
+            // read), so distinct versions never share a row; their partials merge
+            // in any order and late / out-of-order data is summed into the correct
+            // bucket exactly like a single-pass GROUP BY. Ordering is irrelevant.
+            //
+            // Non-series sources (FilePhysicalVersion) store a full re-snapshot per
+            // version, so successive versions OVERLAP and merging their partials
+            // would double-count. For those we keep the sequentiality frontier: a
+            // version whose earliest bucket precedes the frontier is an overlapping
+            // re-snapshot and is a hard error recovered with --rebuild, never a
+            // silent double-count.
+            let disjoint_versions = matches!(
+                node_path.id().entry_type(),
+                EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries
+            );
+
             let mut uncached =
                 crate::rollup_cache::find_uncached_members(&glob_dir, &source_node_id, &versions);
-            // Process versions oldest-first so the sealed-bucket frontier only
-            // ever advances. A new version whose earliest bucket precedes the
-            // frontier is a sequentiality violation: its sealed buckets would
-            // need partials that are no longer recomputed, silently
-            // double-counting on merge. Per the no-fallback policy this is a
-            // hard error recovered with --rebuild, never a silent merge.
             uncached.sort_by_key(|v| v.version);
             let mut frontier = crate::rollup_cache::read_frontier(&glob_dir, &source_node_id);
             for version in &uncached {
@@ -464,9 +477,14 @@ impl TemporalReduceSqlFile {
                     &source_node_id,
                     version,
                 );
-                let span = self
-                    .version_bucket_span(finest_interval, &parquet_path)
-                    .await?;
+                // Disjoint (series) sources skip the frontier entirely; only
+                // overlapping sources pay the per-version span scan and guard.
+                let span = if disjoint_versions {
+                    None
+                } else {
+                    self.version_bucket_span(finest_interval, &parquet_path)
+                        .await?
+                };
                 if let Some((lo, _hi)) = span
                     && let Some(f) = frontier
                     && lo < f
@@ -474,7 +492,7 @@ impl TemporalReduceSqlFile {
                     return Err(tinyfs::Error::Other(format!(
                         "temporal-reduce rollup: source node {} version {} backfills \
                          already-sealed buckets (earliest bucket {} precedes frontier \
-                         {}); a non-sequential input breaks incremental partial \
+                         {}); an overlapping non-series input breaks incremental partial \
                          summation. Re-run the export with --rebuild to recompute the \
                          rollup cache from scratch.",
                         source_node_id, version.version, lo, f
@@ -3129,6 +3147,142 @@ mod tests {
             msg.contains("backfills") && msg.contains("--rebuild"),
             "error must explain the violation and suggest --rebuild, got: {}",
             msg
+        );
+    }
+
+    /// A FilePhysicalSeries source appends disjoint deltas, so a later version
+    /// carrying EARLIER timestamps (late / out-of-order data, e.g. a collector
+    /// flushing a buffered sample after a newer one) must merge correctly rather
+    /// than tripping the sequentiality frontier. The frontier guard only applies
+    /// to overlapping non-series sources; for series the per-version partials are
+    /// disjoint and the GROUP BY time_bucket merge is order-independent.
+    #[tokio::test]
+    async fn test_rollup_series_tolerates_late_data() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+
+        // Each appended version is a self-contained CSV (header + that day's
+        // hourly rows); the format cache parses every series version
+        // independently, so the deltas stay disjoint by timestamp.
+        async fn append_day(root: &tinyfs::WD, path: &str, day: u32) {
+            use tokio::io::AsyncWriteExt;
+            let mut csv_data = String::from("timestamp,temperature\n");
+            for hour in 0..24u32 {
+                let ts = format!("1970-01-{:02}T{:02}:00:00", day, hour);
+                // Encode the day into the value so per-day aggregates differ.
+                let temp = 20.5 + hour as f64 + day as f64 * 100.0;
+                csv_data.push_str(&format!("{},{}\n", ts, temp));
+            }
+            let mut w = root
+                .async_writer_path_with_type(path, EntryType::FilePhysicalSeries)
+                .await
+                .unwrap();
+            w.write_all(csv_data.as_bytes()).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+            // Version 1: day 2. Version 2: day 1 -- earlier timestamps arriving
+            // after a newer bucket was already sealed in version 1.
+            append_day(&root, "/ingest/weather.csv", 2).await;
+            append_day(&root, "/ingest/weather.csv", 1).await;
+        }
+
+        let config = TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations: vec![
+                agg(AggregationType::Avg, &["temperature"]),
+                agg(AggregationType::Min, &["temperature"]),
+                agg(AggregationType::Max, &["temperature"]),
+            ],
+            transforms: None,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        let session = Arc::new(datafusion::prelude::SessionContext::new());
+        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+            .expect("register object store");
+        let provider_context = crate::ProviderContext::new(session, Arc::new(persistence.clone()))
+            .with_cache_dir(cache_dir.clone());
+
+        let context = test_context(&provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+        let table_provider = queryable
+            .as_table_provider(file_id, &provider_context)
+            .await
+            .expect("late series data must merge, not error");
+        drop(file_guard);
+
+        let ctx = &provider_context.datafusion_session;
+        _ = ctx.register_table("reduced", table_provider).unwrap();
+        let batches = ctx
+            .sql(
+                "SELECT \"temperature.avg\", \"temperature.min\", \"temperature.max\" \
+                 FROM reduced ORDER BY timestamp",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let mut rows = Vec::new();
+        for b in &batches {
+            let col = |name: &str| {
+                b.column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .clone()
+            };
+            let avg = col("temperature.avg");
+            let min = col("temperature.min");
+            let max = col("temperature.max");
+            for i in 0..b.num_rows() {
+                rows.push((avg.value(i), min.value(i), max.value(i)));
+            }
+        }
+
+        // hours 0..23 -> mean hour 11.5, so avg = 120.5 + day*100 here is
+        // 20.5 + 11.5 + day*100. Day 1 sorts first despite arriving last.
+        assert_eq!(rows.len(), 2, "expected two daily buckets, got {:?}", rows);
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(
+            approx(rows[0].0, 132.0) && approx(rows[0].1, 120.5) && approx(rows[0].2, 143.5),
+            "day 1 (late-arriving) aggregates wrong: {:?}",
+            rows[0]
+        );
+        assert!(
+            approx(rows[1].0, 232.0) && approx(rows[1].1, 220.5) && approx(rows[1].2, 243.5),
+            "day 2 aggregates wrong: {:?}",
+            rows[1]
         );
     }
 }
