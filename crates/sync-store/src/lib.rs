@@ -37,4 +37,7 @@ pub use content::{
 pub use content_remote::ContentRemote;
 pub use error::{Result, StoreError};
 pub use store::{AddPath, CompactMetrics, Op, RemovePath, Store};
-pub use tlog::{LogHash, TransparencyLog, commit_leaf_hash, verify_consistency, verify_inclusion};
+pub use tlog::{
+    Checkpoint, CheckpointError, LogHash, TileLog, TransparencyLog, commit_leaf_hash,
+    verify_consistency, verify_inclusion,
+};

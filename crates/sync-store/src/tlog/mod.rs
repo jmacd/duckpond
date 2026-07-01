@@ -18,14 +18,21 @@
 //!     root_tree_hash                            RFC 6962 Merkle over leaves
 //! ```
 //!
-//! Signed checkpoints and tile materialization are deferred (design D5).
+//! Tile materialization and checkpoint emission are implemented (design D5):
+//! see [`tiles`] for the C2SP `tlog-tiles` layout and [`checkpoint`] for the
+//! `tlog-checkpoint` note body.  Signing the checkpoint remains deferred with
+//! the rest of the trust root (design Section 10).
 
+mod checkpoint;
 mod merkle;
+mod tiles;
 
+pub use checkpoint::{CHECKPOINT_FILE, Checkpoint, CheckpointError, checkpoint_path};
 pub use merkle::{
     LogHash, ProofError, TransparencyLog, empty_root, hash_children, hash_leaf, verify_consistency,
     verify_inclusion,
 };
+pub use tiles::{TILE_HEIGHT_BITS, TILE_WIDTH, TileLog, data_tile_rel, n_path};
 
 use crate::content::Commit;
 

@@ -339,6 +339,15 @@ impl<'a> StewardTransactionGuard<'a> {
                 // active transaction on `persistence` is required.
                 let commit_spine = self.compute_commit_spine(persistence, pond_id).await?;
 
+                // Design Decision D5: the leaf appended to the transparency log
+                // is the RFC 6962 hash of this commit object.  Capture the
+                // encoded bytes before the spine is moved into the control
+                // record so the tile log can be materialized after the record
+                // lands.
+                let tlog_leaf = commit_spine
+                    .as_ref()
+                    .and_then(|s| hex::decode(&s.commit_object).ok());
+
                 self.control_table
                     .record_data_committed(
                         &self.txn_meta,
@@ -356,6 +365,15 @@ impl<'a> StewardTransactionGuard<'a> {
                     "Steward transaction {} committed (seq={}, version={})",
                     &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
+
+                // Materialize the transparency-log tiles and re-emit the
+                // checkpoint for this commit (design Decision D5).  This is a
+                // best-effort publishing step after the authoritative Delta
+                // commit: a failure here is logged but never unwinds the commit,
+                // matching the post-commit factory/remote model below.
+                if let Some(leaf) = tlog_leaf {
+                    self.materialize_tlog(pond_id, leaf);
+                }
 
                 // Mark as committed
                 self.committed = true;
@@ -466,6 +484,29 @@ impl<'a> StewardTransactionGuard<'a> {
             commit_hash: commit.hash().to_hex(),
             commit_object: hex::encode(commit.encode()),
         }))
+    }
+
+    /// Append this commit's leaf to the pond's transparency-log tiles and
+    /// re-emit the checkpoint (design Decision D5).
+    ///
+    /// The leaf is the RFC 6962 hash of `commit_object_bytes`
+    /// (`SHA-256(0x00 || commit.encode())`).  The tile log's own leaf store is
+    /// the source of truth for the leaf sequence, so appending one leaf per
+    /// spine-bearing commit keeps the log in step with the commit spine.
+    /// Failures are logged and swallowed: the transparency log is a derived
+    /// publishing artifact and must not unwind an already-committed transaction.
+    fn materialize_tlog(&self, pond_id: uuid::Uuid, commit_object_bytes: Vec<u8>) {
+        let dir = crate::get_tlog_path(&self.pond_path);
+        let origin = format!("duckpond/{pond_id}");
+        let log = sync_store::TileLog::new(dir, origin);
+        match log.append_leaf_data([commit_object_bytes]) {
+            Ok(checkpoint) => debug!(
+                "transparency log checkpoint emitted (size={}, root={})",
+                checkpoint.size,
+                checkpoint.root.to_hex()
+            ),
+            Err(e) => error!("failed to materialize transparency-log tiles: {e}"),
+        }
     }
 
     /// Run post-commit factories after a successful write transaction

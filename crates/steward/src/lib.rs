@@ -176,6 +176,15 @@ pub fn get_git_path(pond_path: &Path) -> PathBuf {
     pond_path.join("git")
 }
 
+/// Get the transparency-log tile directory under the pond.
+///
+/// Holds the materialized C2SP `tlog-tiles` and the `tlog-checkpoint` note body
+/// over the pond's linear commit spine (design Decision D5).
+#[must_use]
+pub fn get_tlog_path(pond_path: &Path) -> PathBuf {
+    pond_path.join("tlog")
+}
+
 // ---------------------------------------------------------------------------
 // In-pond filesystem conventions used by D4 (`pond remote add/push/pull`).
 //

@@ -125,7 +125,7 @@ fn is_power_of_two(x: usize) -> bool {
 }
 
 /// The Merkle Tree Hash (RFC 6962 MTH) of a slice of leaf hashes.
-fn mth(leaves: &[LogHash]) -> LogHash {
+pub(crate) fn mth(leaves: &[LogHash]) -> LogHash {
     match leaves.len() {
         0 => empty_root(),
         1 => leaves[0],

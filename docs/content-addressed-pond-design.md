@@ -272,7 +272,10 @@ adds three things over that existing chain:
 2. **A proof index.** A binary, append-order Merkle (the RFC 6962 /
    tlog-tiles construction) over the leaves, giving O(log n) inclusion and
    consistency proofs instead of an O(n) chain walk.
-3. **Signed checkpoints** (deferred -- the trust root is a signing key).
+3. **Checkpoints.** After each commit the log materializes its proof index as
+   immutable C2SP `tlog-tiles` and emits a `tlog-checkpoint` note body over the
+   new tree (Decision D5). The checkpoint is *unsigned* for now: signing is the
+   one remaining deferral (the trust root is a signing key, Section 10).
 
 The seam between the two hash functions is exactly the leaf: the leaf payload
 is the BLAKE3 `root_tree_hash` plus provenance; the log hashes that leaf's
@@ -718,12 +721,28 @@ the node kind:
   cross-consumer id agreement the content-tree hash already gives, breaks on
   rename) and *locally minting* ids (forces fragile path resolution; rename
   degrades to delete-and-recreate). See Section 8.5.2.
+- **D5 -- Checkpoint every commit; publish as unsigned C2SP tiles.** The
+  transparency log materializes after every spine-bearing write commit: the
+  single-writer model makes the log grow exactly one leaf per commit, so the
+  cadence is simply *every commit* -- no batching or timer. The published form
+  is the C2SP `tlog-tiles` layout under `{POND}/tlog`: a tile at level `L`,
+  index `N` holds up to 256 hashes from tree level `8L` (level 0 is the leaf
+  hashes), written as `tile/<L>/<N>` when full and `tile/<L>/<N>.p/<W>` while
+  partial. A full tile is immutable; only the rightmost tile at each level
+  changes as the log grows. Each commit re-emits a `tlog-checkpoint` note body
+  (`origin`, tree size, base64 `root_hash`) at `{POND}/tlog/checkpoint`, where
+  `origin` is `duckpond/<pond_id>`. The checkpoint is written unsigned: the note
+  body is exactly the byte string a future signer will sign, so adding
+  signatures (Section 10) does not change its meaning. The tile writer
+  recomputes from the leaf set (`O(n)`) but writes each full tile once; an
+  incremental `O(log n)` writer is a later optimization that does not change the
+  on-disk format. The tile store's own level-0 tiles are the source of truth for
+  the leaf sequence; a first cut appends one leaf per commit and defers
+  crash-gap backfill (Section 7; `sync-store/tlog/tiles.rs`,
+  `sync-store/tlog/checkpoint.rs`; materialized in `steward/guard.rs`).
 
 ### Open
 
-- **D5 -- Checkpoint cadence and the SHA-256 publish format.** When the log
-  materializes tiles and emits checkpoints; deferred together with signing
-  (Section 10).
 - **D9 -- Mirror vs writable fork.** Whether a consumer is only a read-only
   mirror of the source (adopts the source pond_id, replays its commits) or may
   also be a writable fork that lands its own commits on a pulled base
@@ -771,8 +790,13 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
   `root_tree_hash` is computed at commit time by folding only the touched
   ancestor chain, and it is the log leaf. (Sections 5.3, 7;
   `steward/content_tree.rs`.)
-- [ ] **Checkpoint cadence and SHA-256 publish format (D5, open).** Deferred with
-  signing (Section 10).
+- [x] **Checkpoint every commit; publish as unsigned C2SP tiles (D5).** Each
+  spine-bearing commit materializes the SHA-256 log as immutable C2SP
+  `tlog-tiles` under `{POND}/tlog` and re-emits an unsigned `tlog-checkpoint`
+  note body; leaves prove inclusion against the published root. Signing stays
+  deferred (Section 10). (`sync-store/tlog/tiles.rs`,
+  `sync-store/tlog/checkpoint.rs`, `steward/guard.rs::materialize_tlog`,
+  `steward/tests/tlog_materialize_test.rs`.)
 - [ ] **Writable fork (D9, open).** Consumers are read-only mirrors for now
   (Section 8.5.3).
 - [ ] **At-rest content-addressing (D1, deferred).** Rows stay keyed by
