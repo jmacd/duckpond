@@ -382,33 +382,37 @@ blob's bytes physically live. This keeps the streaming, do-not-collect
 discipline: multi-gigabyte files never materialize into memory or into the
 remote's row table.
 
-**Implementation status (D7, fe614cfe + streaming refinement).** Large blobs
-transfer out-of-row through a sibling content-addressed blob store on the remote
-(`_blobs/blob=<hash>`), never as inline `objects` rows: push streams each blob
-local->remote via a multipart upload (skipping blobs the remote already holds),
-hashing as it goes so a value can never be stored under a key it does not equal;
-pull's tree descent finds them by hash in the blob store when they are not an
-inline row and re-externalizes locally. A multi-gigabyte blob therefore never
-bloats the remote Delta table and the producer side never collects it into one
-`Vec<u8>`. The full closure is complete and content-addressed.
+**Implementation status (D7, complete).** Large blobs transfer out-of-row
+through a sibling content-addressed blob store on the remote
+(`_blobs/blob=<hash>`), never as inline `objects` rows, and neither side ever
+collects a blob into a single `Vec<u8>`. Push streams each blob local->remote via
+a multipart upload (skipping blobs the remote already holds), hashing as it goes
+so a value can never be stored under a key it does not equal. Pull is now equally
+streaming on the consumer: the fetch walk records a large blob by hash as an
+external object without downloading it (confirming presence with a cheap head),
+and the rebuild streams its bytes directly from the remote blob store into the
+local writer, which re-externalizes content above the large-file threshold into
+the local `_large_files/` store. A multi-gigabyte blob therefore never bloats the
+remote Delta table and is never materialized in RAM on either side. The full
+closure is complete and content-addressed.
 
-**Remaining D7 work -- consumer-side streaming rebuild.** The producer (push)
-side is fully streaming, but the *consumer* still buffers the entire object
-graph in memory. `fetch_object_graph` collects every reachable object into
-`FetchedGraph { objects: BTreeMap<ObjectHash, FetchedObject>, bytes:
-BTreeMap<ObjectHash, Vec<u8>> }`, with each leaf held as `FetchedObject::Blob(
-Vec<u8>)` and each series as `FetchedObject::Series(Vec<ObjectHash>)` whose
-version blobs are likewise buffered. `rebuild_pond` / `import_pond` then plan a
-node diff and hand `apply_ops` a `NodeOp` carrying `versions: Vec<Vec<u8>>` --
-so a multi-gigabyte pond is materialized in RAM twice (fetch, then apply). The
-fix is to stream each large blob directly from the remote blob store into the
-local `_blobs` store by hash (never through `Vec<u8>`), and to feed `apply_ops`
-an async reader per version instead of owned bytes. Large external blobs are the
-priority; small inline objects (trees, commits, manifests, small files) are
-bounded and may stay buffered. This is the last open D7 item.
-(See `crates/steward/src/content_pull.rs`: `FetchedGraph` ~47-65, `fetch_blob`
-~222-252, `FetchedObject` ~38-44, `NodeOp::Series.versions` ~336, `rebuild_pond`
-~382, `import_pond` ~453, `apply_ops`/`plan_series_versions` ~589+/~740.)
+**Consumer-side streaming rebuild (implemented).** The fetch walk distinguishes
+inline objects from external blobs. Trees, commits, series manifests, symlinks,
+recipes, and small file versions are inline `objects` rows and stay buffered in
+`FetchedGraph` -- they are bounded. A large file or series version is instead
+recorded as `FetchedObject::External` plus a hash in `FetchedGraph.external_blobs`,
+with no bytes fetched. The rebuild plan carries each file version as a
+`VersionSource`: an `Inline(Vec<u8>)` for a small buffered blob, or an
+`External(ObjectHash)` naming a blob to stream. `apply_ops` then, for an external
+version, opens a streaming reader over the remote blob store
+(`ContentRemote::get_blob_reader`) and copies it in bounded chunks straight into
+the tinyfs writer, re-hashing as it passes so the streamed bytes must equal the
+key. The whole rebuild therefore holds only inline (bounded) objects in memory;
+no large blob is buffered on either the fetch or the apply side.
+(See `crates/steward/src/content_pull.rs`: `FetchedObject::External`,
+`FetchedGraph.external_blobs`, `fetch_blob`, `VersionSource`, `version_source`,
+`stream_external_blob`; `crates/sync-store/src/content_remote.rs`:
+`get_blob_reader`.)
 
 ### 8.5 Pull and consumer rebuild (Fork 2)
 
@@ -689,11 +693,14 @@ the node kind:
   remote (Section 8.1-8.3).
 - **D7 -- Large-file blobs stay external; only small blobs become object
   rows.** Object materialization does not inline a file above the large-file
-  threshold; it transfers by hash through the existing external-blob path
-  (`_large_files/blake3=*`), while small blobs, trees, commits, series
+  threshold; it transfers by hash through the remote content-addressed blob
+  store (`_blobs/blob=*`), while small blobs, trees, commits, series
   manifests, symlinks, and recipes are inline `objects` rows. Same BLAKE3 hash
-  either way, so reachability/dedup/walk are uniform and large files never load
-  into memory or the remote row table (Section 8.4).
+  either way, so reachability/dedup/walk are uniform. Both sides are fully
+  streaming: push multipart-uploads each blob local->remote, and pull records a
+  large blob by hash without downloading it, then streams it from the remote
+  blob store straight into the local writer at rebuild time. A large file never
+  loads into memory or the remote row table on either side (Section 8.4).
 - **D8 -- Consumer adopts the source's node_ids via a commit manifest.** A
   pulled object graph is reconstructed under the **source's real `node_id`s**,
   not locally-minted or derived ones. Each commit references a content-addressed
@@ -721,6 +728,56 @@ the node kind:
   mirror of the source (adopts the source pond_id, replays its commits) or may
   also be a writable fork that lands its own commits on a pulled base
   (Section 8.5.3). First cut: read-only mirror.
+
+### Implementation milestones
+
+Status of the design as built, newest first. "Done" means implemented, tested,
+and folded into the presubmit suite; "Open" tracks the deferred decisions above.
+
+- [x] **Consumer-side streaming rebuild (D7, complete).** The fetch walk records
+  large blobs by hash without downloading them, and rebuild streams each one from
+  the remote blob store straight into the local writer, re-hashing to verify.
+  Neither push nor pull ever buffers a large blob. (Section 8.4;
+  `sync-store/content_remote.rs::get_blob_reader`,
+  `steward/content_pull.rs`: `FetchedObject::External`, `VersionSource`,
+  `stream_external_blob`.)
+- [x] **Large-file blobs stay external on push (D7).** Push multipart-uploads
+  each blob local->remote into the sibling `_blobs/blob=<hash>` store, skipping
+  blobs the remote already holds, never collecting a blob into one buffer.
+  (Section 8.4; `steward/content_push.rs`.)
+- [x] **Content-native cross-pond import (D8).** `pond pull` on a mounted remote
+  grafts the foreign tree under its own `pond_id` partition and records the graft
+  as a content-addressed tip reference; cross-pond mounts are omitted from the
+  fold so import is non-transitive. (Sections 8.5.2, 9;
+  `steward/content_pull.rs::import_pond`, `steward/graft.rs`.)
+- [x] **Node-id adoption via commit manifest (D8).** Each commit references a
+  content-addressed node manifest; the consumer adopts the source `node_id`s
+  verbatim, so pull is a `node_id`-keyed diff (create / delete / new-version /
+  rename) and the mirror ends row-identical to the source. (Section 8.5.2;
+  `steward/content_pull.rs::plan_node_diff`, `steward/content_tree.rs`.)
+- [x] **Pull and consumer rebuild, Fork 2 (Section 8.5).** Fetch walk verifies
+  the reachable object closure by re-hashing; rebuild reproduces directories,
+  files, multi-version series, symlinks, and dynamic recipes, then checks the
+  rebuilt fold and manifest hash against the tip commit.
+  (`steward/content_pull.rs`, `steward/tests/content_pull_test.rs`.)
+- [x] **Dynamic-node recipe hash (D4).** `child_hash` for read-time-computed
+  nodes is the recipe hash over factory type plus stored config bytes, and
+  rebuild re-instantiates the factory from the recipe. (Section 9.)
+- [x] **One delta-managed content-addressed remote (D6).** Content objects are
+  rows in a single Delta table keyed by content hash; the tip ref advances in the
+  same atomic Delta commit that writes the object rows, replacing
+  bundle/frontier outright. (Sections 8.1-8.3; `sync-store/content_remote.rs`.)
+- [x] **Commit spine, tree fold, and transparency-log leaf (D3).** The commit's
+  `root_tree_hash` is computed at commit time by folding only the touched
+  ancestor chain, and it is the log leaf. (Sections 5.3, 7;
+  `steward/content_tree.rs`.)
+- [ ] **Checkpoint cadence and SHA-256 publish format (D5, open).** Deferred with
+  signing (Section 10).
+- [ ] **Writable fork (D9, open).** Consumers are read-only mirrors for now
+  (Section 8.5.3).
+- [ ] **At-rest content-addressing (D1, deferred).** Rows stay keyed by
+  `(pond_id, node_id, version)`; keying by `tree_hash` remains a possible later
+  optimization (Section 5.2).
 
 ---
 

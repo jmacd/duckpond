@@ -18,7 +18,7 @@
 //! series objects whose version blobs are leaves; dynamic and computed nodes
 //! are recipe leaves whose generated children are not in the graph.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use sync_store::ContentRemote;
 use sync_store::content::{
@@ -41,6 +41,11 @@ pub enum FetchedObject {
     Blob(Vec<u8>),
     /// A multi-version series: its ordered version blob hashes.
     Series(Vec<ObjectHash>),
+    /// A large leaf blob that lives out-of-row in the remote blob store and is
+    /// deliberately *not* buffered (Decision D7).  Its bytes are streamed from
+    /// the remote straight into the local writer at rebuild time, keyed by this
+    /// object's hash; only its presence is recorded here.
+    External,
 }
 
 /// The verified object closure reachable from a remote tip commit.
@@ -51,11 +56,17 @@ pub struct FetchedGraph {
     /// The commit chain from the tip back toward genesis, tip first, limited to
     /// commits present on the remote.
     pub commits: Vec<(ObjectHash, Commit)>,
-    /// Every reachable object keyed by content hash.  Each entry's bytes have
-    /// been verified to hash to its key.
+    /// Every reachable object keyed by content hash.  Inline entries carry their
+    /// bytes (verified to hash to the key); large external blobs are recorded as
+    /// [`FetchedObject::External`] with no bytes.
     pub objects: BTreeMap<ObjectHash, FetchedObject>,
-    /// Raw bytes of every fetched object, keyed by content hash.
+    /// Raw bytes of every fetched *inline* object, keyed by content hash.  Large
+    /// external blobs are absent here by design -- they are never buffered.
     pub bytes: BTreeMap<ObjectHash, Vec<u8>>,
+    /// Hashes of large leaf blobs that live in the remote blob store and are
+    /// streamed rather than buffered (Decision D7).  Every hash here also has a
+    /// [`FetchedObject::External`] entry in `objects`.
+    pub external_blobs: BTreeSet<ObjectHash>,
     /// The tip commit's node manifest: one entry per node, recording the
     /// source's `node_id` alongside its parent, name, type, and content
     /// address (Section 4.5).  Empty when the graph is empty.  Kept out of
@@ -215,10 +226,11 @@ async fn fetch_series(
     Ok(())
 }
 
-/// Fetch a leaf blob object.  A blob may be inline (small, an `objects` row) or
-/// external (large, in the remote blob store by hash); try the row table first,
-/// then the blob store.  Large blobs are kept out of the Delta row table by
-/// living externally, but the rebuild still adopts the bytes by hash either way.
+/// Record a leaf blob object.  A blob may be inline (small, an `objects` row) or
+/// external (large, in the remote blob store by hash).  Inline blobs are fetched
+/// and verified now; external blobs are recorded by hash only and streamed at
+/// rebuild time so a multi-gigabyte value never lands in a single buffer
+/// (Decision D7).  Either way the rebuild adopts the bytes by hash.
 async fn fetch_blob(
     remote: &ContentRemote,
     hash: ObjectHash,
@@ -227,28 +239,33 @@ async fn fetch_blob(
     if graph.objects.contains_key(&hash) {
         return Ok(());
     }
-    let bytes = match remote
+    if let Some(bytes) = remote
         .get_object(hash)
         .await
         .map_err(|e| StewardError::Content(e.to_string()))?
     {
-        Some(b) => b,
-        None => remote
-            .get_blob(hash)
-            .await
-            .map_err(|e| StewardError::Content(e.to_string()))?
-            .ok_or_else(|| {
-                StewardError::Content(format!(
-                    "object {} is absent from the remote (inline and blob store)",
-                    hash.to_hex()
-                ))
-            })?,
-    };
-    verify(hash, &bytes)?;
-    let _ = graph
-        .objects
-        .insert(hash, FetchedObject::Blob(bytes.clone()));
-    let _ = graph.bytes.insert(hash, bytes);
+        verify(hash, &bytes)?;
+        let _ = graph
+            .objects
+            .insert(hash, FetchedObject::Blob(bytes.clone()));
+        let _ = graph.bytes.insert(hash, bytes);
+        return Ok(());
+    }
+    // Not an inline row: it must be a large external blob in the remote blob
+    // store.  Confirm its presence now so a missing object still fails the fetch
+    // early, but do not download it -- its bytes stream at rebuild time.
+    if !remote
+        .has_blob(hash)
+        .await
+        .map_err(|e| StewardError::Content(e.to_string()))?
+    {
+        return Err(StewardError::Content(format!(
+            "object {} is absent from the remote (inline and blob store)",
+            hash.to_hex()
+        )));
+    }
+    let _ = graph.objects.insert(hash, FetchedObject::External);
+    let _ = graph.external_blobs.insert(hash);
     Ok(())
 }
 
@@ -300,6 +317,17 @@ pub struct RebuildOutcome {
     pub dynamic: usize,
 }
 
+/// The source of one file/series version's bytes in an apply plan.  Small blobs
+/// are buffered inline; large blobs are named by hash and streamed from the
+/// remote blob store at apply time so they are never held in memory (D7).
+#[derive(Debug, Clone)]
+enum VersionSource {
+    /// A buffered small blob's bytes.
+    Inline(Vec<u8>),
+    /// A large external blob to stream from the remote by content hash.
+    External(ObjectHash),
+}
+
 /// One filesystem operation in an incremental rebuild plan, in apply order.
 ///
 /// The plan is a `node_id`-keyed diff of the fetched source manifest against
@@ -326,14 +354,16 @@ enum ApplyOp {
     /// Create (adopting `node_id`) or append to a physical file / table /
     /// series node.  `versions` are the version blobs to write in order: every
     /// version on create, only the appended suffix on update.  `entry_type`
-    /// drives writer finalization (series infer temporal bounds).
+    /// drives writer finalization (series infer temporal bounds).  Each version
+    /// is either a buffered small blob or a large external blob streamed from
+    /// the remote at apply time (D7).
     File {
         parent: String,
         name: String,
         node_id: String,
         create: bool,
         entry_type: EntryType,
-        versions: Vec<Vec<u8>>,
+        versions: Vec<VersionSource>,
     },
     /// Create (adopting `node_id`) or rewrite a symlink.  A rewrite re-adopts
     /// the same `node_id` after unlinking, so identity is preserved.
@@ -381,6 +411,7 @@ enum ApplyOp {
 /// a mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
+    remote: &ContentRemote,
     graph: &FetchedGraph,
 ) -> Result<RebuildOutcome, StewardError> {
     let root = graph
@@ -407,7 +438,7 @@ pub async fn rebuild_pond(
             &PondUserMetadata::new(vec!["pull".to_string()]),
             async move |fs| {
                 let root_wd = fs.root().await?;
-                apply_ops(&root_node_id, root_wd, &ops).await?;
+                apply_ops(&root_node_id, root_wd, &ops, remote).await?;
                 Ok(())
             },
         )
@@ -452,6 +483,7 @@ pub async fn rebuild_pond(
 /// must fold to the tip root tree hash with a matching node manifest.
 pub async fn import_pond(
     target: &mut Ship,
+    remote: &ContentRemote,
     graph: &FetchedGraph,
     foreign_pond_id: uuid7::Uuid,
 ) -> Result<RebuildOutcome, StewardError> {
@@ -489,7 +521,7 @@ pub async fn import_pond(
                     path: "/".into(),
                 };
                 let root_wd = fs.wd(&foreign_np, foreign_np.clone()).await?;
-                apply_ops(&root_node_id, root_wd, &ops).await?;
+                apply_ops(&root_node_id, root_wd, &ops, remote).await?;
                 Ok(())
             },
         )
@@ -664,7 +696,7 @@ fn plan_one(
                 outcome.files += 1;
             }
             let versions = if content_changed {
-                vec![blob_bytes(graph, entry.child_hash)?]
+                vec![version_source(graph, entry.child_hash)?]
             } else {
                 Vec::new()
             };
@@ -742,7 +774,7 @@ fn plan_series_versions(
     graph: &FetchedGraph,
     target_series: &HashMap<String, Vec<ObjectHash>>,
     existing_child_hash: Option<ObjectHash>,
-) -> Result<Vec<Vec<u8>>, StewardError> {
+) -> Result<Vec<VersionSource>, StewardError> {
     let incoming = series_hashes(graph, entry.child_hash)?;
 
     let held = match existing_child_hash {
@@ -770,12 +802,19 @@ fn plan_series_versions(
 
     incoming[held.len()..]
         .iter()
-        .map(|hash| blob_bytes(graph, *hash))
+        .map(|hash| version_source(graph, *hash))
         .collect()
 }
 
 /// Apply an ordered plan within an open transaction, adopting source node ids.
-async fn apply_ops(root_node_id: &str, root_wd: WD, ops: &[ApplyOp]) -> Result<(), StewardError> {
+/// Small versions write from buffered bytes; large external versions stream from
+/// the remote blob store straight into the writer, never buffered (D7).
+async fn apply_ops(
+    root_node_id: &str,
+    root_wd: WD,
+    ops: &[ApplyOp],
+    remote: &ContentRemote,
+) -> Result<(), StewardError> {
     let mut dir_wd: HashMap<String, WD> = HashMap::new();
     let _ = dir_wd.insert(root_node_id.to_string(), root_wd.clone());
 
@@ -823,17 +862,15 @@ async fn apply_ops(root_node_id: &str, root_wd: WD, ops: &[ApplyOp]) -> Result<(
                     // path yet.  An adopted file always has at least one
                     // version, but tolerate an empty create defensively.
                     if let Some(first) = remaining.next() {
-                        let mut writer = pwd
+                        let writer = pwd
                             .create_file_with_id(name, parse_node_id(node_id)?)
                             .await?;
-                        writer.write_all(first).await?;
-                        finalize_writer(writer, *entry_type).await?;
+                        write_version(writer, first, *entry_type, remote).await?;
                     }
                 }
-                for bytes in remaining {
-                    let mut writer = pwd.async_writer_path_with_type(name, *entry_type).await?;
-                    writer.write_all(bytes).await?;
-                    finalize_writer(writer, *entry_type).await?;
+                for version in remaining {
+                    let writer = pwd.async_writer_path_with_type(name, *entry_type).await?;
+                    write_version(writer, version, *entry_type, remote).await?;
                 }
             }
             ApplyOp::Symlink {
@@ -866,6 +903,70 @@ async fn apply_ops(root_node_id: &str, root_wd: WD, ops: &[ApplyOp]) -> Result<(
                     .await?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Write one file/series version through `writer`, then finalize it.  An inline
+/// version copies buffered bytes; an external version streams from the remote
+/// blob store in bounded chunks, re-hashing to enforce content addressing so a
+/// large blob never lands in a single buffer (D7).
+async fn write_version(
+    mut writer: std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>,
+    version: &VersionSource,
+    entry_type: EntryType,
+    remote: &ContentRemote,
+) -> Result<(), StewardError> {
+    match version {
+        VersionSource::Inline(bytes) => {
+            writer.write_all(bytes).await?;
+        }
+        VersionSource::External(hash) => {
+            stream_external_blob(&mut writer, *hash, remote).await?;
+        }
+    }
+    finalize_writer(writer, entry_type).await
+}
+
+/// Stream a large external blob from the remote blob store into `writer` in
+/// bounded chunks, hashing as it passes; the streamed bytes must hash to `hash`
+/// or content addressing is violated and the rebuild fails.
+async fn stream_external_blob(
+    writer: &mut std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>,
+    hash: ObjectHash,
+    remote: &ContentRemote,
+) -> Result<(), StewardError> {
+    use tokio::io::AsyncReadExt;
+    let mut reader = remote
+        .get_blob_reader(hash)
+        .await
+        .map_err(|e| StewardError::Content(format!("open external blob: {e}")))?
+        .ok_or_else(|| {
+            StewardError::Content(format!(
+                "external blob {} vanished from the remote before rebuild",
+                hash.to_hex()
+            ))
+        })?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .await
+            .map_err(|e| StewardError::Content(format!("read external blob: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        let _ = hasher.update(&buf[..n]);
+        writer.write_all(&buf[..n]).await?;
+    }
+    let computed = ObjectHash::from_bytes(*hasher.finalize().as_bytes());
+    if computed != hash {
+        return Err(StewardError::Content(format!(
+            "external blob streamed as {} but hashes to {}",
+            hash.to_hex(),
+            computed.to_hex()
+        )));
     }
     Ok(())
 }
@@ -935,10 +1036,33 @@ fn target_path(node_id: &str, target_nodes: &HashMap<String, ManifestEntry>) -> 
     }
 }
 
-/// Look up a leaf blob's bytes in the fetched graph.
+/// Look up a leaf blob's bytes in the fetched graph.  Only valid for inline
+/// blobs (symlink targets, recipes); a large external blob has no buffered
+/// bytes and must be streamed instead (see [`version_source`]).
 fn blob_bytes(graph: &FetchedGraph, hash: ObjectHash) -> Result<Vec<u8>, StewardError> {
     match graph.objects.get(&hash) {
         Some(FetchedObject::Blob(bytes)) => Ok(bytes.clone()),
+        Some(FetchedObject::External) => Err(StewardError::Content(format!(
+            "object {} is a large external blob and cannot be buffered here",
+            hash.to_hex()
+        ))),
+        Some(_) => Err(StewardError::Content(format!(
+            "expected a blob at {} but found a structured object",
+            hash.to_hex()
+        ))),
+        None => Err(StewardError::Content(format!(
+            "blob object {} missing from graph",
+            hash.to_hex()
+        ))),
+    }
+}
+
+/// Resolve a file/series version blob to its apply-time source: buffered bytes
+/// for an inline small blob, or the hash for a large external blob to stream.
+fn version_source(graph: &FetchedGraph, hash: ObjectHash) -> Result<VersionSource, StewardError> {
+    match graph.objects.get(&hash) {
+        Some(FetchedObject::Blob(bytes)) => Ok(VersionSource::Inline(bytes.clone())),
+        Some(FetchedObject::External) => Ok(VersionSource::External(hash)),
         Some(_) => Err(StewardError::Content(format!(
             "expected a blob at {} but found a structured object",
             hash.to_hex()

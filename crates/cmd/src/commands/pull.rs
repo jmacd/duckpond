@@ -118,7 +118,7 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         return Ok(());
     }
     let foreign_uuid7 = uuid7::Uuid::from(*foreign_pond_id.as_bytes());
-    let outcome = steward::import_pond(ship_ref, &graph, foreign_uuid7)
+    let outcome = steward::import_pond(ship_ref, &remote, &graph, foreign_uuid7)
         .await
         .map_err(|e| anyhow!("import from `{}`: {}", attachment.url, e))?;
     log::info!(
@@ -174,7 +174,7 @@ async fn pull_mirror(
         );
         return Ok(());
     }
-    let outcome = steward::rebuild_pond(ship_ref, &graph)
+    let outcome = steward::rebuild_pond(ship_ref, &remote, &graph)
         .await
         .map_err(|e| anyhow!("rebuild from `{}`: {}", attachment.url, e))?;
     log::info!(

@@ -250,28 +250,24 @@ impl ContentRemote {
         Ok(())
     }
 
-    /// Fetch a large blob's raw bytes by hash, verifying integrity, or `None`
-    /// if absent.  The body is streamed from object storage.
-    pub async fn get_blob(&self, hash: ObjectHash) -> Result<Option<Vec<u8>>> {
+    /// Open a streaming reader over a large blob's raw bytes by hash, or `None`
+    /// if absent.  The body streams from object storage chunk by chunk; the
+    /// caller re-hashes as it consumes so a multi-gigabyte blob never lands in a
+    /// single buffer.  Unlike an in-memory fetch, integrity is the consumer's
+    /// responsibility -- it must verify the streamed bytes hash to `hash`.
+    pub async fn get_blob_reader(
+        &self,
+        hash: ObjectHash,
+    ) -> Result<Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let path = Self::blob_path(hash);
         let res = match self.store.object_store().get(&path).await {
             Ok(r) => r,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(StoreError::Invariant(format!("blob get: {e}"))),
         };
-        let bytes = res
-            .bytes()
-            .await
-            .map_err(|e| StoreError::Invariant(format!("blob body: {e}")))?;
-        let computed = ObjectHash::of_bytes(&bytes);
-        if computed != hash {
-            return Err(StoreError::Invariant(format!(
-                "blob bytes hash to {} but were fetched as {}",
-                computed.to_hex(),
-                hash.to_hex()
-            )));
-        }
-        Ok(Some(bytes.to_vec()))
+        let stream = futures::TryStreamExt::map_err(res.into_stream(), std::io::Error::other);
+        let reader = tokio_util::io::StreamReader::new(stream);
+        Ok(Some(Box::new(reader)))
     }
 }
 

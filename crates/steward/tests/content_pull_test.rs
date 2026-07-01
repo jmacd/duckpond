@@ -295,7 +295,7 @@ async fn rebuild_reproduces_source_content() {
         .await
         .expect("create dst pond");
 
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
@@ -341,7 +341,7 @@ async fn rebuild_reproduces_multi_version_series() {
         .await
         .expect("create dst pond");
 
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
@@ -356,6 +356,60 @@ async fn rebuild_reproduces_multi_version_series() {
     assert_eq!(
         dst_root, src_root,
         "rebuilt pond with a multi-version series must be content-equal to the source"
+    );
+}
+
+/// A file larger than the large-file threshold is stored out-of-row on the
+/// remote (Decision D7): the fetch walk records it as an external blob rather
+/// than buffering its bytes, and the rebuild streams it back into the local
+/// pond.  The rebuilt pond must still be content-equal to the source.
+#[tokio::test]
+async fn rebuild_streams_large_external_blob() {
+    let (_t, mut src) = new_pond("large-src").await;
+    // 256 KiB, comfortably above the 64 KiB large-file threshold, with varied
+    // bytes so it does not compress to something tiny.
+    let big: Vec<u8> = (0..256 * 1024).map(|i| (i * 31 + 7) as u8).collect();
+    write_file(&mut src, "/big.bin", &big).await;
+    write_file(&mut src, "/small.txt", b"tiny").await;
+
+    let src_root = steward::compute_content_tree(&src)
+        .await
+        .expect("source fold")
+        .root_tree_hash;
+
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+
+    // The large blob is external: its hash is recorded but its bytes are never
+    // buffered into the graph.
+    assert_eq!(
+        graph.external_blobs.len(),
+        1,
+        "the >64KiB file must be an external blob"
+    );
+    let big_hash = *graph.external_blobs.iter().next().expect("external hash");
+    assert!(
+        !graph.bytes.contains_key(&big_hash),
+        "external blob bytes must not be buffered in the graph"
+    );
+
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "large-dst")
+        .await
+        .expect("create dst pond");
+
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("rebuild");
+    assert_eq!(outcome.files, 2);
+
+    let dst_root = steward::compute_content_tree(&dst)
+        .await
+        .expect("dst fold")
+        .root_tree_hash;
+    assert_eq!(
+        dst_root, src_root,
+        "rebuilt pond with a streamed large blob must be content-equal to the source"
     );
 }
 
@@ -398,7 +452,7 @@ async fn rebuild_reproduces_dynamic_nodes() {
         .await
         .expect("create dst pond");
 
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
@@ -424,7 +478,15 @@ async fn rebuild_empty_graph_errors() {
         .await
         .expect("create dst pond");
     let empty = steward::FetchedGraph::default();
-    assert!(steward::rebuild_pond(&mut dst, &empty).await.is_err());
+    let remote_dir = tempdir().expect("remote dir");
+    let remote = ContentRemote::create_at(remote_dir.path().join("remote"), uuid::Uuid::new_v4())
+        .await
+        .expect("create remote");
+    assert!(
+        steward::rebuild_pond(&mut dst, &remote, &empty)
+            .await
+            .is_err()
+    );
 }
 
 /// Re-pulling an unchanged pond is a no-op: nothing is created and no spurious
@@ -443,14 +505,14 @@ async fn incremental_repull_is_idempotent() {
         .expect("create dst");
 
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let _ = steward::rebuild_pond(&mut dst, &graph)
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
     // Push and pull again with no source changes.
     repush(&src, &mut remote).await;
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("re-pull");
 
@@ -474,7 +536,7 @@ async fn series_repull_appends_only_suffix() {
         .expect("create dst");
 
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
     assert_eq!(outcome.series, 1);
@@ -483,7 +545,7 @@ async fn series_repull_appends_only_suffix() {
     write_series(&mut src, "/r.series", &[(3_000, "v3")]).await;
     repush(&src, &mut remote).await;
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("re-pull");
 
@@ -507,14 +569,14 @@ async fn rename_preserves_node_identity() {
         .expect("create dst");
 
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let _ = steward::rebuild_pond(&mut dst, &graph)
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
     rename(&mut src, "/a.txt", "/b.txt").await;
     repush(&src, &mut remote).await;
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let outcome = steward::rebuild_pond(&mut dst, &graph)
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("re-pull");
 
@@ -539,14 +601,14 @@ async fn deletion_propagates() {
         .expect("create dst");
 
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let _ = steward::rebuild_pond(&mut dst, &graph)
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("rebuild");
 
     delete(&mut src, "/b.txt").await;
     repush(&src, &mut remote).await;
     let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
-    let _ = steward::rebuild_pond(&mut dst, &graph)
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
         .await
         .expect("re-pull");
 
