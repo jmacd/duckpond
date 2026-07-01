@@ -733,11 +733,13 @@ the node kind:
   (`origin`, tree size, base64 `root_hash`) at `{POND}/tlog/checkpoint`, where
   `origin` is `duckpond/<pond_id>`. The checkpoint is written unsigned: the note
   body is exactly the byte string a future signer will sign, so adding
-  signatures (Section 10) does not change its meaning. The tile writer
-  recomputes from the leaf set (`O(n)`) but writes each full tile once; an
-  incremental `O(log n)` writer is a later optimization that does not change the
-  on-disk format. The tile store's own level-0 tiles are the source of truth for
-  the leaf sequence; a first cut appends one leaf per commit and defers
+  signatures (Section 10) does not change its meaning. The tile writer is
+  incremental: appending a leaf folds only the touched right spine (`O(1)`
+  amortized hashing plus an `O(log n)` tree head per commit) and never reloads
+  the existing leaves, while a whole-tree `O(n)` rebuilder is retained for
+  building or repairing a log; both produce byte-identical tiles, and full tiles
+  are written exactly once. The tile store's own level-0 tiles are the source of
+  truth for the leaf sequence; a first cut appends one leaf per commit and defers
   crash-gap backfill (Section 7; `sync-store/tlog/tiles.rs`,
   `sync-store/tlog/checkpoint.rs`; materialized in `steward/guard.rs`).
 

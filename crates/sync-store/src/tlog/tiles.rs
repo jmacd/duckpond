@@ -29,18 +29,20 @@
 //!
 //! # Complexity
 //!
-//! The writer recomputes tile hashes from the full leaf set on each append
-//! (`O(n)`), matching the existing in-memory [`super::TransparencyLog`].  Full
-//! tiles are written once (skip-if-exists), so I/O churn is bounded to the
-//! rightmost tiles plus any newly completed full tiles.  An incremental
-//! `O(log n)` writer that folds only the touched right spine is a later
-//! optimization; the on-disk format does not change.
+//! The incremental writer ([`TileLog::append_leaf_hashes`]) folds only the
+//! touched right spine: appending a leaf carries up the completed-subtree chain
+//! (`O(1)` amortized hashing) and recomputes the tree head in `O(log n)`,
+//! without ever reloading the existing leaves.  Full tiles are immutable and
+//! written exactly once.  The whole-tree [`TileLog::materialize`] recomputes
+//! everything from a leaf set (`O(n)`) and is kept for building or repairing a
+//! log; both paths produce byte-identical tiles.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::checkpoint::Checkpoint;
-use super::merkle::{LogHash, empty_root, hash_leaf, mth};
+use super::merkle::{LogHash, empty_root, hash_children, hash_leaf, mth};
 
 /// The number of hashes in a full tile (C2SP tile height 8, so `2^8`).
 pub const TILE_WIDTH: u64 = 256;
@@ -124,27 +126,53 @@ impl TileLog {
         self.append_leaf_hashes(hashes)
     }
 
-    /// Append pre-computed leaf hashes, re-materialize the tiles, and emit a
-    /// fresh checkpoint.  Returns the new checkpoint.
+    /// Append pre-computed leaf hashes incrementally and emit a fresh
+    /// checkpoint.  Returns the new checkpoint.
+    ///
+    /// This folds only the touched right spine of the tree: each appended leaf
+    /// does `O(1)` amortized hashing (a carry up the completed-subtree chain),
+    /// and the new tree head costs `O(log n)`.  Existing leaves are never
+    /// reloaded and full tiles are never rewritten.  The result is
+    /// byte-identical to [`Self::materialize`] over the whole leaf sequence.
     ///
     /// # Errors
     ///
-    /// Returns an error if existing leaves cannot be loaded or any tile /
+    /// Returns an error if the current size cannot be read or any tile /
     /// checkpoint write fails.
     pub fn append_leaf_hashes<I>(&self, hashes: I) -> Result<Checkpoint, super::CheckpointError>
     where
         I: IntoIterator<Item = LogHash>,
     {
-        let mut leaves = self.load_leaves()?;
-        leaves.extend(hashes);
-        Ok(self.materialize(&leaves)?)
+        let old = self.size()?;
+        let mut session = TileSession::open(self.dir.clone(), old);
+        let mut index = old;
+        for h in hashes {
+            session.push_leaf(index, h)?;
+            index += 1;
+        }
+        let new = index;
+        let root = if new == 0 {
+            empty_root()
+        } else {
+            session.tree_head(new)?
+        };
+        session.flush()?;
+
+        let checkpoint = Checkpoint::new(self.origin.clone(), new, root);
+        checkpoint.write(&self.dir)?;
+        Ok(checkpoint)
     }
 
-    /// Write all tiles for the leaf sequence `leaves` and emit the checkpoint.
+    /// Write all tiles for the leaf sequence `leaves` and emit the checkpoint,
+    /// recomputing every tile from scratch (`O(n)`).
     ///
-    /// Full tiles already present on disk are left untouched (they are
-    /// immutable); the rightmost partial tile at each level is rewritten
-    /// atomically.  The checkpoint rename is the log's commit point.
+    /// This is the whole-tree (re)builder: use it to materialize a log from a
+    /// known leaf set or to repair one.  The incremental
+    /// [`Self::append_leaf_hashes`] is the hot path for live commits and
+    /// produces byte-identical output.  Full tiles already present on disk are
+    /// left untouched (they are immutable); the rightmost partial tile at each
+    /// level is rewritten atomically.  The checkpoint rename is the log's commit
+    /// point.
     ///
     /// # Errors
     ///
@@ -298,6 +326,250 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The number of stored-hash tile levels tracked (`256^9 == 2^72` leaves, far
+/// beyond any realistic log).  Tile level `L` holds hashes at tree level `8L`.
+const MAX_TILE_LEVELS: usize = 9;
+
+/// An in-progress incremental update to a tile log.
+///
+/// A session buffers the tiles it reads or writes, folds each completed subtree
+/// up the tree exactly once, and flushes the touched tiles at the end.  Its
+/// invariant mirrors the C2SP layout: the stored hash at tree level `8(L+1)`,
+/// index `m` is the perfect fold of the 256 hashes in tile `(L, m)`, so filling
+/// a tile at level `L` produces exactly one stored hash at level `L + 1`.
+struct TileSession {
+    dir: PathBuf,
+    /// Cached tile buffers, keyed by (tile level, tile index); each is a
+    /// contiguous run of 32-byte hashes.
+    tiles: HashMap<(u8, u64), Vec<u8>>,
+    /// Tiles modified this session, to be written on [`Self::flush`].
+    dirty: HashSet<(u8, u64)>,
+    /// Committed stored-hash count per level at open time (`old >> 8L`), used to
+    /// bound reads of pre-existing tiles.
+    count_open: [u64; MAX_TILE_LEVELS],
+    /// Current stored-hash count per level, used to size tiles on flush.
+    count: [u64; MAX_TILE_LEVELS],
+}
+
+impl TileSession {
+    /// Open a session over `dir` for a log currently holding `old` leaves.
+    fn open(dir: PathBuf, old: u64) -> Self {
+        let mut count_open = [0u64; MAX_TILE_LEVELS];
+        for (level, slot) in count_open.iter_mut().enumerate() {
+            let shift = TILE_HEIGHT_BITS * level as u32;
+            *slot = if shift >= 64 { 0 } else { old >> shift };
+        }
+        Self {
+            dir,
+            tiles: HashMap::new(),
+            dirty: HashSet::new(),
+            count_open,
+            count: count_open,
+        }
+    }
+
+    /// Append one leaf at absolute index `index`, carrying any completed
+    /// subtrees up the tree.
+    fn push_leaf(&mut self, index: u64, leaf: LogHash) -> io::Result<()> {
+        self.set_stored(0, index, leaf)?;
+        if index % TILE_WIDTH == TILE_WIDTH - 1 {
+            self.cascade(0, index / TILE_WIDTH)?;
+        }
+        Ok(())
+    }
+
+    /// A tile `(level, tile_index)` just filled: fold it into one stored hash at
+    /// the next level, then recurse if that fill completes the next tile too.
+    fn cascade(&mut self, level: u8, tile_index: u64) -> io::Result<()> {
+        let next_level = level + 1;
+        if next_level as usize >= MAX_TILE_LEVELS {
+            return Ok(());
+        }
+        let folded = fold_perfect(&self.full_tile_hashes(level, tile_index)?);
+        // The fold of tile (level, tile_index) is the stored hash at
+        // next_level whose stored-index equals tile_index.
+        self.set_stored(next_level, tile_index, folded)?;
+        if tile_index % TILE_WIDTH == TILE_WIDTH - 1 {
+            self.cascade(next_level, tile_index / TILE_WIDTH)?;
+        }
+        Ok(())
+    }
+
+    /// Set the stored hash at `(level, index)`, loading the backing tile if this
+    /// is its first touch and marking it dirty.
+    fn set_stored(&mut self, level: u8, index: u64, hash: LogHash) -> io::Result<()> {
+        let tile_index = index / TILE_WIDTH;
+        self.ensure_loaded(level, tile_index)?;
+        let pos = (index % TILE_WIDTH) as usize;
+        let buf = self.tiles.get_mut(&(level, tile_index)).expect("loaded");
+        if buf.len() < (pos + 1) * HASH_LEN {
+            buf.resize((pos + 1) * HASH_LEN, 0);
+        }
+        buf[pos * HASH_LEN..(pos + 1) * HASH_LEN].copy_from_slice(hash.as_bytes());
+        let _ = self.dirty.insert((level, tile_index));
+        let slot = &mut self.count[level as usize];
+        if index + 1 > *slot {
+            *slot = index + 1;
+        }
+        Ok(())
+    }
+
+    /// Read the stored hash at `(level, index)` from the cache, loading the
+    /// backing tile from disk if necessary.
+    fn read_stored(&mut self, level: u8, index: u64) -> io::Result<LogHash> {
+        let tile_index = index / TILE_WIDTH;
+        self.ensure_loaded(level, tile_index)?;
+        let buf = &self.tiles[&(level, tile_index)];
+        let pos = (index % TILE_WIDTH) as usize;
+        let mut arr = [0u8; HASH_LEN];
+        arr.copy_from_slice(&buf[pos * HASH_LEN..(pos + 1) * HASH_LEN]);
+        Ok(LogHash::from_bytes(arr))
+    }
+
+    /// Ensure tile `(level, tile_index)` is cached, loading its pre-existing
+    /// (committed) hashes from disk on first touch.
+    fn ensure_loaded(&mut self, level: u8, tile_index: u64) -> io::Result<()> {
+        if self.tiles.contains_key(&(level, tile_index)) {
+            return Ok(());
+        }
+        let available = self.count_open[level as usize].saturating_sub(tile_index * TILE_WIDTH);
+        let width = std::cmp::min(TILE_WIDTH, available) as usize;
+        let mut bytes = Vec::new();
+        if width > 0 {
+            let path = self.dir.join(data_tile_rel(level, tile_index, width));
+            let disk = std::fs::read(&path)?;
+            if disk.len() < width * HASH_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "tile {} holds {} bytes, expected at least {}",
+                        path.display(),
+                        disk.len(),
+                        width * HASH_LEN
+                    ),
+                ));
+            }
+            bytes.extend_from_slice(&disk[..width * HASH_LEN]);
+        }
+        let _ = self.tiles.insert((level, tile_index), bytes);
+        Ok(())
+    }
+
+    /// The 256 hashes of a full tile `(level, tile_index)`, from the cache when
+    /// available (the common case after a fill) or loaded from disk.
+    fn full_tile_hashes(&mut self, level: u8, tile_index: u64) -> io::Result<Vec<LogHash>> {
+        if !self.tiles.contains_key(&(level, tile_index)) {
+            let path = self
+                .dir
+                .join(data_tile_rel(level, tile_index, TILE_WIDTH as usize));
+            let disk = std::fs::read(&path)?;
+            let _ = self.tiles.insert((level, tile_index), disk);
+        }
+        let buf = &self.tiles[&(level, tile_index)];
+        if buf.len() < TILE_WIDTH as usize * HASH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "expected a full tile at level {level} index {tile_index}, got {} bytes",
+                    buf.len()
+                ),
+            ));
+        }
+        Ok(bytes_to_hashes(&buf[..TILE_WIDTH as usize * HASH_LEN]))
+    }
+
+    /// The RFC 6962 tree head over the first `n` leaves, folding the frontier of
+    /// perfect subtrees right-to-left (`MTH = hash(left, hash(..., right))`).
+    fn tree_head(&mut self, n: u64) -> io::Result<LogHash> {
+        let mut subtrees = Vec::new();
+        let mut pos = 0u64;
+        let mut remaining = n;
+        for tree_level in (0..64u32).rev() {
+            let size = 1u64 << tree_level;
+            if remaining & size != 0 {
+                let idx = pos >> tree_level;
+                subtrees.push(self.perfect_hash(tree_level, idx)?);
+                pos += size;
+                remaining ^= size;
+            }
+        }
+        let mut acc = *subtrees.last().expect("n > 0 has at least one subtree");
+        for left in subtrees.iter().rev().skip(1) {
+            acc = hash_children(left, &acc);
+        }
+        Ok(acc)
+    }
+
+    /// The hash of the perfect subtree at tree level `tree_level`, index `idx`.
+    ///
+    /// When `tree_level` is a tile boundary (`8L`) the hash is a stored hash read
+    /// straight from tile level `L`.  Otherwise it is folded from the
+    /// `2^(tree_level % 8)` stored hashes one tile level below.
+    fn perfect_hash(&mut self, tree_level: u32, idx: u64) -> io::Result<LogHash> {
+        let tile_level = (tree_level / TILE_HEIGHT_BITS) as u8;
+        let j = tree_level % TILE_HEIGHT_BITS;
+        if j == 0 {
+            return self.read_stored(tile_level, idx);
+        }
+        let base = idx << j;
+        let mut children = Vec::with_capacity(1usize << j);
+        for t in 0..(1u64 << j) {
+            children.push(self.read_stored(tile_level, base + t)?);
+        }
+        Ok(fold_perfect(&children))
+    }
+
+    /// Write every dirty tile at its current width and drop stale partial
+    /// variants.  Full tiles are written once and never revisited.
+    fn flush(&self) -> io::Result<()> {
+        let mut keys: Vec<(u8, u64)> = self.dirty.iter().copied().collect();
+        keys.sort_unstable();
+        for (level, tile_index) in keys {
+            let available = self.count[level as usize].saturating_sub(tile_index * TILE_WIDTH);
+            let width = std::cmp::min(TILE_WIDTH, available) as usize;
+            let buf = &self.tiles[&(level, tile_index)];
+
+            // A tile's partial variants live in a `<N>.p/` directory; remove it
+            // so only the current representation of this tile index remains.
+            let partial_dir = self
+                .dir
+                .join(format!("tile/{level}/{}.p", n_path(tile_index)));
+            if partial_dir.exists() {
+                std::fs::remove_dir_all(&partial_dir)?;
+            }
+            let path = self.dir.join(data_tile_rel(level, tile_index, width));
+            write_atomic(&path, &buf[..width * HASH_LEN])?;
+        }
+        Ok(())
+    }
+}
+
+/// Fold a power-of-two run of hashes into one via pairwise `hash_children`
+/// (the RFC 6962 hash of a perfect subtree).
+fn fold_perfect(hashes: &[LogHash]) -> LogHash {
+    debug_assert!(hashes.len().is_power_of_two());
+    let mut level = hashes.to_vec();
+    while level.len() > 1 {
+        level = level
+            .chunks_exact(2)
+            .map(|pair| hash_children(&pair[0], &pair[1]))
+            .collect();
+    }
+    level[0]
+}
+
+/// Split a byte run into 32-byte log hashes.
+fn bytes_to_hashes(bytes: &[u8]) -> Vec<LogHash> {
+    bytes
+        .chunks_exact(HASH_LEN)
+        .map(|chunk| {
+            let mut arr = [0u8; HASH_LEN];
+            arr.copy_from_slice(chunk);
+            LogHash::from_bytes(arr)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +654,72 @@ mod tests {
         let batch = TileLog::new(dir.path().join("batch"), "duckpond/test");
         let batch_cp = batch.materialize(&leaves(300)).expect("materialize");
         assert_eq!(cp.root, batch_cp.root);
+    }
+
+    /// Collect every tile file under `dir/tile` keyed by its relative path so two
+    /// logs can be compared byte-for-byte.
+    fn tile_snapshot(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let root = dir.join("tile");
+        let mut stack = vec![root.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path
+                        .strip_prefix(&root)
+                        .expect("under tile root")
+                        .to_string_lossy()
+                        .into_owned();
+                    let _ = out.insert(rel, std::fs::read(&path).expect("read tile"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn incremental_is_byte_identical_to_materialize_across_splits() {
+        let base = tempfile::tempdir().expect("tempdir");
+        // Append the same leaves in several unequal chunks and require the tiles
+        // and checkpoint to match a single whole-tree materialization exactly.
+        let split_points = [1usize, 2, 3, 255, 256, 257, 511, 512, 513, 700, 1000];
+        for &size in &split_points {
+            let ls = leaves(size);
+
+            let oracle = TileLog::new(base.path().join(format!("oracle-{size}")), "duckpond/test");
+            let oracle_cp = oracle.materialize(&ls).expect("materialize");
+
+            let inc = TileLog::new(base.path().join(format!("inc-{size}")), "duckpond/test");
+            // Deterministic but uneven chunk sizes exercise partial-tile carries.
+            let mut i = 0;
+            let mut step = 1usize;
+            while i < size {
+                let end = std::cmp::min(size, i + step);
+                let cp = inc
+                    .append_leaf_hashes(ls[i..end].iter().copied())
+                    .expect("append");
+                assert_eq!(cp.size, end as u64, "size after chunk for {size}");
+                i = end;
+                step = step * 2 + 1;
+            }
+
+            let inc_cp = Checkpoint::read(inc.dir())
+                .expect("read checkpoint")
+                .expect("checkpoint present");
+            assert_eq!(inc_cp.size, oracle_cp.size, "final size for {size}");
+            assert_eq!(inc_cp.root, oracle_cp.root, "final root for {size}");
+            assert_eq!(
+                tile_snapshot(inc.dir()),
+                tile_snapshot(oracle.dir()),
+                "tile bytes must match materialize for {size}"
+            );
+        }
     }
 
     #[test]
