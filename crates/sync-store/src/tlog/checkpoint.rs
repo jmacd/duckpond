@@ -34,6 +34,17 @@ use super::merkle::LogHash;
 /// The file name of the checkpoint within a log directory.
 pub const CHECKPOINT_FILE: &str = "checkpoint";
 
+/// The file name of the append-only checkpoint history within a log directory.
+///
+/// Each line records one *published* checkpoint as `origin SP size SP
+/// base64(root)`.  The published `checkpoint` file always holds the latest tree
+/// head; this history keeps the earlier ones so a verifier can prove, with an
+/// RFC 6962 consistency proof, that every checkpoint the pond ever published is
+/// a prefix of the current log (append-only, no history rewrite).  It is a
+/// derived, re-materializable index -- not the signed artifact -- so a compact
+/// one-line-per-record encoding is used rather than the note-body format.
+pub const CHECKPOINT_HISTORY_FILE: &str = "checkpoints";
+
 /// A parsed transparency-log checkpoint (unsigned tlog-checkpoint note body).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -124,12 +135,99 @@ impl Checkpoint {
             Err(e) => Err(CheckpointError::Io(e)),
         }
     }
+
+    /// Encode this checkpoint as one history record: `origin SP size SP
+    /// base64(root)`.  None of the fields contain spaces (`origin` is a
+    /// schema-less identifier, `size` an integer, `root` standard base64), so
+    /// the record splits unambiguously on whitespace.
+    #[must_use]
+    fn encode_history_line(&self) -> String {
+        format!(
+            "{} {} {}",
+            self.origin,
+            self.size,
+            BASE64.encode(self.root.as_bytes())
+        )
+    }
+
+    /// Parse one history record produced by [`Self::encode_history_line`].
+    fn parse_history_line(line: &str) -> Option<Self> {
+        let mut fields = line.split_whitespace();
+        let origin = fields.next()?.to_string();
+        let size = fields.next()?.parse::<u64>().ok()?;
+        let root_bytes = BASE64.decode(fields.next()?.as_bytes()).ok()?;
+        let root_arr: [u8; 32] = root_bytes.try_into().ok()?;
+        Some(Self {
+            origin,
+            size,
+            root: LogHash::from_bytes(root_arr),
+        })
+    }
+
+    /// Append this checkpoint to the log's append-only history, returning
+    /// whether a record was written.
+    ///
+    /// The history is monotonic in `size`: the record is appended only if this
+    /// checkpoint is strictly larger than the last recorded one (and non-empty),
+    /// so re-emitting or repairing to an already-recorded size is a no-op and an
+    /// empty log is never recorded.  Malformed trailing lines from a torn append
+    /// are ignored when reading the last size.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error from reading the existing history or appending the
+    /// new record.
+    pub fn append_to_history(&self, dir: &Path) -> io::Result<bool> {
+        if self.size == 0 {
+            return Ok(false);
+        }
+        let last_size = Self::read_history(dir)?.last().map(|c| c.size).unwrap_or(0);
+        if self.size <= last_size {
+            return Ok(false);
+        }
+        let path = checkpoint_history_path(dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut line = self.encode_history_line();
+        line.push('\n');
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        Ok(true)
+    }
+
+    /// Read the append-only checkpoint history from the log directory `dir`, in
+    /// the order the checkpoints were published.  Returns an empty vector if no
+    /// history file exists.  Lines that do not parse (e.g. a torn trailing
+    /// append) are skipped, since the history is a re-materializable index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error other than "not found".
+    pub fn read_history(dir: &Path) -> io::Result<Vec<Self>> {
+        let path = checkpoint_history_path(dir);
+        match std::fs::read_to_string(&path) {
+            Ok(body) => Ok(body.lines().filter_map(Self::parse_history_line).collect()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// The checkpoint file path within a log directory.
 #[must_use]
 pub fn checkpoint_path(dir: &Path) -> PathBuf {
     dir.join(CHECKPOINT_FILE)
+}
+
+/// The checkpoint-history file path within a log directory.
+#[must_use]
+pub fn checkpoint_history_path(dir: &Path) -> PathBuf {
+    dir.join(CHECKPOINT_HISTORY_FILE)
 }
 
 /// Errors from checkpoint parsing or I/O.
@@ -212,5 +310,76 @@ mod tests {
         cp.write(dir.path()).expect("write");
         let read = Checkpoint::read(dir.path()).expect("read").expect("some");
         assert_eq!(read, cp);
+    }
+
+    #[test]
+    fn history_records_growing_checkpoints_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            Checkpoint::read_history(dir.path())
+                .expect("empty")
+                .is_empty()
+        );
+
+        let cps = [
+            Checkpoint::new("duckpond/pond-h", 1, hash_leaf(b"a")),
+            Checkpoint::new("duckpond/pond-h", 2, hash_leaf(b"b")),
+            Checkpoint::new("duckpond/pond-h", 5, hash_leaf(b"c")),
+        ];
+        for cp in &cps {
+            assert!(cp.append_to_history(dir.path()).expect("append"));
+        }
+        let hist = Checkpoint::read_history(dir.path()).expect("read history");
+        assert_eq!(hist, cps);
+    }
+
+    #[test]
+    fn history_is_monotonic_and_skips_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // The empty log is never recorded.
+        assert!(
+            !Checkpoint::new("o", 0, hash_leaf(b"z"))
+                .append_to_history(dir.path())
+                .expect("append empty")
+        );
+        assert!(Checkpoint::read_history(dir.path()).unwrap().is_empty());
+
+        assert!(
+            Checkpoint::new("o", 3, hash_leaf(b"a"))
+                .append_to_history(dir.path())
+                .expect("append 3")
+        );
+        // Re-emitting the same or a smaller size is a no-op.
+        assert!(
+            !Checkpoint::new("o", 3, hash_leaf(b"a"))
+                .append_to_history(dir.path())
+                .expect("re-append 3")
+        );
+        assert!(
+            !Checkpoint::new("o", 2, hash_leaf(b"x"))
+                .append_to_history(dir.path())
+                .expect("append 2")
+        );
+        let hist = Checkpoint::read_history(dir.path()).unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].size, 3);
+    }
+
+    #[test]
+    fn history_read_skips_torn_trailing_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cp = Checkpoint::new("duckpond/pond-t", 4, hash_leaf(b"ok"));
+        cp.append_to_history(dir.path()).expect("append");
+        // Simulate a torn append leaving a partial trailing record.
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(checkpoint_history_path(dir.path()))
+            .expect("open");
+        f.write_all(b"duckpond/pond-t 5 not-bas")
+            .expect("partial write");
+        let hist = Checkpoint::read_history(dir.path()).expect("read history");
+        assert_eq!(hist, vec![cp]);
     }
 }

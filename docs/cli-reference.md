@@ -28,6 +28,7 @@
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
+| `pond tlog verify` | Verify the transparency log (inclusion, append-only, faithfulness) (D5) | `pond tlog verify` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
@@ -696,6 +697,46 @@ Output sections:
 > (`last_write_seq` vs `last_pushed_seq:<url>`).  To cross-check the
 > consumer's data against what a remote actually recorded, use
 > `pond verify`.
+
+---
+
+### pond tlog (D5)
+
+Inspect and verify the pond's **transparency log**: an append-only RFC 6962
+SHA-256 Merkle tree over the linear commit spine, published as C2SP
+`tlog-tiles` under `{POND}/tlog`.  Every write transaction appends one leaf
+(its commit object).  These are read-only, **offline** commands.
+
+Signing (the log's trust root) is deferred, but the log's *key-free*
+properties are fully verifiable today: `pond tlog verify` proves
+tamper-evidence and append-only growth without any key.
+
+```bash
+pond tlog show      # checkpoint, checkpoint history, tree size
+pond tlog verify    # verify the log; exit non-zero if any check fails
+```
+
+**`pond tlog show`** prints the current checkpoint (origin, tree size, root),
+the log directory, and the append-only checkpoint history (`{POND}/tlog/checkpoints`),
+one line per checkpoint ever published.
+
+**`pond tlog verify`** runs four checks and prints a `[PASS]`/`[FAIL]` line for
+each, exiting non-zero if any fails:
+- **Checkpoint reproduced** -- the level-0 tiles re-fold to the checkpoint's
+  size and root.
+- **Inclusion** -- every published leaf proves inclusion against the checkpoint
+  root (RFC 6962 inclusion proof).
+- **Append-only consistency** -- every checkpoint in the history is an
+  append-only prefix of the current tree (RFC 6962 consistency proof).
+- **Faithfulness** -- the published leaves equal `hash_leaf(commit_object)` for
+  every spine-bearing `DataCommitted` record in the control table, leaf for
+  leaf, tying the published log back to the authoritative source of truth.
+
+The published tiles are a **derived, re-materializable export** of the
+control-table commit spine.  If the export is ever dropped or lags (a crash, an
+I/O error, an unwritable `{POND}/tlog`), it self-heals on the next commit: the
+writer replays every missing leaf from the control table, so verification
+returns clean.
 
 ---
 

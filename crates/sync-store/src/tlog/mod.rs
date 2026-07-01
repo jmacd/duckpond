@@ -27,7 +27,10 @@ mod checkpoint;
 mod merkle;
 mod tiles;
 
-pub use checkpoint::{CHECKPOINT_FILE, Checkpoint, CheckpointError, checkpoint_path};
+pub use checkpoint::{
+    CHECKPOINT_FILE, CHECKPOINT_HISTORY_FILE, Checkpoint, CheckpointError, checkpoint_history_path,
+    checkpoint_path,
+};
 pub use merkle::{
     LogHash, ProofError, TransparencyLog, empty_root, hash_children, hash_leaf, verify_consistency,
     verify_inclusion,

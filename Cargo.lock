@@ -865,6 +865,7 @@ dependencies = [
  "file-rotate",
  "futures",
  "gitpond",
+ "hex",
  "hydrovu",
  "linkme",
  "log",

@@ -160,6 +160,7 @@ impl TileLog {
 
         let checkpoint = Checkpoint::new(self.origin.clone(), new, root);
         checkpoint.write(&self.dir)?;
+        checkpoint.append_to_history(&self.dir)?;
         Ok(checkpoint)
     }
 
@@ -203,6 +204,7 @@ impl TileLog {
         }
         let checkpoint = Checkpoint::new(self.origin.clone(), t, root);
         checkpoint.write(&self.dir)?;
+        checkpoint.append_to_history(&self.dir)?;
         Ok(checkpoint)
     }
 

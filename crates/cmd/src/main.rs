@@ -278,6 +278,11 @@ enum Commands {
     /// Show an operator-facing status aggregate: identity, local commit
     /// state, recovery health, and per-remote sync watermarks (D6).
     Status,
+    /// Inspect and verify the pond's transparency log (D5).
+    Tlog {
+        #[command(subcommand)]
+        command: TlogCommand,
+    },
     /// Filesystem-check: verify content checksums and Merkle trees, and
     /// print a single root checksum that exhaustively fingerprints every
     /// row in the pond (across all pond_ids).  Two replicas are identical
@@ -471,6 +476,16 @@ enum Commands {
     Emergency(EmergencyCommand),
 }
 
+/// Transparency-log subcommands (D5).
+#[derive(Debug, Subcommand)]
+enum TlogCommand {
+    /// Show the current checkpoint, checkpoint history, and tree size.
+    Show,
+    /// Verify inclusion of every leaf, append-only consistency across every
+    /// published checkpoint, and faithfulness to the control-table commit spine.
+    Verify,
+}
+
 /// Emergency subcommands for destructive operations.
 #[derive(Debug, Subcommand)]
 enum EmergencyCommand {
@@ -592,6 +607,10 @@ async fn main() -> Result<()> {
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
         Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
         Commands::Status => commands::status_command(&ship_context).await,
+        Commands::Tlog { command } => match command {
+            TlogCommand::Show => commands::tlog_show_command(&ship_context).await,
+            TlogCommand::Verify => commands::tlog_verify_command(&ship_context).await,
+        },
         Commands::Fsck { quick, verbose } => {
             commands::fsck_command(&ship_context, quick, verbose).await
         }

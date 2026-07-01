@@ -816,10 +816,32 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
   `tlog-tiles` under `{POND}/tlog` and re-emits an unsigned `tlog-checkpoint`
   note body; leaves prove inclusion against the published root. The tiles are a
   derived export of the authoritative control-table leaf log, not a second
-  source of truth. Signing stays deferred (Section 10), and export/leaf-log
-  reconciliation is still open (Remaining work item 1). (`sync-store/tlog/tiles.rs`,
+  source of truth. Signing stays deferred (Section 10). (`sync-store/tlog/tiles.rs`,
   `sync-store/tlog/checkpoint.rs`, `steward/guard.rs::materialize_tlog`,
   `steward/tests/tlog_materialize_test.rs`.)
+- [x] **Reconcile the tile export to the control-table leaf log (D5).** The
+  transparency-log export is driven by the committed leaf count, not
+  `checkpoint.size`: after each commit, `materialize_tlog` reads the ordered
+  spine-bearing `commit_object` sequence from the control table and replays
+  every leaf the export is missing, so its leaf position ends equal to the
+  commit count. A dropped append (crash, I/O error, unwritable `{POND}/tlog`)
+  self-heals on the next commit; an over-long export is harmless and left
+  untouched. This is deterministic reconciliation of a cache, not recovery of
+  unique data. (`steward/guard.rs::materialize_tlog`,
+  `sync-steward/control_table.rs::commit_objects_in_order`,
+  `steward/tests/tlog_materialize_test.rs::dropped_export_reconciles_to_committed_leaf_count_on_next_commit`.)
+- [x] **Key-free verification: checkpoint history + `pond tlog` (D5).** Every
+  published checkpoint is recorded in an append-only history
+  (`{POND}/tlog/checkpoints`), so the log's append-only property is provable, not
+  just its inclusion property. `pond tlog show` prints the checkpoint, history,
+  and tree size; `pond tlog verify` checks, with no signing key, that the tiles
+  reproduce the checkpoint, that every leaf proves inclusion, that every
+  historical checkpoint is an RFC 6962 consistency (prefix) of the current tree,
+  and that the published leaves match the control-table commit spine leaf for
+  leaf. These are exactly the tamper-evidence and append-only guarantees a future
+  signature will attest to. (`sync-store/tlog/checkpoint.rs` history API,
+  `cmd/commands/tlog.rs`, `steward/tests/tlog_materialize_test.rs::checkpoint_history_records_and_proves_consistency`,
+  `testsuite/tests/719-tlog-verify.sh`.)
 - [ ] **Writable fork (D9, open).** Consumers are read-only mirrors for now
   (Section 8.5.3).
 - [ ] **At-rest content-addressing (D1, deferred).** Rows stay keyed by
@@ -831,33 +853,22 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
 Concrete threads left to pick up, roughly in dependency order. Each names the
 seam to start from.
 
-1. **Reconcile the tile export to the control-table leaf log (Section 7, D5).**
-   The authoritative leaf sequence is the ordered `DataCommitted` records; the
-   C2SP tiles are a derived export published best-effort after each commit, so
-   the export can legitimately lag the commit history (a crash between the
-   control record and `materialize_tlog`, an I/O error, or an unwritable
-   `{POND}/tlog`). The writer must therefore drive its next leaf position from
-   the committed leaf count, not from `checkpoint.size`: before extending,
-   compare the checkpoint against the control-table leaf count and replay any
-   missing commit leaves (recoverable from the commit records in `seq` order) so
-   leaf position stays equal to commit index. Tiles ahead of the checkpoint are
-   harmless and deterministically re-derived; only the export lagging the log
-   matters, and it self-heals. This is deterministic reconciliation of a cache,
-   not recovery of unique data. Start: `steward/guard.rs::materialize_tlog`,
-   `sync-store/tlog/tiles.rs` (`TileLog::size`, `TileSession::open`),
-   `steward/control_table.rs` (`DataCommitted` / commit-spine reads).
-2. **Signing / checkpoint witnessing (Section 10).** The checkpoint note body is
-   already the exact byte string a signer will sign; add key custody and a
-   signed-note wrapper (C2SP signed-note) plus optional witness co-signing. This
-   is the log's trust root and the last deferral before the transparency log is
-   externally verifiable. Start: `sync-store/tlog/checkpoint.rs` (`Checkpoint`
-   encode/parse), Section 7 point 3.
-3. **Writable fork (D9).** Let a consumer land its own commits on a pulled base
+1. **Signing / checkpoint witnessing (Section 10).** The key-free verifiable
+   properties are done (inclusion, append-only consistency, faithfulness to the
+   commit spine -- see `pond tlog verify`); signing is the remaining trust-root
+   step, defending against a dishonest operator rather than corruption. The
+   checkpoint note body is already the exact byte string a signer will sign; add
+   key custody and a signed-note wrapper (C2SP signed-note) plus optional witness
+   co-signing. Smallest reversible first step: Ed25519 with a local key file,
+   witnesses/KMS deferred; because the note body is unchanged it is purely
+   additive. Start: `sync-store/tlog/checkpoint.rs` (`Checkpoint` encode/parse),
+   Section 7 point 3.
+2. **Writable fork (D9).** Let a consumer land its own commits on a pulled base
    instead of being a pure read-only mirror: mint local commits whose parent is
    the pulled tip, keep the source `pond_id` distinct from the fork's, and define
    fast-forward push-pull between them. Start: Section 8.5.3,
    `steward/content_pull.rs`.
-4. **At-rest content-addressing (D1).** Only if storage or dedup pressure
+3. **At-rest content-addressing (D1).** Only if storage or dedup pressure
    justifies it: re-key rows by `tree_hash` and add reachability/GC over the
    commit DAG. Deferred; no work planned unless a concrete need appears.
 

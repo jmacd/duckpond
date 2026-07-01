@@ -9,7 +9,9 @@
 
 use steward::{Ship, get_tlog_path};
 use sync_store::tlog::hash_leaf;
-use sync_store::{Checkpoint, LogHash, TileLog, TransparencyLog, verify_inclusion};
+use sync_store::{
+    Checkpoint, LogHash, TileLog, TransparencyLog, verify_consistency, verify_inclusion,
+};
 use tempfile::tempdir;
 use tinyfs::async_helpers::convenience::create_file_path;
 use tlogfs::PondUserMetadata;
@@ -123,6 +125,117 @@ async fn tile_leaves_prove_inclusion_against_published_checkpoint() {
         assert!(
             verify_inclusion(l, i, leaves.len(), &proof, &cp.root),
             "leaf {i} should prove against the published checkpoint"
+        );
+    }
+}
+
+/// A dropped/lagging export (design Decision D5, Remaining work item 1) must
+/// self-heal on the next commit: the reconciliation drives the export from the
+/// committed leaf count, replaying every missing commit leaf, so even a fully
+/// deleted `{POND}/tlog` is rebuilt to match the control-table leaf sequence.
+#[tokio::test]
+async fn dropped_export_reconciles_to_committed_leaf_count_on_next_commit() {
+    let tmp = tempdir().expect("tempdir");
+    let pond = tmp.path().join("pond");
+    let mut ship = Ship::create_pond(&pond, "tlog-heal")
+        .await
+        .expect("create pond");
+
+    let tlog_dir = get_tlog_path(&pond);
+
+    // Three committed leaves, exported normally.
+    for i in 0..3 {
+        write_file(&mut ship, &format!("/a{i}.txt"), format!("v{i}").as_bytes()).await;
+    }
+    assert_eq!(
+        Checkpoint::read(&tlog_dir).unwrap().unwrap().size,
+        3,
+        "three leaves exported before the drop"
+    );
+
+    // Simulate the export lagging the committed log: wipe the entire tile
+    // directory (worst case -- crash/unwritable dir left nothing behind).
+    std::fs::remove_dir_all(&tlog_dir).expect("drop tlog export");
+    assert!(
+        Checkpoint::read(&tlog_dir).unwrap().is_none(),
+        "export is gone after the drop"
+    );
+
+    // The next commit must replay all four committed leaves, not just its own.
+    write_file(&mut ship, "/a3.txt", b"v3").await;
+
+    let cp = Checkpoint::read(&tlog_dir)
+        .expect("read checkpoint")
+        .expect("checkpoint rebuilt after the drop");
+    assert_eq!(
+        cp.size, 4,
+        "reconciliation replays every committed leaf, not just the newest"
+    );
+
+    // Root and every tile leaf must match the control-table leaf sequence.
+    let leaves = leaves_from_control_table(&ship, ship.last_write_seq()).await;
+    assert_eq!(leaves.len(), 4);
+    let mut reference = TransparencyLog::new();
+    for l in &leaves {
+        let _ = reference.append_leaf_hash(*l);
+    }
+    assert_eq!(
+        cp.root,
+        reference.root(),
+        "healed checkpoint root must equal the control-table leaf fold"
+    );
+
+    let tile_leaves = TileLog::new(&tlog_dir, cp.origin.clone())
+        .load_leaves()
+        .expect("load leaves from rebuilt tiles");
+    assert_eq!(tile_leaves, leaves, "rebuilt tile leaves match the log");
+}
+
+/// Every published checkpoint is recorded in the append-only history, and each
+/// one proves append-only consistency against the current tree (the key-free
+/// half of the transparency log, verifiable without any signing key).
+#[tokio::test]
+async fn checkpoint_history_records_and_proves_consistency() {
+    let tmp = tempdir().expect("tempdir");
+    let pond = tmp.path().join("pond");
+    let mut ship = Ship::create_pond(&pond, "tlog-history")
+        .await
+        .expect("create pond");
+    let tlog_dir = get_tlog_path(&pond);
+
+    for i in 0..4 {
+        write_file(&mut ship, &format!("/h{i}.txt"), format!("b{i}").as_bytes()).await;
+    }
+
+    // One history record per spine-bearing commit, sizes 1..=4 in order.
+    let history = Checkpoint::read_history(&tlog_dir).expect("read history");
+    assert_eq!(
+        history.iter().map(|c| c.size).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "every published checkpoint is recorded, in order"
+    );
+
+    // The newest history entry matches the live checkpoint.
+    let cp = Checkpoint::read(&tlog_dir).unwrap().unwrap();
+    assert_eq!(history.last().unwrap().root, cp.root);
+    assert_eq!(history.last().unwrap().size, cp.size);
+
+    // Every historical checkpoint is an append-only prefix of the current tree.
+    let leaves = TileLog::new(&tlog_dir, cp.origin.clone())
+        .load_leaves()
+        .expect("load leaves");
+    let mut tree = TransparencyLog::new();
+    for l in &leaves {
+        let _ = tree.append_leaf_hash(*l);
+    }
+    for h in &history {
+        let proof = tree
+            .consistency_proof(h.size as usize)
+            .expect("consistency proof");
+        assert!(
+            verify_consistency(h.size as usize, leaves.len(), &h.root, &cp.root, &proof),
+            "checkpoint at size {} must prove consistent with the current log",
+            h.size
         );
     }
 }

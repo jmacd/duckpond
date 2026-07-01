@@ -366,13 +366,15 @@ impl<'a> StewardTransactionGuard<'a> {
                     &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
 
-                // Materialize the transparency-log tiles and re-emit the
-                // checkpoint for this commit (design Decision D5).  This is a
-                // best-effort publishing step after the authoritative Delta
-                // commit: a failure here is logged but never unwinds the commit,
-                // matching the post-commit factory/remote model below.
-                if let Some(leaf) = tlog_leaf {
-                    self.materialize_tlog(pond_id, leaf);
+                // Materialize/reconcile the transparency-log tiles for this
+                // commit (design Decision D5).  This is a best-effort publishing
+                // step after the authoritative Delta commit: a failure here is
+                // logged but never unwinds the commit, matching the post-commit
+                // factory/remote model below.  It is driven by the committed
+                // leaf count, so a previously dropped append (crash, I/O error,
+                // unwritable `{POND}/tlog`) self-heals on the next commit.
+                if tlog_leaf.is_some() {
+                    self.materialize_tlog(pond_id).await;
                 }
 
                 // Mark as committed
@@ -486,24 +488,66 @@ impl<'a> StewardTransactionGuard<'a> {
         }))
     }
 
-    /// Append this commit's leaf to the pond's transparency-log tiles and
-    /// re-emit the checkpoint (design Decision D5).
+    /// Reconcile this pond's transparency-log tiles with the committed leaf
+    /// sequence and re-emit the checkpoint (design Decision D5).
     ///
-    /// The leaf is the RFC 6962 hash of `commit_object_bytes`
-    /// (`SHA-256(0x00 || commit.encode())`).  The authoritative leaf sequence is
-    /// the ordered `DataCommitted` records in the control table, each of which
-    /// stores this commit's spine; the tile log is a derived export of that
-    /// sequence.  This first cut appends one leaf per spine-bearing commit and
-    /// does not yet reconcile the export against the control-table leaf count, so
-    /// a dropped append leaves the export lagging until that reconciliation lands
-    /// (see the design doc's Remaining work item 1).  Failures are logged and
-    /// swallowed: the transparency log is a derived publishing artifact and must
-    /// not unwind an already-committed transaction.
-    fn materialize_tlog(&self, pond_id: uuid::Uuid, commit_object_bytes: Vec<u8>) {
+    /// The authoritative leaf sequence is the ordered `commit_object` bytes of
+    /// the spine-bearing `DataCommitted` records in the control table; the tile
+    /// log is a derived, re-materializable export of that sequence.  Rather than
+    /// trusting `checkpoint.size`, the writer drives its next leaf position from
+    /// the committed leaf count: it replays every committed leaf the export is
+    /// missing, in commit order, so the export leaf position ends equal to the
+    /// commit count.  A dropped append therefore self-heals on the next commit
+    /// (a crash between the control record and this call, an I/O error, or an
+    /// unwritable `{POND}/tlog` leaves the export lagging until it is replayed).
+    /// Tiles ahead of the committed count are harmless and deterministically
+    /// re-derived, so the reconciliation only ever extends a lagging export.
+    ///
+    /// Failures are logged and swallowed: the transparency log is a derived
+    /// publishing artifact and must not unwind an already-committed transaction.
+    async fn materialize_tlog(&self, pond_id: uuid::Uuid) {
         let dir = crate::get_tlog_path(&self.pond_path);
         let origin = format!("duckpond/{pond_id}");
         let log = sync_store::TileLog::new(dir, origin);
-        match log.append_leaf_data([commit_object_bytes]) {
+
+        // Authoritative leaf sequence: spine-bearing commit objects in order.
+        let leaves = match self.control_table.commit_objects_in_order().await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("failed to read transparency-log leaf sequence: {e}");
+                return;
+            }
+        };
+
+        // Current export position from the published checkpoint.
+        let exported = match log.size() {
+            Ok(n) => n as usize,
+            Err(e) => {
+                error!("failed to read transparency-log checkpoint size: {e}");
+                return;
+            }
+        };
+
+        if exported >= leaves.len() {
+            // Export is level with (or ahead of) the committed log; nothing to
+            // replay.  An over-long export is harmless and re-derivable.
+            return;
+        }
+
+        // Decode the missing tail and replay it, extending the export until its
+        // leaf position equals the committed commit count.
+        let mut missing = Vec::with_capacity(leaves.len() - exported);
+        for hex in &leaves[exported..] {
+            match hex::decode(hex) {
+                Ok(bytes) => missing.push(bytes),
+                Err(e) => {
+                    error!("transparency-log leaf is not valid hex: {e}");
+                    return;
+                }
+            }
+        }
+
+        match log.append_leaf_data(missing) {
             Ok(checkpoint) => debug!(
                 "transparency log checkpoint emitted (size={}, root={})",
                 checkpoint.size,

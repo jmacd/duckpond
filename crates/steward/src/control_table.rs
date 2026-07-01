@@ -722,6 +722,18 @@ impl ControlTable {
             .map_err(map_err)
     }
 
+    /// The authoritative transparency-log leaf sequence for the local pond: the
+    /// encoded commit-object bytes (hex) of every spine-bearing `DataCommitted`
+    /// record, in commit order.  The tile export is reconciled against this
+    /// sequence (design Decision D5); see [`crate::StewardTransactionGuard`]'s
+    /// `materialize_tlog`.
+    pub async fn commit_objects_in_order(&self) -> Result<Vec<String>, StewardError> {
+        self.inner
+            .commit_objects_in_order(self.pond_id_uuid())
+            .await
+            .map_err(map_err)
+    }
+
     /// Mutable view of the underlying `sync_steward::ControlTable`.
     pub fn inner_mut(&mut self) -> &mut sync_steward::ControlTable {
         &mut self.inner

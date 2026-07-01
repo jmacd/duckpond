@@ -778,6 +778,30 @@ impl ControlTable {
         Ok(meta.parent_commit_hash)
     }
 
+    /// The authoritative transparency-log leaf sequence for `pond_id`: the
+    /// encoded commit-object bytes (hex) of every spine-bearing `DataCommitted`
+    /// record, in commit order (`txn_seq` ascending).  Leaf `i` is the `i`-th
+    /// spine-bearing commit; records that did not stamp a spine are skipped, so
+    /// this is a dense sequence with no gaps.
+    ///
+    /// This is the source of truth the transparency-log tile export is
+    /// reconciled against (design Decision D5): the export leaf count must never
+    /// exceed this sequence's length, and any shortfall is replayed from it.
+    pub async fn commit_objects_in_order(&self, pond_id: Uuid) -> Result<Vec<String>> {
+        let all = self.all_records_for(pond_id).await?;
+        let mut out = Vec::new();
+        for rec in all {
+            if rec.record_kind != RecordKind::DataCommitted {
+                continue;
+            }
+            let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+            if let Some(obj) = meta.commit_object {
+                out.push(obj);
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolve the encoded commit object bytes recorded at `(pond_id, txn_seq)`.
     /// Returns the `metadata.commit_object` hex of the `DataCommitted` record at
     /// that seq, or `None` if no such commit exists or it did not stamp a spine.
