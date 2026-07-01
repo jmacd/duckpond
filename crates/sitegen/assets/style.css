@@ -532,7 +532,8 @@ tr:hover td {
   color: #ffffff;
 }
 
-.download-csv {
+.download-csv,
+.explore-data {
   padding: 0.4rem 0.9rem;
   border: 1px solid var(--accent-light);
   background: transparent;
@@ -544,13 +545,15 @@ tr:hover td {
   transition: all 0.15s;
 }
 
-.download-csv:hover:not(:disabled) {
+.download-csv:hover:not(:disabled),
+.explore-data:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
 }
 
-.download-csv:disabled {
+.download-csv:disabled,
+.explore-data:disabled {
   opacity: 0.3;
   cursor: default;
   border-color: var(--border);
@@ -823,13 +826,16 @@ tr:hover td {
   line-height: 1;
 }
 
-/* While a chart is full screen, lift its <main> out of the grid and let it
-   cover the viewport (over the sidebar).  The chart re-renders to fit. */
-body.chart-fullscreen {
+/* While a chart or the explorer is full screen, lift its <main> out of the
+   grid and let it cover the viewport (over the sidebar).  The view re-renders
+   to fit. */
+body.chart-fullscreen,
+body.explore-fullscreen {
   overflow: hidden;
 }
 
-body.chart-fullscreen .content-page {
+body.chart-fullscreen .content-page,
+body.explore-fullscreen .content-page {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -850,8 +856,17 @@ body.chart-fullscreen .blog-post {
    full overlay so the chart can use the entire width (and, via its computed
    height, the entire height). */
 body.chart-fullscreen .blog-post,
-body.chart-fullscreen .blog-post-content {
+body.chart-fullscreen .blog-post-content,
+body.explore-fullscreen .blog-post,
+body.explore-fullscreen .blog-post-content {
   max-width: none;
+}
+
+/* In full screen, let the explorer's result grid use the available height
+   instead of its compact inline cap. */
+body.explore-fullscreen .explore-results {
+  max-height: calc(100vh - 18rem);
+  overflow-y: auto;
 }
 
 .blog-post {
@@ -1264,4 +1279,308 @@ h3:hover .anchor {
   color: var(--fg-muted);
   font-style: italic;
   font-size: 0.85rem;
+}
+
+/* ── Data explorer (explore.js) ─────────────────────────────────────────── */
+
+#explore {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.explore-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.explore-window {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
+.explore-window-label {
+  font-weight: 500;
+  color: var(--fg-secondary);
+}
+
+.explore-window-input {
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  font-size: 0.78rem;
+}
+
+.explore-window-full {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.explore-window-full:hover {
+  background: var(--accent-wash);
+}
+
+.explore-window-hint {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.explore-dataset {
+  margin-left: 0.25rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+}
+
+.explore-schema {
+  color: var(--fg-muted);
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.explore-sql {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  resize: vertical;
+}
+
+.explore-buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.explore-run,
+.explore-download,
+.explore-download-json,
+.explore-download-parquet {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.explore-run:disabled,
+.explore-download:disabled,
+.explore-download-json:disabled,
+.explore-download-parquet:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Clickable column browser: chips that insert a column name into the editor. */
+.explore-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0;
+}
+
+.explore-col-chip {
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.explore-col-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Canned example queries for the current dataset. */
+.explore-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.explore-example {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.explore-example:hover {
+  background: var(--accent-wash);
+}
+
+/* Result pager. */
+.explore-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.explore-prev,
+.explore-next {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.explore-prev:disabled,
+.explore-next:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.explore-page-info {
+  color: var(--fg-muted);
+  font-size: 0.82rem;
+}
+
+.explore-status {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.explore-error {
+  color: #b91c1c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.explore-results {
+  overflow-x: auto;
+}
+
+/* View switcher (Table / Chart) for the result area. */
+.explore-views {
+  display: flex;
+  gap: 0;
+  margin: 0.5rem 0;
+}
+
+.explore-view-table,
+.explore-view-chart {
+  padding: 0.25rem 0.8rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.explore-view-table {
+  border-radius: 6px 0 0 6px;
+}
+
+.explore-view-chart {
+  border-radius: 0 6px 6px 0;
+  border-left: none;
+}
+
+.explore-view-table.active,
+.explore-view-chart.active {
+  background: var(--accent-wash);
+}
+
+/* Vega-Lite chart render target. */
+.explore-chart {
+  width: 100%;
+  min-height: 360px;
+}
+
+/* Editable Vega-Lite spec panel, shown beneath the chart in chart view. */
+.explore-spec {
+  margin-top: 0.75rem;
+}
+
+.explore-spec-label {
+  font-size: 0.8rem;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+
+.explore-spec-editor {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  resize: vertical;
+}
+
+.explore-spec-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.explore-spec-apply,
+.explore-spec-reset {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+table.explore-grid {
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  width: 100%;
+}
+
+table.explore-grid th,
+table.explore-grid td {
+  border: 1px solid var(--border-light);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+table.explore-grid th {
+  background: var(--bg-card);
+  color: var(--accent);
+  position: sticky;
+  top: 0;
 }

@@ -786,10 +786,20 @@ impl Ship {
             None
         };
 
-        // Maintain data table (checkpoint + vacuum only; compaction handled above)
+        // Maintain data table (checkpoint + vacuum only; compaction handled
+        // above).  Default retention is None (the table's 30-day default),
+        // safe for replicated ponds whose commit log feeds remote diffing.
+        // High-churn, fully-pushed instances (selfmon) can bound the data
+        // _delta_log by setting maintenance.data_log_retention_minutes.
+        let data_retention = self
+            .control_table
+            .get_setting(maintenance::KEY_DATA_LOG_RETENTION_MINUTES)
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|m| *m >= 0)
+            .map(chrono::Duration::minutes);
         let data_table = self.data_persistence.table().clone();
         let (new_data_table, mut data_result) =
-            maintenance::maintain_table(data_table, "data", force, false, None).await;
+            maintenance::maintain_table(data_table, "data", force, false, data_retention).await;
         self.data_persistence.set_table(new_data_table);
         if let Some(oc) = compact_outcome {
             data_result.compacted = oc.had_data;
@@ -801,15 +811,19 @@ impl Ship {
         // Maintain control table (best-effort optimize allowed; never pushed).
         // It is never replicated, so its delta log is cleaned aggressively to a
         // short retention rather than the 30-day table default.
+        let control_minutes = self
+            .control_table
+            .get_setting(maintenance::KEY_CONTROL_LOG_RETENTION_MINUTES)
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|m| *m >= 0)
+            .unwrap_or(maintenance::CONTROL_LOG_RETENTION_MINUTES);
         let control_table = self.control_table.table().clone();
         let (new_control_table, control_result) = maintenance::maintain_table(
             control_table,
             "control",
             force,
             compact,
-            Some(chrono::Duration::minutes(
-                maintenance::CONTROL_LOG_RETENTION_MINUTES,
-            )),
+            Some(chrono::Duration::minutes(control_minutes)),
         )
         .await;
         self.control_table.set_table(new_control_table);

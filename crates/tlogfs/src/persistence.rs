@@ -1982,8 +1982,15 @@ impl InnerState {
 
         // Use FairSpillPool instead of GreedyMemoryPool: divides memory fairly
         // among all spillable consumers, triggering spill-to-disk instead of OOM
-        // when any consumer exceeds its fair share.
-        let pool = Arc::new(FairSpillPool::new(512 * 1024 * 1024));
+        // when any consumer exceeds its fair share.  POND_MEMORY_LIMIT_MB lets an
+        // operator raise the cap on roomy hosts or lower it on small boards like
+        // the 2GB BeaglePlay; unset or unparseable falls back to 512 MiB.
+        let pool_mb = std::env::var("POND_MEMORY_LIMIT_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|m| *m >= 64)
+            .unwrap_or(512);
+        let pool = Arc::new(FairSpillPool::new(pool_mb * 1024 * 1024));
 
         let runtime_env = RuntimeEnvBuilder::new()
             .with_cache_manager(cache_config)
@@ -2034,7 +2041,7 @@ impl InnerState {
         ));
 
         debug!(
-            "[LIST] ENABLED DataFusion: FairSpillPool 512 MiB, pushdown_filters, reorder_filters, split_file_groups_by_statistics, metadata_size_hint=64KB, parallelism=2"
+            "[LIST] ENABLED DataFusion: FairSpillPool {pool_mb} MiB, pushdown_filters, reorder_filters, split_file_groups_by_statistics, metadata_size_hint=64KB, parallelism=2"
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries

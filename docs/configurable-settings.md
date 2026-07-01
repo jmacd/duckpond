@@ -69,9 +69,9 @@ To promote a hardcoded constant (or a CLI-only flag) to a control-table setting:
 
 ### Worked example: control-log retention
 
-The control table's `_delta_log` cleanup retention is currently the constant
+The control table's `_delta_log` cleanup retention is the constant
 `maintenance::CONTROL_LOG_RETENTION_MINUTES = 5`
-(`crates/steward/src/maintenance.rs`). To make it operator-tunable:
+(`crates/steward/src/maintenance.rs`), now operator-tunable:
 
 ```text
 # one-time, persists across ticks for this instance:
@@ -90,12 +90,37 @@ let minutes = self
 ```
 
 and pass `Some(chrono::Duration::minutes(minutes))` to `maintain_table` for the
-control table. The replicated data table keeps `None` (its 30-day table default)
-because its commit log may still be needed for remote version diffing.
+control table. Both the control and data retentions are now resolved this way in
+`Ship::maintain` (`crates/steward/src/ship.rs`), reading
+`maintenance::KEY_CONTROL_LOG_RETENTION_MINUTES` and
+`maintenance::KEY_DATA_LOG_RETENTION_MINUTES`.
 
 This fits the "abuse selfmon to harden maintenance" workflow: an operator can
 dial the retention down on the `watershop-selfmon` instance to stress the
 checkpoint-aligned cleanup without touching code or the deployed image.
+
+### Worked example: data-log retention
+
+The data table's `_delta_log` defaults to `None` (the table's 30-day default)
+because a replicated pond's commit log may still feed remote version diffing.
+On a high-churn, fully-pushed instance (selfmon commits every minute) that log
+grows until resolving the table external-sorts weeks of commits and OOMs. Bound
+it explicitly:
+
+```text
+# one day; safe because selfmon pushes every tick:
+pond config set maintenance.data_log_retention_minutes 1440
+```
+
+Unset keeps the 30-day default, so replicated producer ponds are unchanged.
+
+### Memory pool size
+
+The DataFusion `FairSpillPool` is sized by `POND_MEMORY_LIMIT_MB`
+(`crates/tlogfs/src/persistence.rs`), default 512 MiB. Raise it on roomy hosts;
+lower it (min 64) on small boards like the 2 GB BeaglePlay to force spill-to-disk
+within the RAM budget. This is an env var, not a control-table setting, because
+the pool is built below the steward layer at pond open.
 
 ## Candidates to migrate
 
@@ -104,7 +129,9 @@ control-table-managed defaults, once the read path above exists:
 
 | Knob | Today | Location |
 |------|-------|----------|
-| Control-log retention | `const` 5 min | `steward/src/maintenance.rs` |
+| Control-log retention | setting, default 5 min | `steward/src/maintenance.rs` |
+| Data-log retention | setting, default 30 days | `steward/src/maintenance.rs` |
+| Memory pool size | env `POND_MEMORY_LIMIT_MB`, default 512 MiB | `tlogfs/src/persistence.rs` |
 | Checkpoint interval | `const CHECKPOINT_INTERVAL = 10` | `steward/src/maintenance.rs` |
 | Vacuum interval | `const VACUUM_INTERVAL = 10` | `steward/src/maintenance.rs` |
 | Compact target size | `const COMPACT_TARGET_SIZE = 128 MiB` | `steward/src/maintenance.rs` |

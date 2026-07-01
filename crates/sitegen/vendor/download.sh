@@ -32,8 +32,9 @@ npm init -y --silent > /dev/null 2>&1 || true
 echo "Installing packages..."
 npm install --save \
     @duckdb/duckdb-wasm@1.29.0 \
-    @observablehq/plot@0.6 \
-    d3@7 \
+    vega@5 \
+    vega-lite@5 \
+    vega-embed@6 \
     esbuild \
     > /dev/null 2>&1
 
@@ -48,13 +49,16 @@ export * from "@duckdb/duckdb-wasm";
 EOF
 npx esbuild _duckdb.mjs --bundle --format=esm --outfile="${DIST_DIR}/duckdb-browser.mjs" --minify 2>&1
 
-# -- Observable Plot + D3: bundle into a single file --
-echo "Bundling Observable Plot + D3..."
-cat > _plot.mjs << 'EOF'
-export * as Plot from "@observablehq/plot";
-export * as d3 from "d3";
+# -- Vega / Vega-Lite / Vega-Embed: the single charting bundle --
+# vega-embed pulls in vega + vega-lite. Every chart asset (explorer, chart
+# pages, overlay analysis) renders through this bundle; the assets lazy-import
+# it so it never affects initial page load. This is the all-in Vega-Lite
+# charting path (Observable Plot and D3 were dropped).
+echo "Bundling Vega-Lite (vega-embed)..."
+cat > _vega.mjs << 'EOF'
+export { default as vegaEmbed } from "vega-embed";
 EOF
-npx esbuild _plot.mjs --bundle --format=esm --outfile="${DIST_DIR}/plot-d3-bundle.mjs" --minify 2>&1
+npx esbuild _vega.mjs --bundle --format=esm --outfile="${DIST_DIR}/vega-bundle.mjs" --minify 2>&1
 
 # -- Cleanup work directory --
 cd "${SCRIPT_DIR}"

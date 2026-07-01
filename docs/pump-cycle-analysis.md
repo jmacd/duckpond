@@ -22,8 +22,8 @@ Parquet export (pond cat > file)
   v
 Static HTML page (sitegen) + overlay.js
   |-- DuckDB-WASM: loads parquet, runs SQL filters client-side
-  |-- D3: overview chart with zoom/brush interaction
-  |-- Observable Plot: 7 analysis charts, re-rendered on brush
+  |-- Vega-Lite: overview chart with brush selection + 7 analysis charts,
+  |              re-rendered on brush
 ```
 
 ### Data flow
@@ -34,7 +34,7 @@ Static HTML page (sitegen) + overlay.js
    42m depth threshold and compute aligned datasets
 4. **Export**: `pond cat file:///analysis/pump-cycles > all.parquet`
 5. **Visualization**: Browser loads parquet via DuckDB-WASM, renders
-   interactive charts with D3 brush for time-range filtering
+   interactive charts with a Vega-Lite brush for time-range filtering
 
 ## Pump Cycle Detection
 
@@ -140,7 +140,7 @@ duty cycle approaches 1.
 
 ### 1. Well Depth Timeline (overview)
 
-D3 chart showing 4 years of pump cycles as vertical bars from static
+Vega-Lite chart showing 4 years of pump cycles as vertical bars from static
 water level down to minimum depth, colored by month. Supports:
 
 - **Brush**: click+drag to select a time range
@@ -198,15 +198,17 @@ reduced well yield.
 
 ## Client-Side Technology
 
-`overlay.js` loads three libraries via CDN:
+`overlay.js` loads its rendering libraries from the site's vendored bundles
+(no CDN, no Node build step at page load):
 
 - **DuckDB-WASM** (1.29.0): Parquet loading and SQL queries in-browser
-- **D3** (v7): Overview chart rendering and brush/zoom interaction
-- **Observable Plot** (0.6): Declarative chart creation for analysis views
+- **Vega-Lite** (via the vendored `vega-bundle.mjs`): the overview chart's
+  interval-selection brush and all declarative analysis charts
 
-Data is loaded once into DuckDB-WASM. The D3 brush filters cycle-summary
-rows by timestamp, collects matching `pump_event_id`s, filters pump-cycles
-rows, and re-renders all Observable Plot charts. Debounced at 100ms.
+Data is loaded once into DuckDB-WASM. The Vega-Lite interval selection on the
+overview filters cycle-summary rows by timestamp, collects matching
+`pump_event_id`s, filters pump-cycles rows, and re-renders all analysis charts.
+Debounced at 100ms.
 
 Performance: ~800K pump-cycle rows and ~3,400 summary rows. Filtering
 in JavaScript is instantaneous; SVG rendering with thousands of lines

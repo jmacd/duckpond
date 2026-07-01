@@ -616,7 +616,9 @@ dist/
 │   └── ...
 ```
 
-Vendor libraries (DuckDB-WASM, charting lib) are loaded via CDN `<script>` tags hardcoded in the Maud layout:
+Vendor libraries (DuckDB-WASM, Vega-Lite) are bundled into the binary and
+written to the output `vendor/` directory, then loaded via `<script>` tags in
+the Maud layout:
 
 ```rust
 fn data_layout(ctx: &LayoutContext) -> Markup {
@@ -624,8 +626,8 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
         head {
             // ...
             link rel="stylesheet" href="/style.css";
-            script src="https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm/..." {}
-            script src="https://cdn.jsdelivr.net/npm/@observablehq/plot/..." {}
+            script src="/vendor/duckdb-browser.mjs" type="module" {}
+            script src="/vendor/vega-bundle.mjs" type="module" {}
         }
         body {
             // ...
@@ -635,7 +637,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
 }
 ```
 
-**Why**: The site needs two vendor libs (loaded pre-built from CDN) and ~100 lines of glue JS. No import trees, no transpilation, no tree-shaking needed. Zero JS toolchain keeps the build pure Rust.
+**Why**: The site needs two vendor libs (bundled into the binary and emitted to `vendor/`) and ~100 lines of glue JS. No import trees, no transpilation, no tree-shaking needed. Zero JS toolchain keeps the build pure Rust.
 
 ---
 

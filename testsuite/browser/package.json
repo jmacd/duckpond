@@ -8,6 +8,7 @@
     "test": "bash test.sh",
     "test:210": "node tests/210-browser-page-validation.mjs",
     "test:211": "node tests/211-browser-parquet-loading.mjs",
+    "test:213": "node tests/213-browser-vega-render.mjs",
     "test:305": "node tests/305-browser-overlay-chart.mjs"
   },
   "devDependencies": {
