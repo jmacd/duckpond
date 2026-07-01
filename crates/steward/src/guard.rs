@@ -490,11 +490,15 @@ impl<'a> StewardTransactionGuard<'a> {
     /// re-emit the checkpoint (design Decision D5).
     ///
     /// The leaf is the RFC 6962 hash of `commit_object_bytes`
-    /// (`SHA-256(0x00 || commit.encode())`).  The tile log's own leaf store is
-    /// the source of truth for the leaf sequence, so appending one leaf per
-    /// spine-bearing commit keeps the log in step with the commit spine.
-    /// Failures are logged and swallowed: the transparency log is a derived
-    /// publishing artifact and must not unwind an already-committed transaction.
+    /// (`SHA-256(0x00 || commit.encode())`).  The authoritative leaf sequence is
+    /// the ordered `DataCommitted` records in the control table, each of which
+    /// stores this commit's spine; the tile log is a derived export of that
+    /// sequence.  This first cut appends one leaf per spine-bearing commit and
+    /// does not yet reconcile the export against the control-table leaf count, so
+    /// a dropped append leaves the export lagging until that reconciliation lands
+    /// (see the design doc's Remaining work item 1).  Failures are logged and
+    /// swallowed: the transparency log is a derived publishing artifact and must
+    /// not unwind an already-committed transaction.
     fn materialize_tlog(&self, pond_id: uuid::Uuid, commit_object_bytes: Vec<u8>) {
         let dir = crate::get_tlog_path(&self.pond_path);
         let origin = format!("duckpond/{pond_id}");

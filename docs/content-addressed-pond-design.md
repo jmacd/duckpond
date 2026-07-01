@@ -274,8 +274,13 @@ adds three things over that existing chain:
    consistency proofs instead of an O(n) chain walk.
 3. **Checkpoints.** After each commit the log materializes its proof index as
    immutable C2SP `tlog-tiles` and emits a `tlog-checkpoint` note body over the
-   new tree (Decision D5). The checkpoint is *unsigned* for now: signing is the
-   one remaining deferral (the trust root is a signing key, Section 10).
+   new tree (Decision D5). The authoritative leaf sequence is the ordered
+   `DataCommitted` records in the control table (each stores the commit object,
+   whose SHA-256 leaf hash is the log leaf); the tiles and checkpoint are a
+   derived export of that log, re-materializable at any time and reconciled to
+   the control-table leaf count before each extend. The checkpoint is *unsigned*
+   for now: signing is the one remaining deferral (the trust root is a signing
+   key, Section 10).
 
 The seam between the two hash functions is exactly the leaf: the leaf payload
 is the BLAKE3 `root_tree_hash` plus provenance; the log hashes that leaf's
@@ -738,10 +743,16 @@ the node kind:
   amortized hashing plus an `O(log n)` tree head per commit) and never reloads
   the existing leaves, while a whole-tree `O(n)` rebuilder is retained for
   building or repairing a log; both produce byte-identical tiles, and full tiles
-  are written exactly once. The tile store's own level-0 tiles are the source of
-  truth for the leaf sequence; a first cut appends one leaf per commit and defers
-  crash-gap backfill (Section 7; `sync-store/tlog/tiles.rs`,
-  `sync-store/tlog/checkpoint.rs`; materialized in `steward/guard.rs`).
+  are written exactly once. The authoritative leaf sequence is **not** the tile
+  files: it is the ordered `DataCommitted` records in the control table, each of
+  which stores the commit spine (`commit_object` -> leaf). The C2SP tiles and
+  checkpoint are a **derived, re-materializable export** of that log for external
+  witnesses, published after the commit as a best-effort step that must never
+  unwind a landed write. Because the control table is the source of truth, the
+  export can be recomputed at any time; the first cut appends one leaf per commit
+  and reconciles the export to the control-table leaf count before extending it
+  (Section 7; `sync-store/tlog/tiles.rs`, `sync-store/tlog/checkpoint.rs`;
+  materialized in `steward/guard.rs`).
 
 ### Open
 
@@ -803,8 +814,10 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
 - [x] **Checkpoint every commit; publish as unsigned C2SP tiles (D5).** Each
   spine-bearing commit materializes the SHA-256 log as immutable C2SP
   `tlog-tiles` under `{POND}/tlog` and re-emits an unsigned `tlog-checkpoint`
-  note body; leaves prove inclusion against the published root. Signing stays
-  deferred (Section 10). (`sync-store/tlog/tiles.rs`,
+  note body; leaves prove inclusion against the published root. The tiles are a
+  derived export of the authoritative control-table leaf log, not a second
+  source of truth. Signing stays deferred (Section 10), and export/leaf-log
+  reconciliation is still open (Remaining work item 1). (`sync-store/tlog/tiles.rs`,
   `sync-store/tlog/checkpoint.rs`, `steward/guard.rs::materialize_tlog`,
   `steward/tests/tlog_materialize_test.rs`.)
 - [ ] **Writable fork (D9, open).** Consumers are read-only mirrors for now
@@ -818,17 +831,21 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
 Concrete threads left to pick up, roughly in dependency order. Each names the
 seam to start from.
 
-1. **Crash-gap backfill for the tlog (Section 7, D5).** The writer currently
-   appends exactly one leaf per spine-bearing commit and assumes the log is never
-   behind the commit history. If the process dies after the Delta commit but
-   before `materialize_tlog`, the tlog is missing leaves for those commits. Close
-   the gap by reconciling on startup or before append: compare the checkpoint
-   `size` against the committed commit-spine count and replay the missing commit
-   leaves (they are recoverable from the commit records in `seq` order) before
-   emitting the next checkpoint. Loading tiles should size widths from the
-   checkpoint `size` (`old >> 8L`), not from filenames, so partial tiles ahead of
-   the checkpoint self-heal. Start: `steward/guard.rs::materialize_tlog`,
-   `sync-store/tlog/tiles.rs` (`TileLog::size`, `TileSession::open`).
+1. **Reconcile the tile export to the control-table leaf log (Section 7, D5).**
+   The authoritative leaf sequence is the ordered `DataCommitted` records; the
+   C2SP tiles are a derived export published best-effort after each commit, so
+   the export can legitimately lag the commit history (a crash between the
+   control record and `materialize_tlog`, an I/O error, or an unwritable
+   `{POND}/tlog`). The writer must therefore drive its next leaf position from
+   the committed leaf count, not from `checkpoint.size`: before extending,
+   compare the checkpoint against the control-table leaf count and replay any
+   missing commit leaves (recoverable from the commit records in `seq` order) so
+   leaf position stays equal to commit index. Tiles ahead of the checkpoint are
+   harmless and deterministically re-derived; only the export lagging the log
+   matters, and it self-heals. This is deterministic reconciliation of a cache,
+   not recovery of unique data. Start: `steward/guard.rs::materialize_tlog`,
+   `sync-store/tlog/tiles.rs` (`TileLog::size`, `TileSession::open`),
+   `steward/control_table.rs` (`DataCommitted` / commit-spine reads).
 2. **Signing / checkpoint witnessing (Section 10).** The checkpoint note body is
    already the exact byte string a signer will sign; add key custody and a
    signed-note wrapper (C2SP signed-note) plus optional witness co-signing. This
