@@ -390,9 +390,25 @@ hashing as it goes so a value can never be stored under a key it does not equal;
 pull's tree descent finds them by hash in the blob store when they are not an
 inline row and re-externalizes locally. A multi-gigabyte blob therefore never
 bloats the remote Delta table and the producer side never collects it into one
-`Vec<u8>`. The full closure is complete and content-addressed. (The consumer's
-local rebuild still buffers each version blob; fully streaming ingest is a later
-refinement.)
+`Vec<u8>`. The full closure is complete and content-addressed.
+
+**Remaining D7 work -- consumer-side streaming rebuild.** The producer (push)
+side is fully streaming, but the *consumer* still buffers the entire object
+graph in memory. `fetch_object_graph` collects every reachable object into
+`FetchedGraph { objects: BTreeMap<ObjectHash, FetchedObject>, bytes:
+BTreeMap<ObjectHash, Vec<u8>> }`, with each leaf held as `FetchedObject::Blob(
+Vec<u8>)` and each series as `FetchedObject::Series(Vec<ObjectHash>)` whose
+version blobs are likewise buffered. `rebuild_pond` / `import_pond` then plan a
+node diff and hand `apply_ops` a `NodeOp` carrying `versions: Vec<Vec<u8>>` --
+so a multi-gigabyte pond is materialized in RAM twice (fetch, then apply). The
+fix is to stream each large blob directly from the remote blob store into the
+local `_blobs` store by hash (never through `Vec<u8>`), and to feed `apply_ops`
+an async reader per version instead of owned bytes. Large external blobs are the
+priority; small inline objects (trees, commits, manifests, small files) are
+bounded and may stay buffered. This is the last open D7 item.
+(See `crates/steward/src/content_pull.rs`: `FetchedGraph` ~47-65, `fetch_blob`
+~222-252, `FetchedObject` ~38-44, `NodeOp::Series.versions` ~336, `rebuild_pond`
+~382, `import_pond` ~453, `apply_ops`/`plan_series_versions` ~589+/~740.)
 
 ### 8.5 Pull and consumer rebuild (Fork 2)
 
