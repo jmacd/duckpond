@@ -755,6 +755,14 @@ the node kind:
 Status of the design as built, newest first. "Done" means implemented, tested,
 and folded into the presubmit suite; "Open" tracks the deferred decisions above.
 
+- [x] **Incremental O(log n) tile writer (D5).** Appending a leaf folds only the
+  touched right spine -- each leaf carries up the completed-subtree chain (`O(1)`
+  amortized hashing) and the tree head recomputes in `O(log n)`, never reloading
+  existing leaves. Full tiles are written exactly once; the whole-tree `O(n)`
+  `materialize` is retained as a (re)builder and test oracle, and both paths
+  produce byte-identical tiles. (`sync-store/tlog/tiles.rs`: `TileSession`,
+  `append_leaf_hashes`; equivalence test
+  `incremental_is_byte_identical_to_materialize_across_splits`.)
 - [x] **Consumer-side streaming rebuild (D7, complete).** The fetch walk records
   large blobs by hash without downloading them, and rebuild streams each one from
   the remote blob store straight into the local writer, re-hashing to verify.
@@ -804,6 +812,37 @@ and folded into the presubmit suite; "Open" tracks the deferred decisions above.
 - [ ] **At-rest content-addressing (D1, deferred).** Rows stay keyed by
   `(pond_id, node_id, version)`; keying by `tree_hash` remains a possible later
   optimization (Section 5.2).
+
+### Remaining work (next session)
+
+Concrete threads left to pick up, roughly in dependency order. Each names the
+seam to start from.
+
+1. **Crash-gap backfill for the tlog (Section 7, D5).** The writer currently
+   appends exactly one leaf per spine-bearing commit and assumes the log is never
+   behind the commit history. If the process dies after the Delta commit but
+   before `materialize_tlog`, the tlog is missing leaves for those commits. Close
+   the gap by reconciling on startup or before append: compare the checkpoint
+   `size` against the committed commit-spine count and replay the missing commit
+   leaves (they are recoverable from the commit records in `seq` order) before
+   emitting the next checkpoint. Loading tiles should size widths from the
+   checkpoint `size` (`old >> 8L`), not from filenames, so partial tiles ahead of
+   the checkpoint self-heal. Start: `steward/guard.rs::materialize_tlog`,
+   `sync-store/tlog/tiles.rs` (`TileLog::size`, `TileSession::open`).
+2. **Signing / checkpoint witnessing (Section 10).** The checkpoint note body is
+   already the exact byte string a signer will sign; add key custody and a
+   signed-note wrapper (C2SP signed-note) plus optional witness co-signing. This
+   is the log's trust root and the last deferral before the transparency log is
+   externally verifiable. Start: `sync-store/tlog/checkpoint.rs` (`Checkpoint`
+   encode/parse), Section 7 point 3.
+3. **Writable fork (D9).** Let a consumer land its own commits on a pulled base
+   instead of being a pure read-only mirror: mint local commits whose parent is
+   the pulled tip, keep the source `pond_id` distinct from the fork's, and define
+   fast-forward push-pull between them. Start: Section 8.5.3,
+   `steward/content_pull.rs`.
+4. **At-rest content-addressing (D1).** Only if storage or dedup pressure
+   justifies it: re-key rows by `tree_hash` and add reachability/GC over the
+   commit DAG. Deferred; no work planned unless a concrete need appears.
 
 ---
 
