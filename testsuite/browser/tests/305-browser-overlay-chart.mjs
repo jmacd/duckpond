@@ -166,6 +166,60 @@ async function testPage(browser, pagePath) {
   );
   check(headerCount > 0, `chart headers present (${headerCount})`);
 
+  // ── "Explore this data" pivot ─────────────────────────────────────────────
+  // The overlay chart offers a cross-link to the data explorer when sitegen
+  // emitted a data-explore-url. Verify the button exists, then click it and
+  // confirm the explorer registers this page's two schemas as separate
+  // datasets (pump_cycles + cycle_summary) rather than a single merged view.
+  const hasExploreUrl = await tab.evaluate(() => {
+    const el = document.getElementById("overlay-chart");
+    return Boolean(el && el.dataset.exploreUrl);
+  });
+  if (hasExploreUrl) {
+    const exploreBtn = await tab.$("#overlay-chart button.explore-data");
+    check(Boolean(exploreBtn), `"Explore this data" button present`);
+    if (exploreBtn) {
+      await Promise.all([
+        tab.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
+        exploreBtn.click(),
+      ]);
+      // Each overlay page is scoped to its own capture ($0), so it hands the
+      // explorer exactly the dataset(s) it loaded: pump_cycles or cycle_summary
+      // (the multi-dataset handoff supports 1..N). Confirm the handoff arrived
+      // via the URL hash and that the explorer prepended it to the picker as
+      // the selected dataset.
+      const handed = await tab.evaluate(() => {
+        const p = new URLSearchParams(location.hash.replace(/^#/, ""));
+        try {
+          return JSON.parse(p.get("datasets") || "[]");
+        } catch (e) {
+          return [];
+        }
+      });
+      check(
+        Array.isArray(handed) &&
+          handed.length > 0 &&
+          handed.every((d) => ["pump_cycles", "cycle_summary"].includes(d.table)),
+        `handoff carries page dataset(s) (${handed.map((d) => d.table).join(", ")})`
+      );
+      await tab
+        .waitForSelector("select.explore-dataset option", { timeout: 120000 })
+        .catch(() => null);
+      const picker = await tab.evaluate(() => {
+        const sel = document.querySelector("select.explore-dataset");
+        const options = Array.from(sel ? sel.options : []).map((o) => o.textContent);
+        const selected = sel ? sel.options[sel.selectedIndex]?.textContent : null;
+        return { options, selected };
+      });
+      check(
+        /pump cycles|cycle summary/i.test(picker.selected || ""),
+        `explorer selects the handed dataset (${picker.selected})`
+      );
+    }
+  } else {
+    console.log("  [INFO] no data-explore-url on overlay chart; skipping pivot");
+  }
+
   // Log console output for debugging
   const overlayLogs = consoleLogs.filter((l) => l.includes("overlay.js"));
   if (overlayLogs.length > 0) {
