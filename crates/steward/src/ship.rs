@@ -241,17 +241,19 @@ impl Ship {
 
     /// Create a fresh pond as a replica with the given `pond_id`.
     ///
-    /// Convenience wrapper around [`Ship::create_pond_for_restoration`]
-    /// that synthesizes default birth metadata (timestamp = now,
-    /// hostname = `"unknown"`, username from `$USER`/`$USERNAME` or
-    /// `"unknown"`).  Birth metadata on a replica is informational
-    /// only -- the canonical replica identity is the `pond_id`, which
-    /// must match the source pond it replicates.
+    /// Convenience wrapper around [`Ship::init_pond`] that synthesizes
+    /// default birth metadata (timestamp = now, hostname = `"unknown"`,
+    /// username from `$USER`/`$USERNAME` or `"unknown"`).  Birth metadata on
+    /// a replica is informational only -- the canonical replica identity is
+    /// the `pond_id`, which must match the source pond it replicates.
     ///
-    /// The resulting pond has an empty data table awaiting
-    /// `apply_pulled_bundle` calls (e.g., via
-    /// [`sync_remote::Remote::bootstrap_consumer`] then
-    /// [`sync_remote::Remote::pull`]).
+    /// Since D6 the resulting pond is initialized with a minimal root v1 under
+    /// the source `pond_id` so the content-addressed mirror pull
+    /// ([`crate::rebuild_pond`]) has a root to diff onto.  This is NOT suitable
+    /// for the bundle bootstrap path ([`sync_remote::Remote::bootstrap_consumer`]
+    /// then [`sync_remote::Remote::pull`]), which requires an empty data table
+    /// so the source's replicated seq=1 root bundle does not collide with a
+    /// local root; use [`Ship::create_pond_for_restoration`] for that.
     pub async fn create_replica<P: AsRef<Path>>(
         pond_path: P,
         pond_id: uuid::Uuid,

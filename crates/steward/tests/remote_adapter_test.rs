@@ -33,6 +33,16 @@ fn meta(label: &str) -> PondUserMetadata {
     PondUserMetadata::new(vec!["test".into(), label.into()])
 }
 
+/// Build the preserved metadata for an empty-table restoration replica that
+/// mirrors the source `pond_id`.  Birth fields are informational on a replica;
+/// only the `pond_id` is canonical.
+fn replica_metadata(pond_id: uuid::Uuid) -> steward::PondMetadata {
+    steward::PondMetadata {
+        pond_id: uuid7::Uuid::from(*pond_id.as_bytes()),
+        ..steward::PondMetadata::default()
+    }
+}
+
 /// Push one write, pull into a fresh pond, verify the file appears.
 #[tokio::test]
 async fn ship_remote_push_pull_roundtrip() {
@@ -376,8 +386,14 @@ async fn ship_create_replica_yields_matching_store_id() {
 /// This is the public-API equivalent of the old manual workaround
 /// (`create_pond_for_restoration` + `raw_config_set(last_pulled_seq,
 /// "1")` + `remote.pull`) that callers used pre-D5.4.
+///
+/// The bundle bootstrap path requires an EMPTY data table (bundles supply
+/// every row, including the seq=1 pond_init root).  Use
+/// `create_pond_for_restoration` for that -- NOT `create_replica`, which
+/// since D6 writes a local root v1 so the content-addressed mirror pull
+/// (`rebuild_pond`) has a root to diff onto; that local root would collide
+/// with the source's replicated seq=1 root bundle.
 #[tokio::test]
-#[ignore = "bundle bootstrap_consumer; create_replica now writes a root v1 for content mirror (D6)"]
 async fn ship_remote_bootstrap_consumer_no_compact() {
     init_log();
     let tmp = tempdir().expect("tempdir");
@@ -418,9 +434,9 @@ async fn ship_remote_bootstrap_consumer_no_compact() {
     let remote_for_bootstrap = Remote::open_at_url(&remote_url, Default::default())
         .await
         .expect("open remote for bootstrap");
-    let mut dst = Ship::create_replica(&dst_path, src_pond_id)
+    let mut dst = Ship::create_pond_for_restoration(&dst_path, replica_metadata(src_pond_id))
         .await
-        .expect("create_replica");
+        .expect("create restoration replica");
     {
         let mut adapter = ShipRemoteSteward::new(&mut dst);
         remote_for_bootstrap
@@ -1202,7 +1218,6 @@ async fn ship_maintain_compact_survives_reopen() {
 /// data_delta_version=0 and skipped by push) were never replicated, so
 /// the replica's root partition diverged.  Now seq=1 is a normal bundle.
 #[tokio::test]
-#[ignore = "bundle bootstrap+verify; create_replica now writes a root v1 for content mirror (D6)"]
 async fn ship_replica_verify_matches_after_bootstrap() {
     use sync_remote::Remote;
 
@@ -1260,9 +1275,15 @@ async fn ship_replica_verify_matches_after_bootstrap() {
     }
 
     // Bootstrap a fresh mirror replica and verify it against the remote.
-    let mut dst = Ship::create_replica(&dst_path, uuid::Uuid::from_bytes(*pond_id.as_bytes()))
-        .await
-        .expect("replica");
+    // Bundle bootstrap needs an empty data table (see the note on
+    // `ship_remote_bootstrap_consumer_no_compact`); `create_replica` would
+    // seed a diverging local root v1.
+    let mut dst = Ship::create_pond_for_restoration(
+        &dst_path,
+        replica_metadata(uuid::Uuid::from_bytes(*pond_id.as_bytes())),
+    )
+    .await
+    .expect("create restoration replica");
     {
         let mut a = ShipRemoteSteward::new(&mut dst);
         remote
