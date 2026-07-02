@@ -39,6 +39,15 @@ const SERIES_MAGIC: &[u8] = b"dp.series.1\n";
 /// Magic header for a dynamic-node recipe object (D2/D4).
 const RECIPE_MAGIC: &[u8] = b"dp.recipe.1\n";
 
+/// Minimum on-wire size of a single tree entry: a length-prefixed name (4-byte
+/// length + 0 bytes for an empty name), a 1-byte entry-type discriminant, and a
+/// 32-byte child hash. Used to bound decode pre-allocation against a hostile
+/// element count.
+const TREE_ENTRY_MIN_BYTES: usize = 4 + 1 + 32;
+
+/// Size of an [`ObjectHash`] on the wire (a series version hash).
+const HASH_BYTES: usize = 32;
+
 /// One entry in a tree: a named child with its type and content address.
 ///
 /// The triple `(name, entry_type, child_hash)` is the entire value an entry
@@ -173,7 +182,7 @@ pub fn decode_tree(bytes: &[u8]) -> Result<Vec<TreeEntry>, String> {
     let mut cur = Cursor::new(bytes);
     cur.expect_tag(TREE_MAGIC)?;
     let count = cur.take_u32()? as usize;
-    let mut entries = Vec::with_capacity(count);
+    let mut entries = Vec::with_capacity(cur.bounded_capacity(count, TREE_ENTRY_MIN_BYTES));
     for _ in 0..count {
         let name = cur.take_len_prefixed_string()?;
         let entry_type = EntryType::try_from(cur.take_u8()?)?;
@@ -197,7 +206,7 @@ pub fn decode_series(bytes: &[u8]) -> Result<Vec<ObjectHash>, String> {
     let mut cur = Cursor::new(bytes);
     cur.expect_tag(SERIES_MAGIC)?;
     let count = cur.take_u32()? as usize;
-    let mut hashes = Vec::with_capacity(count);
+    let mut hashes = Vec::with_capacity(cur.bounded_capacity(count, HASH_BYTES));
     for _ in 0..count {
         hashes.push(cur.take_hash()?);
     }
@@ -385,6 +394,25 @@ mod tests {
     fn decode_series_rejects_truncation() {
         let bytes = encode_series(&[h("v1"), h("v2")]);
         assert!(decode_series(&bytes[..bytes.len() - 4]).is_err());
+    }
+
+    #[test]
+    fn decode_series_rejects_oversized_count_without_huge_alloc() {
+        // A hostile object declaring ~4 billion versions but carrying no body
+        // must fail with a truncation error rather than pre-allocating
+        // gigabytes: `bounded_capacity` caps the reserve at remaining/32.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SERIES_MAGIC);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_series(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_tree_rejects_oversized_count_without_huge_alloc() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(TREE_MAGIC);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_tree(&bytes).is_err());
     }
 
     #[test]

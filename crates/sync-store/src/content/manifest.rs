@@ -25,6 +25,12 @@ use super::{Cursor, ObjectHash, push_len_prefixed};
 /// Magic header distinguishing a serialized node manifest from a raw blob (D2).
 const MANIFEST_MAGIC: &[u8] = b"dp.manifest.1\n";
 
+/// Minimum on-wire size of a single manifest entry: three length-prefixed
+/// strings (4-byte length each, all empty), a 1-byte entry-type discriminant,
+/// and a 32-byte child hash. Used to bound decode pre-allocation against a
+/// hostile element count.
+const MANIFEST_ENTRY_MIN_BYTES: usize = 4 + 4 + 4 + 1 + 32;
+
 /// One node's identity record in a manifest.
 ///
 /// The `node_id` is the source's real `NodeID`; `parent_node_id` is its
@@ -140,7 +146,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestEntry>, String> {
     let mut cur = Cursor::new(bytes);
     cur.expect_tag(MANIFEST_MAGIC)?;
     let count = cur.take_u32()? as usize;
-    let mut entries = Vec::with_capacity(count);
+    let mut entries = Vec::with_capacity(cur.bounded_capacity(count, MANIFEST_ENTRY_MIN_BYTES));
     for _ in 0..count {
         let node_id = cur.take_len_prefixed_string()?;
         let parent_node_id = cur.take_len_prefixed_string()?;
@@ -294,6 +300,17 @@ mod tests {
     fn decode_rejects_truncation() {
         let bytes = encode_manifest(&[file("n1", "root", "a"), file("n2", "root", "b")]).unwrap();
         assert!(decode_manifest(&bytes[..bytes.len() - 4]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_oversized_count_without_huge_alloc() {
+        // A hostile manifest declaring ~4 billion entries but carrying no body
+        // must fail with a truncation error rather than pre-allocating
+        // gigabytes: `bounded_capacity` caps the reserve at remaining/min_entry.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MANIFEST_MAGIC);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_manifest(&bytes).is_err());
     }
 
     #[test]

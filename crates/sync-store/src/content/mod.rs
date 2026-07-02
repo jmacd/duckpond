@@ -155,6 +155,20 @@ impl<'a> Cursor<'a> {
         self.pos >= self.buf.len()
     }
 
+    /// Bound a pre-allocation to what the remaining buffer could plausibly
+    /// hold, so a malicious or corrupt object cannot force a multi-gigabyte
+    /// allocation via an oversized element count.
+    ///
+    /// `min_elem_bytes` is the smallest number of bytes a single element can
+    /// occupy on the wire. The returned capacity never exceeds
+    /// `remaining / min_elem_bytes`, which is an upper bound on the number of
+    /// elements actually present; a genuinely large object simply grows the
+    /// `Vec` as it decodes.
+    pub(crate) fn bounded_capacity(&self, count: usize, min_elem_bytes: usize) -> usize {
+        debug_assert!(min_elem_bytes > 0, "min_elem_bytes must be non-zero");
+        count.min(self.remaining() / min_elem_bytes.max(1))
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         if self.remaining() < n {
             return Err(format!(
