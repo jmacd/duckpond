@@ -99,6 +99,12 @@ import {
 
   const pumpCyclesTables = [];
   const cycleSummaryTables = [];
+  // Absolute URLs + column lists per category, captured for the "Explore this
+  // data" cross-link so the explorer can register each schema as its own view.
+  const pumpCyclesFiles = [];
+  const cycleSummaryFiles = [];
+  let pumpCyclesCols = [];
+  let cycleSummaryCols = [];
 
   for (const entry of manifest) {
     try {
@@ -109,10 +115,15 @@ import {
       const row = probe.toArray()[0];
       if (!row) continue;
       const cols = Object.keys(row);
+      const absUrl = new URL(entry.file, window.location.href).href;
       if (cols.includes("elapsed_s") && cols.includes("pump_event_id")) {
         pumpCyclesTables.push(name);
+        pumpCyclesFiles.push(absUrl);
+        if (pumpCyclesCols.length === 0) pumpCyclesCols = cols;
       } else if (cols.includes("draw_duration_s") && cols.includes("pump_event_id")) {
         cycleSummaryTables.push(name);
+        cycleSummaryFiles.push(absUrl);
+        if (cycleSummaryCols.length === 0) cycleSummaryCols = cols;
       }
     } catch (e) {
       console.warn("overlay.js: failed to load", entry.file, e);
@@ -294,6 +305,51 @@ import {
   container.appendChild(overviewSection);
   container.appendChild(statusBar);
   container.appendChild(analysisSection);
+
+  // -- "Explore this data" cross-link -----------------------------------------
+  // When sitegen emitted an explorer URL (data-explore-url), offer a pivot that
+  // hands this page's underlying parquet to the data explorer. The pump-cycles
+  // and cycle-summary series have distinct schemas, so each is handed as its own
+  // named dataset (a picker) rather than union-ed into one table. The visitor
+  // lands on the raw pump-cycles rows and can query/download either dataset.
+  const exploreUrl = container.dataset.exploreUrl || "";
+  if (exploreUrl && (pumpCyclesFiles.length || cycleSummaryFiles.length)) {
+    const handoff = [];
+    if (pumpCyclesFiles.length) {
+      handoff.push({
+        table: "pump_cycles",
+        label: "Pump cycles (raw samples)",
+        files: pumpCyclesFiles,
+        columns: pumpCyclesCols,
+      });
+    }
+    if (cycleSummaryFiles.length) {
+      handoff.push({
+        table: "cycle_summary",
+        label: "Cycle summary (per event)",
+        files: cycleSummaryFiles,
+        columns: cycleSummaryCols,
+      });
+    }
+
+    const bar = document.createElement("div");
+    bar.className = "overlay-explore-bar";
+    bar.style.cssText = "text-align:right;margin:0 0 8px";
+    const exploreBtn = document.createElement("button");
+    exploreBtn.type = "button";
+    exploreBtn.className = "explore-data";
+    exploreBtn.textContent = "Explore this data";
+    exploreBtn.addEventListener("click", () => {
+      const first = handoff[0];
+      const params = new URLSearchParams();
+      params.set("datasets", JSON.stringify(handoff));
+      params.set("dataset", first.table);
+      params.set("sql", `SELECT * FROM ${first.table} ORDER BY timestamp`);
+      location.assign(`${exploreUrl}#${params.toString()}`);
+    });
+    bar.appendChild(exploreBtn);
+    container.insertBefore(bar, overviewSection);
+  }
 
   // -- Build event ID lookup --------------------------------------------------
 
