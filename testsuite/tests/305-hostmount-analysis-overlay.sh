@@ -356,6 +356,18 @@ routes:
             slug: "$0"
             page: "/site/analysis.md"
             export: "analysis"
+      - name: "explore"
+        type: static
+        slug: "explore"
+        page: "/site/explore.md"
+        export: "analysis"
+
+explore:
+  url: "explore/"
+  datasets:
+    - export: "analysis"
+      table: "analysis"
+      label: "Analysis"
 
 partials: {}
 static: []
@@ -367,6 +379,17 @@ title: Home
 layout: default
 ---
 Home page
+MD
+
+cat > "${HOST_ROOT}/site/explore.md" << 'MD'
+---
+title: Explore
+layout: explore
+---
+
+# Explore
+
+{{ explore /}}
 MD
 
 cat > "${HOST_ROOT}/site/analysis.md" << 'MD'
@@ -419,6 +442,15 @@ check_contains "${OUTDIR}/analysis/pump-cycles.html" \
 check_contains "${OUTDIR}/analysis/pump-cycles.html" \
   "pump-cycles loads overlay.js" \
   'overlay.js'
+
+# Explorer page generated (cross-link target)
+check 'test -f "${OUTDIR}/explore/index.html"' "explore page exists"
+
+# Overlay chart carries the explorer cross-link URL so overlay.js renders the
+# "Explore this data" pivot button.
+check_contains "${OUTDIR}/analysis/pump-cycles.html" \
+  "pump-cycles has data-explore-url cross-link" \
+  'data-explore-url'
 
 # Parquet data files exported
 PARQUET_COUNT=$(find "${OUTDIR}" -name "*.parquet" | wc -l)

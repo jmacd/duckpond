@@ -343,7 +343,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     {
         let c = ctx.clone();
         shortcodes.register("overlay_chart", move |_args: &ShortcodeArgs| {
-            render_overlay_chart(&c.datafiles)
+            render_overlay_chart(&c.datafiles, c.explore_url.as_deref())
         });
     }
 
@@ -598,7 +598,7 @@ fn render_chart(
 ///
 /// Similar to render_chart but uses a different container ID and CSS class
 /// so that overlay.js picks it up instead of chart.js.
-fn render_overlay_chart(datafiles: &[ExportedFile]) -> String {
+fn render_overlay_chart(datafiles: &[ExportedFile], explore_url: Option<&str>) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
     }
@@ -619,11 +619,21 @@ fn render_overlay_chart(datafiles: &[ExportedFile]) -> String {
 
     let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
 
+    // Emit the explorer URL (when configured) so overlay.js can offer an
+    // "Explore this data" cross-link that hands the page's pump-cycles and
+    // cycle-summary parquet to the explorer as two separate datasets.
+    let explore_url_attr = match explore_url {
+        Some(u) if !u.is_empty() => {
+            format!(" data-explore-url=\"{}\"", html_escape(u))
+        }
+        _ => String::new(),
+    };
+
     format!(
-        "<div class=\"chart-container\" id=\"overlay-chart\">\
+        "<div class=\"chart-container\" id=\"overlay-chart\"{}>\
          <script type=\"application/json\" class=\"overlay-data\">{}</script>\
          </div>",
-        json
+        explore_url_attr, json
     )
 }
 
@@ -1614,6 +1624,24 @@ mod tests {
             Some("/explore/"),
         );
         assert!(html.contains("data-explore-url=\"/explore/\""));
+    }
+
+    #[test]
+    fn test_render_overlay_chart_with_explore_url() {
+        let files = vec![ExportedFile {
+            path: "pump-cycles.parquet".to_string(),
+            file: "analysis/pump-cycles.parquet".to_string(),
+            captures: vec!["pump-cycles".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let html = render_overlay_chart(&files, Some("/explore/"));
+        assert!(html.contains("id=\"overlay-chart\""));
+        assert!(html.contains("data-explore-url=\"/explore/\""));
+        // No explorer URL configured: no cross-link attribute is emitted.
+        let plain = render_overlay_chart(&files, None);
+        assert!(!plain.contains("data-explore-url"));
     }
 
     #[test]

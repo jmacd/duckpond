@@ -40,26 +40,55 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
     return;
   }
 
-  // ── Ad-hoc dataset handed over by a chart "Explore this data" link ───────────
-  // chart.js navigates here with `#label=...&files=<url1,url2,...>&sql=...`. We
-  // register those exact parquet files as a `chart_data` view and prepend it to
-  // the picker so the visitor lands on the chart's data + window, then can edit
-  // the SQL or switch to a configured dataset.
+  // ── Ad-hoc dataset(s) handed over by a chart "Explore this data" link ────────
+  // A chart navigates here with a hash carrying either:
+  //   • `files=<url1,url2,...>` (single-view handoff, chart.js) — registered as
+  //     one `chart_data` view; or
+  //   • `datasets=<json>` (multi-view handoff, overlay.js) — a JSON array of
+  //     {table, label, files:[url,...], columns?}, each registered as its own
+  //     view so incompatible schemas are not union-ed into one table.
+  // In both cases the handed datasets are prepended to the picker so the visitor
+  // lands on the chart's data (+ optional `sql`), then can edit freely.
   let adhocSql = null;
+  let adhocDatasets = [];
   {
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const datasetsParam = params.get("datasets");
     const filesParam = params.get("files");
-    if (filesParam) {
+    if (datasetsParam) {
+      let parsed = [];
+      try {
+        parsed = JSON.parse(datasetsParam);
+      } catch (e) {
+        parsed = [];
+      }
+      for (const d of Array.isArray(parsed) ? parsed : []) {
+        const urls = Array.isArray(d.files)
+          ? d.files.map((u) => String(u).trim()).filter(Boolean)
+          : [];
+        if (!d || !d.table || urls.length === 0) continue;
+        adhocDatasets.push({
+          table: String(d.table),
+          label: d.label || String(d.table),
+          files: urls.map((u) => ({ url: u })),
+          columns: Array.isArray(d.columns) ? d.columns : [],
+        });
+      }
+    } else if (filesParam) {
       const urls = filesParam.split(",").map((u) => u.trim()).filter(Boolean);
       if (urls.length > 0) {
-        datasets.unshift({
+        adhocDatasets.push({
           table: "chart_data",
           label: params.get("label") || "Chart data",
           files: urls.map((u) => ({ url: u })),
           columns: [],
         });
-        adhocSql = params.get("sql") || "";
       }
+    }
+    if (adhocDatasets.length > 0) {
+      // Prepend in order so the first handed dataset is selected by default.
+      datasets.unshift(...adhocDatasets);
+      adhocSql = params.get("sql") || "";
     }
   }
 
@@ -849,13 +878,33 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
     const params = new URLSearchParams();
     params.set("dataset", datasetTable(d, i));
     params.set("sql", editor.value);
-    // For the ad-hoc chart dataset, also keep its file list so the link
-    // survives a reload or share (the view is registered from these URLs).
-    if (adhocSql !== null && i === 0) {
-      const urls = (d.files || []).map((f) => f.url).filter(Boolean);
-      if (urls.length > 0) {
-        params.set("label", d.label || "Chart data");
-        params.set("files", urls.join(","));
+    // For an ad-hoc handoff, keep the dataset definition(s) in the hash so the
+    // link survives a reload or share (the views are registered from these
+    // URLs). A single `chart_data` handoff keeps the compact `files=` shape;
+    // multi-dataset handoffs serialize as `datasets=<json>`.
+    if (adhocDatasets.length > 0) {
+      const single =
+        adhocDatasets.length === 1 && adhocDatasets[0].table === "chart_data";
+      if (single) {
+        const urls = (adhocDatasets[0].files || [])
+          .map((f) => f.url)
+          .filter(Boolean);
+        if (urls.length > 0) {
+          params.set("label", adhocDatasets[0].label || "Chart data");
+          params.set("files", urls.join(","));
+        }
+      } else {
+        params.set(
+          "datasets",
+          JSON.stringify(
+            adhocDatasets.map((d) => ({
+              table: d.table,
+              label: d.label,
+              files: (d.files || []).map((f) => f.url).filter(Boolean),
+              columns: d.columns || [],
+            }))
+          )
+        );
       }
     }
     // Persist the chart view and, when the spec has been hand-edited, the
@@ -960,9 +1009,17 @@ import { loadVega, buildLineSpec, sanitizeRows } from "./vega-shared.js";
     }
     updateViewButtons();
   }
-  if (adhocSql !== null) {
+  if (adhocDatasets.length > 0) {
+    // Land on the first handed dataset by default; a shared reload may point
+    // `dataset=` at another handed view, so honor that when present.
+    const hash = initHash;
+    let i = 0;
+    if (hash && hash.dataset) {
+      const idx = datasets.findIndex((d, j) => datasetTable(d, j) === hash.dataset);
+      if (idx >= 0) i = idx;
+    }
     if (adhocSql) editor.value = adhocSql;
-    await selectDataset(0, { run: Boolean(adhocSql) });
+    await selectDataset(i, { run: Boolean(adhocSql) });
   } else {
     const hash = initHash;
     if (hash && hash.dataset) {
