@@ -412,6 +412,10 @@ async fn scan_and_fold(
     // ones for the latest-version snapshot.
     let mut latest: HashMap<NodeKey, NodeFacts> = HashMap::new();
     let mut series_versions: HashMap<NodeKey, BTreeMap<i64, VersionBlob>> = HashMap::new();
+    // Highest `collapsed_through` sentinel seen per series node.  A series
+    // compaction leaves the superseded per-version rows in the table beside a
+    // merged row carrying this sentinel; the versions are pruned after the scan.
+    let mut collapsed_through: HashMap<NodeKey, i64> = HashMap::new();
 
     for batch in &batches {
         let rows: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)
@@ -431,6 +435,10 @@ async fn scan_and_fold(
                         content: row.content.clone(),
                     },
                 );
+                if let Some(k) = row.collapsed_through {
+                    let entry = collapsed_through.entry(key.clone()).or_insert(k);
+                    *entry = (*entry).max(k);
+                }
             }
 
             let _ = latest.insert(
@@ -441,6 +449,18 @@ async fn scan_and_fold(
                     factory: row.factory,
                 },
             );
+        }
+    }
+
+    // Drop versions superseded by a compaction.  The live series read path skips
+    // every version at or below the highest `collapsed_through` sentinel (see
+    // OpLogPersistence::async_file_reader_series); the content fold must match it
+    // exactly, or a compacted series would fold in phantom superseded blobs and a
+    // pulled mirror would reconstruct duplicated data whose fold still equals the
+    // source's (both sides would fold the same dead rows).
+    for (key, k) in &collapsed_through {
+        if let Some(versions) = series_versions.get_mut(key) {
+            versions.retain(|version, _| *version > *k);
         }
     }
 

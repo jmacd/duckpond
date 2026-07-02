@@ -96,6 +96,96 @@ async fn second_push_advances_tip_atomically() {
     );
 }
 
+/// A large-file blob round-trips through the external blob store by hash: it
+/// is absent before the put, present after, and reads back byte-for-byte.
+#[tokio::test]
+async fn put_blob_round_trips_by_hash() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = TempDir::new().unwrap();
+    let remote = ContentRemote::create_at(dir.path(), pid()).await.unwrap();
+
+    let bytes = b"a large external blob's contents".to_vec();
+    let hash = ObjectHash::of_bytes(&bytes);
+
+    assert!(!remote.has_blob(hash).await.unwrap(), "absent before put");
+    remote.put_blob(hash, &bytes[..]).await.unwrap();
+    assert!(remote.has_blob(hash).await.unwrap(), "present after put");
+
+    let mut reader = remote.get_blob_reader(hash).await.unwrap().unwrap();
+    let mut read_back = Vec::new();
+    reader.read_to_end(&mut read_back).await.unwrap();
+    assert_eq!(read_back, bytes, "blob reads back byte-for-byte");
+}
+
+/// A blob spanning many multipart chunks (well past the 5MB part size and the
+/// in-flight-part cap) round-trips byte-for-byte.  This exercises the streaming
+/// upload path where `put_blob` applies backpressure via `wait_for_capacity`
+/// across multiple part uploads, rather than the single-part small-blob case.
+#[tokio::test]
+async fn put_blob_round_trips_large_multipart() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = TempDir::new().unwrap();
+    let remote = ContentRemote::create_at(dir.path(), pid()).await.unwrap();
+
+    // ~37MB: crosses several 5MB part boundaries and exceeds the 16-part
+    // in-flight cap, so the capacity wait is actually taken.  Non-trivial byte
+    // pattern so a torn or reordered part would fail the round-trip compare.
+    let mut bytes = vec![0u8; 37 * 1024 * 1024 + 12345];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = (i.wrapping_mul(2_654_435_761) >> 13) as u8;
+    }
+    let hash = ObjectHash::of_bytes(&bytes);
+
+    assert!(!remote.has_blob(hash).await.unwrap(), "absent before put");
+    remote.put_blob(hash, &bytes[..]).await.unwrap();
+    assert!(remote.has_blob(hash).await.unwrap(), "present after put");
+
+    let mut reader = remote.get_blob_reader(hash).await.unwrap().unwrap();
+    let mut read_back = Vec::new();
+    reader.read_to_end(&mut read_back).await.unwrap();
+    assert_eq!(read_back.len(), bytes.len(), "length preserved");
+    assert_eq!(read_back, bytes, "large blob reads back byte-for-byte");
+}
+
+/// A blob whose bytes do not hash to the claimed key is rejected AND never
+/// stored: `put_blob` verifies the content during its single streaming pass and
+/// aborts the multipart upload before it becomes visible, so no value is ever
+/// left under a key it does not equal. `has_blob` therefore stays false, and a
+/// retry cannot be silently short-circuited by a phantom object.
+#[tokio::test]
+async fn put_blob_rejects_and_does_not_store_hash_mismatch() {
+    let dir = TempDir::new().unwrap();
+    let remote = ContentRemote::create_at(dir.path(), pid()).await.unwrap();
+
+    let bytes = b"the real large-file blob contents";
+    let claimed = ObjectHash::of_bytes(b"a completely different value");
+    assert_ne!(
+        claimed,
+        ObjectHash::of_bytes(bytes),
+        "claimed key must not be the bytes' true hash"
+    );
+
+    let err = remote
+        .put_blob(claimed, &bytes[..])
+        .await
+        .expect_err("mismatched blob must be rejected");
+    assert!(
+        format!("{err}").contains("hash to"),
+        "unexpected error: {err}"
+    );
+
+    assert!(
+        !remote.has_blob(claimed).await.unwrap(),
+        "nothing may be stored under the claimed (wrong) key"
+    );
+    assert!(
+        remote.get_blob_reader(claimed).await.unwrap().is_none(),
+        "no readable blob may exist under the claimed key"
+    );
+}
+
 /// A remote survives close/reopen: objects and tip persist via Delta.
 #[tokio::test]
 async fn reopen_preserves_objects_and_tip() {

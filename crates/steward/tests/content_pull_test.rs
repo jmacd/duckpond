@@ -98,6 +98,27 @@ async fn write_series(ship: &mut Ship, path: &str, versions: &[(i64, &str)]) {
     .expect("series transaction");
 }
 
+/// Append one raw-bytes version to a `FilePhysicalSeries` at `path`, creating
+/// it on the first write and appending a new version thereafter.  Unlike
+/// `write_series` (a `table:series`), a `file:series` is what
+/// `Ship::collapse_versions` compacts.
+async fn write_file_series_version(ship: &mut Ship, path: &str, bytes: &[u8]) {
+    let path = path.to_string();
+    let bytes = bytes.to_vec();
+    ship.write_transaction(&meta("file-series"), async move |fs| {
+        use tokio::io::AsyncWriteExt;
+        let root = fs.root().await?;
+        let mut writer = root
+            .async_writer_path_with_type(&path, tinyfs::EntryType::FilePhysicalSeries)
+            .await?;
+        writer.write_all(&bytes).await?;
+        writer.shutdown().await?;
+        Ok(())
+    })
+    .await
+    .expect("file-series transaction");
+}
+
 /// Create a dynamic node (factory + config) at `path` with the given entry
 /// type, exercising the recipe path directly without the provider's factory
 /// registry (rebuild only needs the stored factory string and config bytes).
@@ -614,4 +635,60 @@ async fn deletion_propagates() {
 
     assert_eq!(read_to_string(&mut dst, "/a.txt").await, "alpha");
     assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// A COMPACTED `file:series` mirrors its LIVE content, not its superseded
+/// history.  After `collapse_versions` merges v1..vN into a single row carrying
+/// a `collapsed_through` sentinel, the source table still holds the superseded
+/// per-version rows.  The content fold must skip exactly the versions the live
+/// series read skips; otherwise the fold materializes the dead blobs, the
+/// consumer rebuilds them as live versions, and its series returns the merged
+/// data PLUS the pre-merge history -- duplicated content whose fold still
+/// equals the source's (both sides fold the same dead rows, so a fold-only
+/// check cannot catch it).  This is the regression guard for that bug.
+#[tokio::test]
+async fn compacted_file_series_mirrors_live_content_not_history() {
+    let (_t, mut src) = new_pond("collapse-src").await;
+
+    // Four versions of a file:series; live content is their concatenation.
+    let chunks: [&[u8]; 4] = [b"a,1\n", b"b,2\n", b"c,3\n", b"d,4\n"];
+    let mut cumulative = String::new();
+    for chunk in chunks {
+        write_file_series_version(&mut src, "/events.series", chunk).await;
+        cumulative.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    assert_eq!(read_to_string(&mut src, "/events.series").await, cumulative);
+
+    // Collapse the four versions into one merged row (threshold 1: collapse any
+    // series with more than one live version).
+    let report = src.collapse_versions(1).await.expect("collapse");
+    assert_eq!(report.files_collapsed, 1, "the series must be collapsed");
+
+    // The source's live content is unchanged by the merge.
+    assert_eq!(read_to_string(&mut src, "/events.series").await, cumulative);
+
+    // Round-trip the compacted source through a content-addressed remote.
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "collapse-dst")
+        .await
+        .expect("create dst");
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("rebuild");
+
+    // Exactly one series node is reconstructed, and the folds agree.
+    assert_eq!(outcome.series, 1);
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+
+    // The decisive check: the mirror's LIVE series content must equal the
+    // source's, with no duplicated pre-collapse history.  Before the fix the
+    // fold shipped the superseded v1..v4 blobs, the consumer rebuilt them as
+    // live versions, and this read returned `cumulative` repeated.
+    assert_eq!(
+        read_to_string(&mut dst, "/events.series").await,
+        cumulative,
+        "compacted series must mirror merged content only, not duplicated history"
+    );
 }

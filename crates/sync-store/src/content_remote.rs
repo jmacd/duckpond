@@ -57,6 +57,11 @@ pub struct ContentRemote {
 }
 
 impl ContentRemote {
+    /// Maximum in-flight multipart part uploads allowed while streaming a large
+    /// blob to the remote (see [`Self::put_blob`]).  Bounds staged upload memory
+    /// to this many `chunk_size` parts when the reader outpaces the network.
+    const MAX_INFLIGHT_UPLOAD_PARTS: usize = 16;
+
     /// Create a fresh remote at `path`.  Errors if a Delta table already
     /// exists there.
     pub async fn create_at(path: impl AsRef<Path>, pond_id: Uuid) -> Result<Self> {
@@ -209,6 +214,13 @@ impl ContentRemote {
     /// keyed by `hash`.  Chunks flow through a bounded buffer to a multipart
     /// upload; the bytes are hashed as they pass so a value can never be stored
     /// under a key it does not equal.  Never collects the whole blob in memory.
+    ///
+    /// Backpressure is applied so a fast local reader cannot outrun a slow
+    /// upload: `WriteMultipart::write` starts a part upload as soon as a chunk
+    /// fills, regardless of how many are already in flight, so without a bound
+    /// the staged parts of a multi-gigabyte blob would accumulate in memory.
+    /// Capping in-flight parts at [`Self::MAX_INFLIGHT_UPLOAD_PARTS`] holds the
+    /// staged bytes to that many `chunk_size` parts.
     pub async fn put_blob<R>(&self, hash: ObjectHash, mut reader: R) -> Result<()>
     where
         R: tokio::io::AsyncRead + Unpin,
@@ -233,20 +245,34 @@ impl ContentRemote {
                 break;
             }
             hasher.update(&buf[..n]);
+            // Bound the number of in-flight part uploads before staging more, so
+            // a reader faster than the network cannot grow memory without limit.
+            writer
+                .wait_for_capacity(Self::MAX_INFLIGHT_UPLOAD_PARTS)
+                .await
+                .map_err(|e| StoreError::Invariant(format!("blob upload capacity: {e}")))?;
             writer.write(&buf[..n]);
+        }
+        // Verify the streamed content matches its claimed key BEFORE completing
+        // the multipart upload.  A multipart object only becomes visible on
+        // `finish()`, so aborting here discards the staged parts and a value is
+        // never stored under a key it does not equal -- no temporary key needed.
+        let computed = ObjectHash::from_bytes(*hasher.finalize().as_bytes());
+        if computed != hash {
+            writer
+                .abort()
+                .await
+                .map_err(|e| StoreError::Invariant(format!("blob abort: {e}")))?;
+            return Err(StoreError::Invariant(format!(
+                "blob bytes hash to {} but were offered under {}",
+                computed.to_hex(),
+                hash.to_hex()
+            )));
         }
         writer
             .finish()
             .await
             .map_err(|e| StoreError::Invariant(format!("blob finish: {e}")))?;
-        let computed = ObjectHash::from_bytes(*hasher.finalize().as_bytes());
-        if computed != hash {
-            return Err(StoreError::Invariant(format!(
-                "blob bytes hash to {} but were stored under {}",
-                computed.to_hex(),
-                hash.to_hex()
-            )));
-        }
         Ok(())
     }
 
