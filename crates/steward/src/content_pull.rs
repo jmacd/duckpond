@@ -364,6 +364,11 @@ enum ApplyOp {
         create: bool,
         entry_type: EntryType,
         versions: Vec<VersionSource>,
+        /// When set, the first written version replaces (collapses) every
+        /// version the target already held -- replicating a source-side series
+        /// compaction. `versions` then holds the full post-collapse list, not an
+        /// appended suffix.
+        collapse_first: bool,
     },
     /// Create (adopting `node_id`) or rewrite a symlink.  A rewrite re-adopts
     /// the same `node_id` after unlinking, so identity is preserved.
@@ -403,12 +408,12 @@ enum ApplyOp {
 ///
 /// Returns an error if the graph is empty or carries no manifest, if the graph
 /// references an object it does not contain, if a node's `entry_type` changed
-/// or it was reparented (both unsupported), if an incoming series is not an
-/// append-only extension of the one held, if a symlink target is not valid
-/// UTF-8, if a recipe fails to decode, or if a write fails.  After applying,
-/// the read-side fold of `target` must equal the tip's root tree hash and the
-/// rebuilt node manifest hash must equal the tip commit's `node_manifest_hash`;
-/// a mismatch is an error.
+/// or it was reparented (both unsupported), if a symlink target is not valid
+/// UTF-8, if a recipe fails to decode, or if a write fails.  A source-side series
+/// compaction (the incoming versions replace rather than extend the held ones) is
+/// replicated, not rejected.  After applying, the read-side fold of `target` must
+/// equal the tip's root tree hash and the rebuilt node manifest hash must equal
+/// the tip commit's `node_manifest_hash`; a mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
     remote: &ContentRemote,
@@ -707,13 +712,14 @@ fn plan_one(
                 create,
                 entry_type: entry.entry_type,
                 versions,
+                collapse_first: false,
             });
         }
         EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
             if create {
                 outcome.series += 1;
             }
-            let versions =
+            let (versions, collapse_first) =
                 plan_series_versions(entry, graph, target_series, existing.map(|t| t.child_hash))?;
             ops.push(ApplyOp::File {
                 parent: entry.parent_node_id.clone(),
@@ -722,6 +728,7 @@ fn plan_one(
                 create,
                 entry_type: entry.entry_type,
                 versions,
+                collapse_first,
             });
         }
         EntryType::Symlink => {
@@ -765,21 +772,29 @@ fn plan_one(
     Ok(())
 }
 
-/// Decide which series version blobs to write: all of them on create, or only
-/// the appended suffix on update.  An update requires the versions already held
-/// to be a prefix of the incoming list -- series are append-only (Section
-/// 8.5.3), so any divergence is a hard error.
+/// Decide which series version blobs to write and whether the first replaces the
+/// versions already held.
+///
+/// The common case is append-only: the versions the target holds are a prefix of
+/// the incoming list, and only the appended suffix is written (Section 8.5.3).
+/// But a source-side compaction (`pond maintain --collapse-versions`) legitimately
+/// *replaces* many superseded versions with a single merged version, so the
+/// incoming list is no longer a prefix-extension of what a caught-up mirror holds.
+/// That case is replicated by rewriting the full incoming list with the first
+/// version marked to collapse the held ones (`collapse_first = true`), using the
+/// source's own merged bytes -- the pre-collapse versions are gone from the source
+/// and cannot be re-fetched, so the mirror must adopt the merged version directly.
 fn plan_series_versions(
     entry: &ManifestEntry,
     graph: &FetchedGraph,
     target_series: &HashMap<String, Vec<ObjectHash>>,
     existing_child_hash: Option<ObjectHash>,
-) -> Result<Vec<VersionSource>, StewardError> {
+) -> Result<(Vec<VersionSource>, bool), StewardError> {
     let incoming = series_hashes(graph, entry.child_hash)?;
 
     let held = match existing_child_hash {
         None => &[][..],
-        Some(child_hash) if child_hash == entry.child_hash => return Ok(Vec::new()),
+        Some(child_hash) if child_hash == entry.child_hash => return Ok((Vec::new(), false)),
         Some(_) => target_series
             .get(&entry.node_id)
             .map(Vec::as_slice)
@@ -791,19 +806,24 @@ fn plan_series_versions(
             })?,
     };
 
-    if incoming.len() < held.len() || incoming[..held.len()] != *held {
-        return Err(StewardError::Content(format!(
-            "series node {} is not an append-only extension of the versions held ({} held, {} incoming)",
-            entry.node_id,
-            held.len(),
-            incoming.len()
-        )));
+    // Append-only fast path: the incoming list extends what is already held, so
+    // write only the missing suffix.
+    if incoming.len() >= held.len() && incoming[..held.len()] == *held {
+        let suffix = incoming[held.len()..]
+            .iter()
+            .map(|hash| version_source(graph, *hash))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((suffix, false));
     }
 
-    incoming[held.len()..]
+    // Divergent history: the held versions are no longer a prefix of the source's
+    // live series (a compaction replaced them). Rewrite the full incoming list;
+    // the first version collapses everything the target held.
+    let full = incoming
         .iter()
         .map(|hash| version_source(graph, *hash))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((full, true))
 }
 
 /// Apply an ordered plan within an open transaction, adopting source node ids.
@@ -853,9 +873,13 @@ async fn apply_ops(
                 create,
                 entry_type,
                 versions,
+                collapse_first,
             } => {
                 let pwd = parent_wd(&dir_wd, parent)?;
                 let mut remaining = versions.iter();
+                // A collapsing rewrite always targets an existing node, so its
+                // first version goes through the collapsing writer below, never
+                // the create path.
                 if *create {
                     // The first version is written through the writer returned
                     // at creation: a pending file has no row to re-resolve by
@@ -867,6 +891,14 @@ async fn apply_ops(
                             .await?;
                         write_version(writer, first, *entry_type, remote).await?;
                     }
+                } else if *collapse_first && let Some(first) = remaining.next() {
+                    // Replicate a source-side compaction: the first version
+                    // starts a fresh baseline and supersedes every version the
+                    // target already held, so its fold matches the source.
+                    let writer = pwd
+                        .async_writer_path_collapsing_with_type(name, *entry_type)
+                        .await?;
+                    write_version(writer, first, *entry_type, remote).await?;
                 }
                 for version in remaining {
                     let writer = pwd.async_writer_path_with_type(name, *entry_type).await?;

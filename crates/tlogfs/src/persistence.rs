@@ -1695,6 +1695,7 @@ impl State {
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
         bao_outboard: Option<Vec<u8>>,
+        collapsed_through: Option<i64>,
     ) -> Result<(), TLogFSError> {
         self.inner
             .lock()
@@ -1705,6 +1706,7 @@ impl State {
                 metadata,
                 pre_allocated_version,
                 bao_outboard,
+                collapsed_through,
             )
             .await
     }
@@ -2876,6 +2878,7 @@ impl InnerState {
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
         bao_outboard: Option<Vec<u8>>,
+        collapsed_through: Option<i64>,
     ) -> Result<(), TLogFSError> {
         debug!("store_file_content_ref_transactional called for node_id={id}");
 
@@ -3075,6 +3078,11 @@ impl InnerState {
         let mut entry = entry;
         if let Some(outboard) = bao_outboard {
             entry.set_bao_outboard(outboard);
+        }
+        // A pull replicating a source-side collapse stamps the merged version so
+        // the read path and content fold both drop the superseded predecessors.
+        if let Some(sentinel) = collapsed_through {
+            entry.collapsed_through = Some(sentinel);
         }
 
         self.records.push(entry);

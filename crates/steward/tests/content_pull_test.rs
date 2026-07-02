@@ -692,3 +692,110 @@ async fn compacted_file_series_mirrors_live_content_not_history() {
         "compacted series must mirror merged content only, not duplicated history"
     );
 }
+
+/// A mirror that already replicated a series' pre-collapse versions must
+/// converge when the source later compacts it.  This is the regression guard
+/// for the bug where the incremental series diff required the held versions to
+/// be a prefix of the incoming list and hard-errored on a compaction, leaving
+/// the mirror permanently unable to re-pull.
+#[tokio::test]
+async fn repull_after_source_side_collapse_converges() {
+    let (_t, mut src) = new_pond("recollapse-src").await;
+
+    // Four versions; the mirror pulls them before any collapse.
+    let chunks: [&[u8]; 4] = [b"a,1\n", b"b,2\n", b"c,3\n", b"d,4\n"];
+    let mut cumulative = String::new();
+    for chunk in chunks {
+        write_file_series_version(&mut src, "/events.series", chunk).await;
+        cumulative.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "recollapse-dst")
+        .await
+        .expect("create dst");
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("initial rebuild");
+    // The mirror holds the full pre-collapse history.
+    assert_eq!(read_to_string(&mut dst, "/events.series").await, cumulative);
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+
+    // The source compacts the four versions into one merged row.
+    let report = src.collapse_versions(1).await.expect("collapse");
+    assert_eq!(report.files_collapsed, 1, "the series must be collapsed");
+    assert_eq!(read_to_string(&mut src, "/events.series").await, cumulative);
+
+    // Re-pull onto the SAME mirror: it must replicate the collapse and converge
+    // rather than erroring on the non-prefix version list.
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("re-pull after collapse");
+
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+    assert_eq!(
+        read_to_string(&mut dst, "/events.series").await,
+        cumulative,
+        "mirror must hold the merged live content, not duplicated history"
+    );
+
+    // A further re-pull with no source change is a no-op and stays converged.
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("idempotent re-pull");
+    assert_eq!(outcome.series, 0);
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// A source may append fresh versions after a collapse; a mirror that holds the
+/// pre-collapse history must adopt the merged baseline AND the later appends,
+/// even though it never saw the intermediate versions the source merged away.
+#[tokio::test]
+async fn repull_after_collapse_then_append_converges() {
+    let (_t, mut src) = new_pond("recollapse2-src").await;
+
+    // The mirror pulls only the first two versions.
+    write_file_series_version(&mut src, "/events.series", b"a,1\n").await;
+    write_file_series_version(&mut src, "/events.series", b"b,2\n").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "recollapse2-dst")
+        .await
+        .expect("create dst");
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("initial rebuild");
+    assert_eq!(
+        read_to_string(&mut dst, "/events.series").await,
+        "a,1\nb,2\n"
+    );
+
+    // The source adds two more versions the mirror never pulls individually,
+    // then collapses all four, then appends one more.
+    write_file_series_version(&mut src, "/events.series", b"c,3\n").await;
+    write_file_series_version(&mut src, "/events.series", b"d,4\n").await;
+    let report = src.collapse_versions(1).await.expect("collapse");
+    assert_eq!(report.files_collapsed, 1);
+    write_file_series_version(&mut src, "/events.series", b"e,5\n").await;
+    let expected = "a,1\nb,2\nc,3\nd,4\ne,5\n";
+    assert_eq!(read_to_string(&mut src, "/events.series").await, expected);
+
+    // Re-pull: the mirror jumps straight from [v1,v2] to [merged, e] and must
+    // converge on the source's exact live content.
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("re-pull after collapse+append");
+
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+    assert_eq!(read_to_string(&mut dst, "/events.series").await, expected);
+}

@@ -556,11 +556,27 @@ re-replicating A's content, so the case is closed (test
   = the blob hash, `version` = the node's current version on the consumer.
 - **Series.** A series object references an ordered list of version blob hashes.
   A full rebuild recreates one row per version, in order. An incremental pull
-  reads the node's current versions, asserts they are a **prefix** of the
-  incoming list (the append-only invariant; a violation is a hard error), and
-  appends only the missing **suffix** -- never re-appending versions it already
-  holds. Writing each version's exact bytes reproduces its `blake3`, so the
-  consumer's recomputed series object equals the source's.
+  reads the node's current versions and compares them to the incoming list:
+  - **Append fast path.** When the held versions are a **prefix** of the
+    incoming list, the pull appends only the missing **suffix** -- never
+    re-appending versions it already holds. Writing each version's exact bytes
+    reproduces its `blake3`, so the consumer's recomputed series object equals
+    the source's.
+  - **Collapse replication.** When the held versions are *not* a prefix -- the
+    normal outcome after the source runs `pond maintain --collapse-versions`,
+    which replaces the live versions with one merged blob plus a
+    `collapsed_through` sentinel -- the consumer cannot reproduce the merge
+    locally, because the source has already deleted the pre-collapse version
+    blobs and a lagging mirror may never have held them. Instead the consumer
+    replicates the collapse faithfully: it writes the incoming list's first
+    version through a *collapsing* writer that starts a fresh baseline (no bao
+    resume from the mirror's stale frontier) and stamps `collapsed_through =
+    prior_version` on that row, pruning every version the mirror previously
+    held; the remaining incoming versions are appended normally. The incoming
+    first version's bytes are the source's merged blob, verified by content
+    address, so the consumer converges on the source's exact live content even
+    when it skips versions the source merged away. A non-prefix list is
+    therefore replicated, **not** rejected as an error.
 - **Provenance and txn_seq.** Each commit object carries `Provenance{pond_id,
   seq, time_micros, author, request}`. The consumer is a mirror of the source,
   so it adopts the **source pond_id** and stamps each rebuilt row's `txn_seq`

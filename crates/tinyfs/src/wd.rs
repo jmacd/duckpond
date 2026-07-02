@@ -696,6 +696,33 @@ impl WD {
         }
     }
 
+    /// Like [`WD::async_writer_path_with_type`], but the returned writer replaces
+    /// every earlier version of an existing series node with a fresh baseline,
+    /// stamping a `collapsed_through` sentinel. Used by content-addressed pull to
+    /// replicate a source-side series compaction. The node must already exist; a
+    /// missing node is created normally (nothing to collapse).
+    pub async fn async_writer_path_collapsing_with_type<P: AsRef<Path>>(
+        &self,
+        path: P,
+        entry_type: EntryType,
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
+        let path_ref = path.as_ref();
+        let (wd, lookup) = self.resolve_path(path_ref).await?;
+        match lookup {
+            Lookup::Found(node) => {
+                wd.check_writable()?;
+                node.as_file().await?.async_writer_collapsing().await
+            }
+            Lookup::NotFound(_, _) => {
+                let (_, writer) = self
+                    .create_file_path_streaming_with_type(path, entry_type)
+                    .await?;
+                Ok(writer)
+            }
+            Lookup::Empty(_) => Err(Error::empty_path()),
+        }
+    }
+
     /// Opens a directory at the specified path and returns a new working directory for it
     pub async fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
         let (resolved_wd, lookup) = self.resolve_path(path).await?;
