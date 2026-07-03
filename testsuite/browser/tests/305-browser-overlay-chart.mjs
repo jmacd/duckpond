@@ -153,6 +153,35 @@ async function testPage(browser, pagePath) {
   );
   check(vegaSvgCount > 0, `Vega-Lite charts rendered (${vegaSvgCount})`);
 
+  // Assert the data marks span a non-zero horizontal extent. Vega's
+  // `width: "container"` reads the plot element's clientWidth at embed time; if
+  // the element measured zero width (layout/fonts not settled) every datum
+  // collapses to x=0, producing a visible SVG whose line/area paths are a
+  // degenerate vertical stack -- the "blank whitespace" regression. Require at
+  // least one mark path with a bounding-box width greater than 1px so a future
+  // collapse to zero width is caught rather than passing on SVG presence alone.
+  const markSpan = await tab.evaluate(() => {
+    const paths = document.querySelectorAll(
+      "#overlay-chart .overlay-vega svg.marks g.mark-line path, " +
+        "#overlay-chart .overlay-vega svg.marks g.mark-area path"
+    );
+    let maxWidth = 0;
+    paths.forEach((p) => {
+      try {
+        const w = p.getBBox().width;
+        if (w > maxWidth) maxWidth = w;
+      } catch (e) {
+        /* getBBox throws for detached nodes; ignore */
+      }
+    });
+    return { total: paths.length, maxWidth };
+  });
+  check(
+    markSpan.maxWidth > 1,
+    `chart marks span non-zero width ` +
+      `(max ${markSpan.maxWidth.toFixed(1)}px across ${markSpan.total} paths)`
+  );
+
   // Check that "Loading..." is gone
   const loadingVisible = await tab.evaluate(() => {
     const el = document.getElementById("overlay-chart");
