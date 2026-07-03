@@ -155,15 +155,32 @@ import {
   // surface inline rather than throwing out of the (unawaited) render path.
   async function embedVega(targetEl, spec, rows, fields) {
     try {
+      targetEl.style.width = "100%";
       const embed = await loadVega();
       const renderSpec = { ...spec, data: { values: sanitizeRows(fields, rows) } };
-      await embed(targetEl, renderSpec, { actions: false, renderer: "svg" });
+      const res = await embed(targetEl, renderSpec, { actions: false, renderer: "svg" });
+      refitView(res && res.view, targetEl);
     } catch (e) {
       targetEl.innerHTML =
         '<div class="empty-state">Chart render failed: ' +
         String((e && e.message) || e) +
         "</div>";
     }
+  }
+
+  // Vega's `width: "container"` reads the element's clientWidth at embed time.
+  // When layout/fonts have not settled the element can measure zero width, which
+  // collapses every datum to x=0 and leaves the plot blank. Re-fit to the real
+  // width once the layout settles and on every resize so lines span the plot.
+  function refitView(view, targetEl) {
+    if (!view) return;
+    const refit = () => {
+      const w = targetEl.clientWidth ||
+        (targetEl.parentElement && targetEl.parentElement.clientWidth) || 700;
+      view.width(w).resize().runAsync();
+    };
+    requestAnimationFrame(refit);
+    new ResizeObserver(refit).observe(targetEl);
   }
 
   // -- Constants ---------------------------------------------------------------
@@ -423,12 +440,14 @@ import {
           try { overviewView.finalize(); } catch (e) { /* already gone */ }
           overviewView = null;
         }
+        ovHolder.style.width = "100%";
         const res = await embed(
           ovHolder,
           { ...spec, data: { values: overviewRows } },
           { actions: false, renderer: "svg" }
         );
         overviewView = res.view;
+        refitView(overviewView, ovHolder);
       } catch (e) {
         ovHolder.innerHTML =
           '<div class="empty-state">Overview render failed: ' +
