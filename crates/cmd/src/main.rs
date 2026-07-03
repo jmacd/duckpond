@@ -270,6 +270,20 @@ enum Commands {
         /// Remote name.  Omit to pull every remote in `pull` or `both` mode.
         name: Option<String>,
     },
+    /// Restore a whole pond from a backup published to a remote.
+    ///
+    /// Bootstraps a FRESH replica: discovers the source pond's id from the
+    /// remote, stamps a local pond carrying that id, attaches the remote as a
+    /// mirror at `/`, and pulls the full content graph.  Refuses to run over an
+    /// existing pond.  Use `pond pull <name>` afterward to track the upstream.
+    Restore {
+        /// Logical name to attach the restored mirror under (e.g., "origin").
+        name: String,
+        /// Remote URL (`file:///path` or `s3://bucket/prefix`) of the backup.
+        url: String,
+        #[command(flatten)]
+        options: RemoteAddOptions,
+    },
     /// Verify local data matches one or more remotes' recorded checksums (D6).
     Verify {
         /// Remote or backup name.  Omit to verify against every attachment.
@@ -605,6 +619,19 @@ async fn main() -> Result<()> {
         }
         Commands::Push { name } => commands::push_command(&ship_context, name).await,
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
+        Commands::Restore { name, url, options } => {
+            commands::restore_command(
+                &ship_context,
+                &name,
+                &url,
+                options.region,
+                options.access_key_id,
+                options.secret_access_key,
+                options.endpoint,
+                options.allow_http,
+            )
+            .await
+        }
         Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
         Commands::Status => commands::status_command(&ship_context).await,
         Commands::Tlog { command } => match command {

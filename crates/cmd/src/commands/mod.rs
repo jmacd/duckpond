@@ -22,6 +22,7 @@ pub mod push;
 pub mod rebuild_control;
 pub mod recover;
 pub mod remote;
+pub mod restore;
 pub mod run;
 pub mod run_summary;
 pub mod show;
@@ -51,6 +52,7 @@ pub use remote::{
     RemoteListFilter, add_backup_command, add_remote_command, list_remotes_command,
     remove_remote_command,
 };
+pub use restore::restore_command;
 pub use run::run_command;
 pub use show::show_command;
 pub use status::status_command;

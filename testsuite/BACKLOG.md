@@ -7,23 +7,6 @@
 
 ## 🔴 Open Items
 
-### CA-MIRROR-RESTORE: no CLI entry point + no e2e test for full-pond restore
-- **Type**: PRODUCTION-READINESS GAP + TEST COVERAGE (P1)
-- **Symptom**: The mirror-restart / disaster-recovery path
-  (`pull.rs::pull_mirror` -> `steward::rebuild_pond`, taken when a pull-mode
-  remote has mount_path `/` or none) is only reachable once the local pond
-  already carries the SOURCE pond's `pond_id`.  The only way to stamp that id
-  is `Ship::create_replica`, which is exercised solely by Rust integration
-  tests and is NOT wired to any `pond` CLI command -- `pond init` always mints
-  a fresh id, and the old `--from-backup` / `restart-from-compact` / emergency
-  tooling was removed on jmacd/65.  Net: an operator cannot restore a whole
-  pond from a backup, and `rebuild_pond`/`pull_mirror` have zero end-to-end
-  testsuite coverage.
-- **Next step**: expose a replica-bootstrap verb (e.g. `pond init --mirror
-  <url>` or `pond restore <url>`) that calls `create_replica` + `pull_mirror`,
-  then add an e2e test: producer backup-add + push; fresh consumer restores by
-  the source pond_id; assert `pond fsck` roots match and content md5 matches.
-
 ### CA-RENAME-CYCLE: emit_collision_safe_renames end-to-end (CLI) coverage
 - **Type**: TEST COVERAGE (P2)
 - **Symptom**: `content_pull.rs::emit_collision_safe_renames` (sibling swap
@@ -59,6 +42,58 @@
 ---
 
 ## 🟢 Done
+
+### ✅ CA-MIRROR-RESTORE: `pond restore` verb + full-pond restore e2e (724)
+- **Completed**: 2026-07-03
+- **Type**: PRODUCTION-READINESS GAP + TEST COVERAGE (was P1)
+- **What**: added the `pond restore <name> <url>` CLI verb
+  (`crates/cmd/src/commands/restore.rs`, wired in `main.rs`) plus
+  `Steward::create_replica` (`crates/steward/src/dispatch.rs`).  Restore
+  discovers the SOURCE pond_id by opening the remote read-only, stamps a
+  replica shell carrying that id via `create_replica`, attaches the remote as a
+  pull-mode mirror at `/`, and pulls the full content graph (mirror rebuild via
+  `rebuild_pond`).  It refuses to run over an existing pond and cleans up the
+  shell on failure so a retry starts clean.  This is the operator entry point
+  for disaster recovery -- previously `create_replica`/`pull_mirror` were
+  reachable only from Rust tests.
+- **Test**: `724-restore-full-pond.sh` (file://, 13 checks, green in-container).
+  Producer builds inline files + a >64KB external blob, `backup add` auto-push;
+  a FRESH consumer runs `pond restore origin file://...`; asserts the restored
+  content TIP HASH equals the producer's pushed tip (the canonical
+  cross-replica fingerprint per 718 -- NOT the version-sensitive fsck root),
+  byte-level md5 equality of the inline file and the large blob, a clean
+  restored-pond `pond fsck`, an incremental `pond pull` short-circuit, and that
+  a second restore over the existing pond is refused.
+
+### ✅ CA-VERIFY-STATES: `pond verify` RemoteBehind state e2e (725)
+- **Completed**: 2026-07-03
+- **Type**: TEST COVERAGE
+- **What**: `725-verify-remote-states.sh` (file://, 8 checks, green
+  in-container).  712 pushes a compaction and asserts verify is clean
+  (UpToDate) but never observes RemoteBehind, which is awkward to reach because
+  a normal write auto-pushes to backup remotes -- EXCEPT `pond maintain
+  --compact`, which advances the local tip via a Compact commit WITHOUT
+  triggering post-commit auto-push.  725 drives that window: after compaction
+  `pond verify origin` reports RemoteBehind by exactly 1 commit (and exits 0,
+  since RemoteBehind is a healthy `report.ok` state), then a follow-up `pond
+  push` restores UpToDate.  Exercises `content_verify::find_in_local_history`
+  and the `local_unpushed` count end-to-end.
+
+### ✅ CA-LARGEBLOB-READBACK: large external blob (>64KB) readback on consumer (723)
+- **Completed**: 2026-07-03
+- **Type**: TEST COVERAGE
+- **What**: `723-large-blob-replication-readback.sh` (file://, 7 checks, green
+  in-container).  718 creates a 200KB external blob and proves producer and
+  consumer converge on the same content TIP HASH and that producer-side fsck
+  catches blob corruption, but it only reads the small INLINE file back on the
+  consumer -- it never reads the LARGE BLOB bytes there.  Tip equality proves
+  the recorded blob HASH matches; it does not prove the consumer's D7
+  streaming rebuild (commit f90a5aa6) materialized the bytes so they are
+  readable.  723 closes that gap: after a cross-pond pull it (a) confirms the
+  blob landed in the consumer's own `_large_files/` store (external transfer,
+  not inlined), (b) `pond cat`s the >64KB blob on the consumer and asserts an
+  exact md5 match against the producer, and (c) runs consumer `pond fsck` to
+  validate the materialized bytes hash to their recorded blake3.
 
 ### ✅ CA-REVIEW-FIXES: three content-addressed replication fixes (jmacd/65)
 - **Completed**: 2026-07-03

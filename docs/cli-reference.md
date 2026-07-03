@@ -24,6 +24,7 @@
 | `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
+| `pond restore` | Bootstrap a whole-pond replica from a backup (disaster recovery) | `pond restore origin file:///mnt/backups/origin` |
 | `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
@@ -461,9 +462,11 @@ pond remote add upstream s3://prod-bucket /imports/upstream \
     --region us-east-1 \
     --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
-# Attach a pull-mode remote as a mirror restart (after `pond init` on a
-# blank machine; the remote was created earlier with `pond backup add`
-# from the source pond).
+# Attach a pull-mode remote as a mirror restart of an EXISTING replica
+# (a pond that already carries the source pond_id).  To bootstrap a
+# replica from a blank machine, use `pond restore` instead (it stamps the
+# source pond_id first); a bare `pond remote add ... /` on a freshly
+# `pond init`-ed pond is refused on a pond_id mismatch.
 pond remote add origin file:///mnt/backups/origin /
 
 # List all remotes (both pull and backup)
@@ -555,9 +558,49 @@ pond pull upstream
 > and its `store_id` differs from the local `pond_id`, the first
 > `pond pull` automatically materializes the mount entry under the
 > configured path.  No manual seeding is required.  Mirror restarts
-> (`PATH = /`, same `store_id`) still need the
-> `ShipContext::create_pond_for_restoration` path; a CLI surface for
-> mirror restart bootstrap is tracked separately.
+> (`PATH = /`, same `store_id`) require a pond that already carries the
+> source `pond_id`; use **`pond restore`** (below) to bootstrap one from
+> a blank machine.
+
+---
+
+### pond restore
+
+Bootstrap a whole-pond replica from a backup published to a remote --
+the operator entry point for disaster recovery.
+
+`pond init` always mints a FRESH `pond_id`, so a freshly-inited pond can
+never attach its own backup as a mirror (`pond remote add ... /` refuses
+on a `pond_id` mismatch).  `pond restore` closes that gap: it discovers
+the SOURCE pond's id by opening the remote read-only, stamps a replica
+shell carrying that id, attaches the remote as a pull-mode mirror at `/`,
+and pulls the full content graph to rebuild the pond by node_id.
+
+```bash
+# Restore a whole pond from a file:// backup into the current pond dir
+pond restore origin file:///mnt/backups/origin
+
+# Restore from S3 (same credential flags as `pond backup add`)
+pond restore origin s3://my-bucket \
+    --region us-east-1 \
+    --access-key-id AKIA... \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
+```
+
+- **Refuses to run over an existing pond** -- restore bootstraps a fresh
+  replica; remove the target directory (or choose an empty one) first.
+  On any failure it removes the partially-created shell so a retry starts
+  clean.
+- After a successful restore the local pond IS the source: same
+  `pond_id` and the same content **tip commit hash** (the canonical
+  cross-replica fingerprint).  Byte-for-byte content -- including
+  external `>64KB` blobs -- is reproduced.
+- The `NAME` attachment is left configured as a mirror, so a later
+  `pond pull NAME` tracks the upstream incrementally.
+
+> The node_id/version-keyed `pond fsck` root is **not** a cross-replica
+> invariant (a replica reaches the same content through a different local
+> transaction history); the tip commit hash is.  See `pond verify`.
 
 ---
 

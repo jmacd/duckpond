@@ -66,6 +66,22 @@ impl Steward {
         )))
     }
 
+    /// Create a fresh pond as a replica carrying the given `pond_id`.
+    ///
+    /// Wraps [`Ship::create_replica`]: the resulting pond is initialized with a
+    /// minimal root v1 under `pond_id` so a content-addressed mirror pull
+    /// ([`crate::rebuild_pond`]) has a root to diff onto.  Used by
+    /// `pond restore` to bootstrap a whole-pond replica of a source pond
+    /// published to a remote.
+    pub async fn create_replica<P: AsRef<Path>>(
+        pond_path: P,
+        pond_id: uuid::Uuid,
+    ) -> Result<Self, StewardError> {
+        Ok(Steward::Pond(Box::new(
+            Ship::create_replica(pond_path, pond_id).await?,
+        )))
+    }
+
     /// Create a host filesystem steward rooted at the given directory.
     ///
     /// If mount specs are provided, the host filesystem will be overlaid
