@@ -883,3 +883,60 @@ async fn repull_after_collapse_then_append_converges() {
     assert_eq!(root_hash(&dst).await, root_hash(&src).await);
     assert_eq!(read_to_string(&mut dst, "/events.series").await, expected);
 }
+
+/// A remote whose node manifest is inconsistent with its content tree -- an
+/// extra manifest entry reusing a real, in-closure blob hash under a phantom
+/// node -- is rejected BEFORE any mutation, so the inconsistent tree is never
+/// committed.  Without the pre-mutation check the phantom node would apply, the
+/// transaction would commit, and only the post-apply fold would notice.
+#[tokio::test]
+async fn tampered_manifest_is_rejected_before_commit() {
+    let (_t, mut src) = new_pond("tamper-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_file(&mut src, "/b.txt", b"beta").await;
+
+    let (_rt, remote) = push(&src).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+
+    // Forge a manifest that reuses a real leaf's content hash under a new
+    // node_id and name, as a second child of the root -- structurally
+    // inconsistent with the root's tree object.
+    let mut tampered = graph.clone();
+    let root_id = tampered
+        .manifest
+        .iter()
+        .find(|e| e.parent_node_id.is_empty() && e.name.is_empty())
+        .expect("root entry")
+        .node_id
+        .clone();
+    let mut phantom = tampered
+        .manifest
+        .iter()
+        .find(|e| e.parent_node_id == root_id && !e.name.is_empty())
+        .expect("a real child leaf")
+        .clone();
+    phantom.node_id = "phantom-node-id".to_string();
+    phantom.name = "phantom.txt".to_string();
+    tampered.manifest.push(phantom);
+
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "dst")
+        .await
+        .expect("create dst pond");
+    let empty_root = root_hash(&dst).await;
+
+    let err = steward::rebuild_pond(&mut dst, &remote, &tampered)
+        .await
+        .expect_err("tampered manifest must be rejected");
+    assert!(
+        format!("{err}").contains("inconsistent with its content tree"),
+        "unexpected error: {err}"
+    );
+
+    // The target pond is untouched: the rejection happened before any write.
+    assert_eq!(
+        root_hash(&dst).await,
+        empty_root,
+        "a rejected pull must not mutate the target pond"
+    );
+}

@@ -435,6 +435,11 @@ pub async fn rebuild_pond(
 
     let (target_nodes, target_series) = crate::content_tree::build_target_state(target).await?;
 
+    // Reject a manifest that is inconsistent with the fetched tree closure
+    // before any mutation, so a hostile/corrupt remote cannot commit an
+    // inconsistent tree that the post-apply fold would only catch after commit.
+    verify_manifest_matches_tree(graph)?;
+
     let (ops, outcome) = plan_node_diff(graph, root, &target_nodes, &target_series)?;
 
     let root_node_id = src_root_id(graph)?.to_string();
@@ -509,6 +514,11 @@ pub async fn import_pond(
     let foreign_id = foreign_pond_id.to_string();
     let (target_nodes, target_series) =
         crate::content_tree::build_target_state_for_pond(target, &foreign_id).await?;
+
+    // Reject a manifest that is inconsistent with the fetched tree closure
+    // before any mutation (see verify_manifest_matches_tree).
+    verify_manifest_matches_tree(graph)?;
+
     let (ops, outcome) = plan_node_diff(graph, root, &target_nodes, &target_series)?;
 
     let root_node_id = src_root_id(graph)?.to_string();
@@ -574,6 +584,104 @@ fn src_root_id(graph: &FetchedGraph) -> Result<&str, StewardError> {
         .find(|e| e.parent_node_id.is_empty() && e.name.is_empty())
         .map(|e| e.node_id.as_str())
         .ok_or_else(|| StewardError::Content("manifest has no root entry".to_string()))
+}
+
+/// Verify the fetched node manifest is structurally consistent with the fetched
+/// tree closure, *before* any mutation.
+///
+/// Every object is already hash-verified against its key, and `plan_node_diff`
+/// rejects any manifest `child_hash` absent from the closure.  But the manifest
+/// (node_id-keyed identity) and the tree objects (pure content) are independent
+/// byte streams hashed under separate keys, so a hostile remote can publish a
+/// manifest that reuses real, in-closure hashes in a *different shape* than the
+/// tree that folds to the tip root -- e.g. an extra entry pointing a second
+/// name at an existing blob, or a child moved under a different directory.  The
+/// pull applies the manifest, so such an inconsistency would commit durably and
+/// only be caught by the post-apply fold *after* the transaction is committed,
+/// poisoning subsequent diffs on retry.  This check closes that window: for the
+/// root and every physical directory it requires that the set of
+/// `(name, entry_type, child_hash)` its manifest children declare exactly equals
+/// the entries of the tree object stored at that directory's tree hash.  When
+/// they all match, faithfully applying the manifest is guaranteed to fold back
+/// to the tip's `root_tree_hash`.
+fn verify_manifest_matches_tree(graph: &FetchedGraph) -> Result<(), StewardError> {
+    let Some(root_tree) = graph.root_tree_hash() else {
+        return Ok(());
+    };
+    let root_id = src_root_id(graph)?.to_string();
+
+    // Group manifest children by parent node_id.
+    let mut children: HashMap<&str, Vec<&ManifestEntry>> = HashMap::new();
+    for e in &graph.manifest {
+        if e.node_id != root_id {
+            children
+                .entry(e.parent_node_id.as_str())
+                .or_default()
+                .push(e);
+        }
+    }
+
+    // The root manifest entry must name the tip's root tree hash as its content
+    // address, or the manifest describes a tree other than the one we fetched.
+    let root_entry = graph
+        .manifest
+        .iter()
+        .find(|e| e.node_id == root_id)
+        .ok_or_else(|| StewardError::Content("manifest has no root entry".to_string()))?;
+    if root_entry.child_hash != root_tree {
+        return Err(StewardError::Content(format!(
+            "manifest root child_hash {} does not match the tip root tree {}",
+            root_entry.child_hash.to_hex(),
+            root_tree.to_hex()
+        )));
+    }
+
+    // Every physical directory carries a tree object; its manifest children must
+    // exactly match that tree object's entries.  Dynamic directories and leaves
+    // carry a recipe/blob/series hash instead, so they are compared only as the
+    // child of their own parent (above), not descended here.
+    for dir in graph
+        .manifest
+        .iter()
+        .filter(|e| e.entry_type == EntryType::DirectoryPhysical)
+    {
+        let tree_entries = match graph.objects.get(&dir.child_hash) {
+            Some(FetchedObject::Tree(entries)) => entries,
+            _ => {
+                return Err(StewardError::Content(format!(
+                    "directory node {} references {} which is not a tree object in the closure",
+                    dir.node_id,
+                    dir.child_hash.to_hex()
+                )));
+            }
+        };
+        let mut expected: Vec<(&str, EntryType, ObjectHash)> = tree_entries
+            .iter()
+            .map(|t| (t.name.as_str(), t.entry_type, t.child_hash))
+            .collect();
+        expected.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut actual: Vec<(&str, EntryType, ObjectHash)> = children
+            .get(dir.node_id.as_str())
+            .map(|kids| {
+                kids.iter()
+                    .map(|k| (k.name.as_str(), k.entry_type, k.child_hash))
+                    .collect()
+            })
+            .unwrap_or_default();
+        actual.sort_by(|a, b| a.0.cmp(b.0));
+
+        if expected != actual {
+            return Err(StewardError::Content(format!(
+                "manifest children of directory {} do not match its tree object {}: \
+                 the remote's node manifest is inconsistent with its content tree",
+                dir.node_id,
+                dir.child_hash.to_hex()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// One node's desired name change within a single directory.

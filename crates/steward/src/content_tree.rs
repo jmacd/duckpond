@@ -461,9 +461,18 @@ pub(crate) async fn build_target_state_for_pond(
         .into_iter()
         .map(|e| (e.node_id.clone(), e))
         .collect();
+    // Filter to the requested pond BEFORE dropping the pond_id component.  The
+    // fold scans the whole data table and keys `series_versions` by
+    // (pond_id, node_id); under D8 the source's node_ids are adopted verbatim,
+    // so a mirror/import can hold the same series node_id under two different
+    // pond_ids.  Collapsing to node_id-only without this filter lets a foreign
+    // pond's version list win nondeterministically, corrupting the append-only
+    // prefix used by incremental pull.  Mirrors the pond filter in
+    // node_manifest_entries.
     let series = index
         .series_versions
         .into_iter()
+        .filter(|((pond, _node_id), _versions)| pond == pond_id)
         .map(|((_pond, node_id), versions)| (node_id, versions))
         .collect();
     Ok((by_id, series))

@@ -458,6 +458,76 @@ async fn pond_verify_reports_remote_behind_after_local_write() {
     assert_eq!(report.remote_seq, Some(earlier_seq));
 }
 
+/// A remote that serves bytes NOT hashing to the tip key it published under
+/// must make `pond verify` hard-error, not report the attacker-chosen seq those
+/// bytes decode to.  Models an untrusted/corrupt content remote.
+#[tokio::test]
+async fn pond_verify_rejects_tampered_remote_tip() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx, "test-host").await.expect("init");
+    write_small_file(&ctx, "/a.txt", b"first", vec!["copy", "a.txt"])
+        .await
+        .expect("write a.txt");
+    write_small_file(&ctx, "/b.txt", b"second", vec!["copy", "b.txt"])
+        .await
+        .expect("write b.txt");
+
+    let ship = ctx.open_pond().await.expect("open");
+    let local_seq = ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
+        .expect("seq");
+
+    // Publish the tip UNDER an earlier commit's hash key, but store the LOCAL
+    // TIP's commit bytes there.  Those bytes decode to a valid commit with a
+    // different seq and do NOT hash to the key -- exactly a tampered remote.
+    let earlier_seq = local_seq - 1;
+    let earlier_hash_hex = ship
+        .control_table()
+        .commit_hash_at(earlier_seq)
+        .await
+        .expect("commit hash")
+        .expect("earlier commit recorded");
+    let tip_key = sync_store::content::ObjectHash::from_hex(&earlier_hash_hex).expect("tip hash");
+    let tampered_obj_hex = ship
+        .control_table()
+        .commit_object_at(local_seq)
+        .await
+        .expect("commit object")
+        .expect("local tip commit object recorded");
+    let tampered_bytes: Vec<u8> = (0..tampered_obj_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&tampered_obj_hex[i..i + 2], 16).expect("hex byte"))
+        .collect();
+
+    let store_id = ship.control_table().pond_id_uuid();
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let mut remote =
+        sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    let _ = remote
+        .push_commit(&[(tip_key, tampered_bytes)], "main", tip_key)
+        .await
+        .expect("publish tampered tip");
+
+    let err =
+        steward::verify_content_against_remote(ship.as_pond().expect("pond"), &remote, "main")
+            .await
+            .expect_err("tampered remote tip must be rejected");
+    assert!(
+        format!("{err}").contains("remote tip commit hashes to"),
+        "unexpected error: {err}"
+    );
+}
+
 /// `pond verify` with no remotes attached is a no-op success.
 #[tokio::test]
 async fn pond_verify_no_remotes_is_noop() {

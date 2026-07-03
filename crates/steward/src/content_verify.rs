@@ -105,12 +105,29 @@ pub async fn verify_content_against_remote(
             .await
             .map_err(|e| StewardError::Content(e.to_string()))?
         {
-            Some(bytes) => Some(
-                Commit::decode(&bytes)
-                    .map_err(|e| StewardError::Content(format!("decode remote tip commit: {e}")))?
-                    .provenance
-                    .seq,
-            ),
+            Some(bytes) => {
+                // The remote is untrusted: `get_object` is a raw read, so a
+                // hostile/corrupt remote could serve bytes that decode to a
+                // valid commit with an attacker-chosen seq under the tip key.
+                // Enforce blake3(bytes)==key before trusting any decoded field,
+                // matching every other steward fetch site (content_pull::verify).
+                let actual = ObjectHash::of_bytes(&bytes);
+                if actual != rt {
+                    return Err(StewardError::Content(format!(
+                        "remote tip commit hashes to {} but was fetched as {}",
+                        actual.to_hex(),
+                        rt.to_hex()
+                    )));
+                }
+                Some(
+                    Commit::decode(&bytes)
+                        .map_err(|e| {
+                            StewardError::Content(format!("decode remote tip commit: {e}"))
+                        })?
+                        .provenance
+                        .seq,
+                )
+            }
             None => None,
         }
     } else {

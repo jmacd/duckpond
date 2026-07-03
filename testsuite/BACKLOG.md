@@ -7,6 +7,33 @@
 
 ## 🔴 Open Items
 
+### CA-MIRROR-RESTORE: no CLI entry point + no e2e test for full-pond restore
+- **Type**: PRODUCTION-READINESS GAP + TEST COVERAGE (P1)
+- **Symptom**: The mirror-restart / disaster-recovery path
+  (`pull.rs::pull_mirror` -> `steward::rebuild_pond`, taken when a pull-mode
+  remote has mount_path `/` or none) is only reachable once the local pond
+  already carries the SOURCE pond's `pond_id`.  The only way to stamp that id
+  is `Ship::create_replica`, which is exercised solely by Rust integration
+  tests and is NOT wired to any `pond` CLI command -- `pond init` always mints
+  a fresh id, and the old `--from-backup` / `restart-from-compact` / emergency
+  tooling was removed on jmacd/65.  Net: an operator cannot restore a whole
+  pond from a backup, and `rebuild_pond`/`pull_mirror` have zero end-to-end
+  testsuite coverage.
+- **Next step**: expose a replica-bootstrap verb (e.g. `pond init --mirror
+  <url>` or `pond restore <url>`) that calls `create_replica` + `pull_mirror`,
+  then add an e2e test: producer backup-add + push; fresh consumer restores by
+  the source pond_id; assert `pond fsck` roots match and content md5 matches.
+
+### CA-RENAME-CYCLE: emit_collision_safe_renames end-to-end (CLI) coverage
+- **Type**: TEST COVERAGE (P2)
+- **Symptom**: `content_pull.rs::emit_collision_safe_renames` (sibling swap
+  a<->b, 3-node rotations, tmp-name cycle breaking) is covered by steward unit
+  tests (`swapped_sibling_names_converge`, `rotated_sibling_names_converge`) but
+  has no `testsuite/tests/NNN-*.sh` case, because there is no `pond mv` CLI verb
+  to produce renames from the command line to drive a push/pull.
+- **Next step**: add a rename primitive or a factory that renames, then a test
+  that swaps two sibling names upstream and asserts the consumer converges.
+
 ### FLAKY-SITEGEN-OUTPUT: 209/210 sitegen-sidebar tests flake under heavy churn
 - **Type**: TEST FLAKINESS (pre-existing; surfaced during the full
   testsuite run 2026-06-08)
@@ -32,6 +59,43 @@
 ---
 
 ## 🟢 Done
+
+### ✅ CA-REVIEW-FIXES: three content-addressed replication fixes (jmacd/65)
+- **Completed**: 2026-07-03
+- **Type**: BUG FIX (from production-readiness review)
+- **What**: three findings from a code review of the CA replication branch,
+  each fixed with a regression test:
+  1. `content_tree.rs::build_target_state_for_pond` -- the series map was built
+     from a whole-table fold and dropped the `pond_id` WITHOUT filtering to the
+     target pond, unlike the manifest map.  Under D8 node_id adoption two ponds
+     sharing a series node_id collided, letting a foreign pond's version list
+     win nondeterministically and corrupt the incremental-pull append prefix.
+     Now filtered to the target pond.
+  2. `content_pull.rs` -- the read-side fold + manifest verification ran AFTER
+     `write_transaction` committed, so a manifest inconsistent with the tree
+     closure (reusing in-closure hashes in a different shape) committed durably
+     before the fold caught it.  Added `verify_manifest_matches_tree`, a
+     pre-mutation check that every physical directory's manifest children
+     exactly match its tree object; run in both `rebuild_pond` and
+     `import_pond` before the transaction.  Test:
+     `tampered_manifest_is_rejected_before_commit`.
+  3. `content_verify.rs` -- `pond verify` decoded the remote tip commit from an
+     untrusted remote WITHOUT `blake3(bytes)==tip`, so a malicious remote could
+     make verify report an attacker-chosen source seq.  Now hash-verified.
+     Test: `pond_verify_rejects_tampered_remote_tip`.
+
+### ✅ CA-QUERYABLE-REPL: queryable-entry replication (722)
+- **Completed**: 2026-07-03
+- **Type**: TEST COVERAGE
+- **What**: `722-queryable-replication.sh` (file://, 10 checks, green
+  in-container).  Covers the two queryable archetypes surviving a
+  content-addressed push/pull, which 711 (raw data), 717 (data:series read as
+  bytes), and 533 (dynamic-node non-execution, S3-only) all left uncovered:
+  (a) a `synthetic-timeseries` DYNAMIC node recomputes on the consumer via the
+  D4 recipe rebuild (7 rows, temperature=20); (b) a physical `TablePhysicalSeries`
+  entry keeps its entry type and stays SQL-queryable on the consumer after the
+  parquet blob transfers.  Asserts row counts AND a sentinel value match the
+  producer on both.
 
 ### ✅ D9: file:// testsuite coverage for the D6/D7 remote CLI verbs
 - **Completed**: 2026-06-08
