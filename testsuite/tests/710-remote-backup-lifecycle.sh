@@ -37,7 +37,7 @@ mkdir -p "$REMOTE_DIR" "$BIDI_DIR"
 export POND="$POND_DIR"
 
 # Extract a column from `pond backup list` for a given remote name.
-# Columns: NAME URL MODE MOUNT LAST_PUSHED_SEQ LAST_PULLED_SEQ
+# Columns: NAME URL MODE MOUNT PUSHED_TIP PULLED_TIP
 backup_field() {  # name colnum
     pond backup list 2>/dev/null | awk -v n="$1" -v c="$2" '$1==n {print $c; exit}'
 }
@@ -52,14 +52,16 @@ echo "--- Step 2-3: backup add (auto-push) + list ---"
 pond backup add origin "file://${REMOTE_DIR}" > /tmp/710-add.log 2>&1
 check_contains /tmp/710-add.log "backup add reports push mode" "mode=push"
 check 'pond backup list | grep -q origin'                       "backup list shows origin"
-check 'pond backup list | grep -q LAST_PUSHED_SEQ'              "backup list has watermark column"
+check 'pond backup list | grep -q PUSHED_TIP'                   "backup list has tip-frontier column"
 check '[ -d "'"${REMOTE_DIR}"'/_delta_log" ]'                   "remote initialized as Delta table"
 PUSHED1=$(backup_field origin 5)
-check '[ -n "'"${PUSHED1}"'" ] && [ "'"${PUSHED1}"'" != "-" ]'  "LAST_PUSHED_SEQ set after attach"
+check '[ -n "'"${PUSHED1}"'" ] && [ "'"${PUSHED1}"'" != "-" ]'  "PUSHED_TIP set after attach (auto-push)"
 
-echo "--- Step 4: push when up to date ---"
+echo "--- Step 4: re-push is idempotent (tip unchanged) ---"
 pond push origin > /tmp/710-push.log 2>&1
-check_contains /tmp/710-push.log "push is a no-op when up to date" "nothing to push"
+check_contains /tmp/710-push.log "push reports completion with a tip" "push origin complete"
+PUSHED_AGAIN=$(backup_field origin 5)
+check '[ "'"${PUSHED_AGAIN}"'" = "'"${PUSHED1}"'" ]'            "re-push leaves PUSHED_TIP unchanged (no new content)"
 
 echo "--- Step 5: verify clean ---"
 pond verify origin > /tmp/710-verify.log 2>&1
@@ -71,11 +73,11 @@ check_contains /tmp/710-status.log "status prints identity section" "Pond ID:"
 check_contains /tmp/710-status.log "status lists one remote"        "Remotes (1)"
 check_contains /tmp/710-status.log "status shows last pushed"       "last pushed:"
 
-echo "--- Step 7: write more (auto-push) -> watermark advances ---"
+echo "--- Step 7: write more (auto-push) -> tip advances ---"
 printf 'delta\necho\n' > /tmp/710-b.txt
 pond copy host:///tmp/710-b.txt /b.txt >/dev/null 2>&1
 PUSHED2=$(backup_field origin 5)
-check '[ "'"${PUSHED2}"'" -gt "'"${PUSHED1}"'" ]' "LAST_PUSHED_SEQ advanced after new write"
+check '[ -n "'"${PUSHED2}"'" ] && [ "'"${PUSHED2}"'" != "'"${PUSHED1}"'" ]' "PUSHED_TIP advanced after new write"
 pond verify origin > /tmp/710-verify2.log 2>&1
 check_contains /tmp/710-verify2.log "verify still clean after auto-push" "live data matches remote"
 

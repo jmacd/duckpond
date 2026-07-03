@@ -56,6 +56,34 @@ pub async fn pull_command(ship_context: &ShipContext, name: Option<String>) -> R
     }
 }
 
+/// Return `true` when the remote's tip commit for ref `main` already equals the
+/// tip we last pulled for `url`, meaning the local mirror/mount is up to date
+/// and the full graph fetch can be skipped.  Records nothing; the caller
+/// refreshes `last_pulled_tip` only after a real rebuild/import lands.
+async fn already_at_tip(
+    ship: &steward::Ship,
+    remote: &sync_store::ContentRemote,
+    url: &str,
+    name: &str,
+) -> Result<bool> {
+    let remote_tip = remote
+        .get_tip("main")
+        .await
+        .map_err(|e| anyhow!("get tip from `{}`: {}", url, e))?;
+    let last_pulled = ship
+        .control_table()
+        .raw_config_get(&format!("last_pulled_tip:{url}"))
+        .await
+        .map_err(|e| anyhow!("read last_pulled_tip for `{}`: {}", name, e))?;
+    if let (Some(tip), Some(prev)) = (remote_tip, last_pulled.as_deref())
+        && tip.to_hex() == prev
+    {
+        log::info!("[OK] pull {name} already up to date (tip={prev})");
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     let attachment = load_remote_attachment(ship, name).await?;
 
@@ -104,6 +132,14 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         ));
     }
 
+    // Incremental short-circuit (CA3): if the remote tip already equals the
+    // tip we last pulled, the mount is up to date -- skip the full graph fetch
+    // and re-import entirely.  This is the bandwidth-bug guard: without it,
+    // every pull re-walks and re-downloads the whole reachable object closure.
+    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+        return Ok(());
+    }
+
     // Fetch the foreign object graph and rebuild it under the foreign pond_id
     // partition, then mount it.  The local allocator stays contiguous; only the
     // foreign pond's seq frontier advances inside `import_pond`.
@@ -144,6 +180,17 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     )
     .await?;
 
+    // Record the per-ref frontier we last pulled: the foreign tip commit hash
+    // now mounted (CA3 replacement for the retired seq watermark).
+    ship_ref
+        .control_table_mut()
+        .raw_config_set(
+            &format!("last_pulled_tip:{}", attachment.url),
+            &pinned_tip.to_hex(),
+        )
+        .await
+        .map_err(|e| anyhow!("record last_pulled_tip for `{}`: {}", name, e))?;
+
     Ok(())
 }
 
@@ -164,6 +211,12 @@ async fn pull_mirror(
         .as_pond_mut()
         .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
 
+    // Incremental short-circuit (CA3): skip the full graph fetch and rebuild
+    // when the mirror already reflects the remote tip.
+    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+        return Ok(());
+    }
+
     let graph = steward::fetch_object_graph(&remote, "main")
         .await
         .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
@@ -182,6 +235,19 @@ async fn pull_mirror(
         name,
         outcome
     );
+
+    // Record the per-ref frontier we last pulled: the tip commit hash the
+    // mirror now reflects (CA3 replacement for the retired seq watermark).
+    if let Some(tip) = graph.tip {
+        ship_ref
+            .control_table_mut()
+            .raw_config_set(
+                &format!("last_pulled_tip:{}", attachment.url),
+                &tip.to_hex(),
+            )
+            .await
+            .map_err(|e| anyhow!("record last_pulled_tip for `{}`: {}", name, e))?;
+    }
     Ok(())
 }
 

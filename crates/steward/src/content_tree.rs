@@ -39,13 +39,127 @@ use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
 
 use sync_store::content::{
-    ManifestEntry, ObjectHash, TreeEntry, encode_manifest, encode_recipe, encode_series,
-    encode_tree, manifest_hash, recipe_hash, series_hash,
+    Commit, ManifestEntry, ObjectHash, Provenance, TreeEntry, encode_manifest, encode_recipe,
+    encode_series, encode_tree, manifest_hash, recipe_hash, series_hash,
 };
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
 
+use crate::control_table::{CommitSpine, ControlTable};
 use crate::{Ship, StewardError};
+
+/// Compute the content-graph commit spine for a just-landed write or
+/// compaction.
+///
+/// Folds the post-commit live tree into a `root_tree_hash`, looks up the
+/// previous commit on this pond's chain (the `DataCommitted` record at
+/// `txn_seq - 1`), builds the [`Commit`] object, and returns its hex spine.
+/// The parent is `None` at genesis or wherever an earlier seq did not stamp a
+/// spine; such gaps break the chain for that link but leave each commit's own
+/// hash well-defined.
+///
+/// Shared by the guard's write commit and [`crate::Ship::compact`] so both
+/// paths stamp an identical spine and every committed data write is reachable
+/// via a content-graph commit for push.
+pub(crate) async fn compute_commit_spine(
+    table: deltalake::DeltaTable,
+    control_table: &ControlTable,
+    pond_id: uuid::Uuid,
+    txn_seq: i64,
+    request: String,
+) -> Result<Option<CommitSpine>, StewardError> {
+    let pond_id_str = pond_id.to_string();
+    let (root_tree_hash, node_manifest_hash) =
+        compute_commit_roots_for_table(table, &pond_id_str).await?;
+
+    let parent_commit_hash = control_table
+        .commit_hash_at(txn_seq - 1)
+        .await?
+        .and_then(|hex| ObjectHash::from_hex(&hex).ok());
+
+    let provenance = Provenance {
+        pond_id: pond_id_str,
+        seq: txn_seq,
+        time_micros: chrono::Utc::now().timestamp_micros(),
+        author: String::new(),
+        request,
+    };
+    let commit = Commit::new(
+        root_tree_hash,
+        parent_commit_hash,
+        node_manifest_hash,
+        provenance,
+    );
+
+    Ok(Some(CommitSpine {
+        root_tree_hash: root_tree_hash.to_hex(),
+        parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
+        commit_hash: commit.hash().to_hex(),
+        commit_object: hex::encode(commit.encode()),
+    }))
+}
+
+/// Reconcile a pond's transparency-log tiles with its committed leaf sequence
+/// and re-emit the checkpoint (design Decision D5).
+///
+/// The authoritative leaf sequence is the ordered `commit_object` bytes of the
+/// spine-bearing `DataCommitted` records; the tile log is a derived,
+/// re-materializable export.  The writer drives its next leaf position from the
+/// committed leaf count, replaying every leaf the export is missing in commit
+/// order, so a dropped append self-heals on the next commit.
+///
+/// Failures are logged and swallowed: the transparency log is a derived
+/// publishing artifact and must not unwind an already-committed transaction.
+/// Shared by the guard's write commit and [`crate::Ship::compact`].
+pub(crate) async fn materialize_tlog(
+    pond_path: &std::path::Path,
+    control_table: &ControlTable,
+    pond_id: uuid::Uuid,
+) {
+    let dir = crate::get_tlog_path(pond_path);
+    let origin = format!("duckpond/{pond_id}");
+    let log = sync_store::TileLog::new(dir, origin);
+
+    let leaves = match control_table.commit_objects_in_order().await {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("failed to read transparency-log leaf sequence: {e}");
+            return;
+        }
+    };
+
+    let exported = match log.size() {
+        Ok(n) => n as usize,
+        Err(e) => {
+            log::error!("failed to read transparency-log checkpoint size: {e}");
+            return;
+        }
+    };
+
+    if exported >= leaves.len() {
+        return;
+    }
+
+    let mut missing = Vec::with_capacity(leaves.len() - exported);
+    for hex in &leaves[exported..] {
+        match hex::decode(hex) {
+            Ok(bytes) => missing.push(bytes),
+            Err(e) => {
+                log::error!("transparency-log leaf is not valid hex: {e}");
+                return;
+            }
+        }
+    }
+
+    match log.append_leaf_data(missing) {
+        Ok(checkpoint) => log::debug!(
+            "transparency log checkpoint emitted (size={}, root={})",
+            checkpoint.size,
+            checkpoint.root.to_hex()
+        ),
+        Err(e) => log::error!("failed to materialize transparency-log tiles: {e}"),
+    }
+}
 
 /// Result of a [`compute_content_tree`] run.
 #[derive(Debug, Clone)]

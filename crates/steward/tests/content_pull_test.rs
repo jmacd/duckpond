@@ -607,6 +607,90 @@ async fn rename_preserves_node_identity() {
     assert_eq!(root_hash(&dst).await, root_hash(&src).await);
 }
 
+/// A name swap between two siblings is a rename cycle: node A takes B's name
+/// and B takes A's, each preserving its identity. Applied one at a time the
+/// first rename lands on a name the other sibling still holds and the pull
+/// would abort; the collision-safe batch stages the cycle through a temporary
+/// name so it converges to a row-identical mirror.
+#[tokio::test]
+async fn swapped_sibling_names_converge() {
+    let (_t, mut src) = new_pond("swap-src").await;
+    write_file(&mut src, "/a.txt", b"alpha").await;
+    write_file(&mut src, "/b.txt", b"beta").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "swap-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("rebuild");
+
+    // Swap the two names on the source, preserving each node's identity. The
+    // source itself must stage through a temp because rename_entry also rejects
+    // an occupied target.
+    rename(&mut src, "/a.txt", "/tmp.txt").await;
+    rename(&mut src, "/b.txt", "/a.txt").await;
+    rename(&mut src, "/tmp.txt", "/b.txt").await;
+
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("re-pull with a name swap must not abort");
+
+    // The swap is renames, not creates: no new file node appears.
+    assert_eq!(outcome.files, 0);
+    assert_eq!(read_to_string(&mut dst, "/a.txt").await, "beta");
+    assert_eq!(read_to_string(&mut dst, "/b.txt").await, "alpha");
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
+/// A three-way rename rotation (a->b->c->a) is a longer cycle than a swap and
+/// still converges: the collision-safe batch breaks it with a single temporary
+/// name and then unwinds the chain.
+#[tokio::test]
+async fn rotated_sibling_names_converge() {
+    let (_t, mut src) = new_pond("rot-src").await;
+    write_file(&mut src, "/a.txt", b"AAA").await;
+    write_file(&mut src, "/b.txt", b"BBB").await;
+    write_file(&mut src, "/c.txt", b"CCC").await;
+
+    let (_rt, mut remote) = push(&src).await;
+    let dst_dir = tempdir().expect("dst dir");
+    let mut dst = Ship::create_pond(dst_dir.path().join("pond"), "rot-dst")
+        .await
+        .expect("create dst");
+
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let _ = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("rebuild");
+
+    // Rotate names so node A -> b, node B -> c, node C -> a (content follows its
+    // node). Staged through a temp so each single source rename has a free
+    // target.
+    rename(&mut src, "/a.txt", "/tmp.txt").await; // A: a -> (b)
+    rename(&mut src, "/c.txt", "/a.txt").await; // C: c -> a
+    rename(&mut src, "/b.txt", "/c.txt").await; // B: b -> c
+    rename(&mut src, "/tmp.txt", "/b.txt").await; // A: -> b
+
+    repush(&src, &mut remote).await;
+    let graph = fetch_object_graph(&remote, "main").await.expect("fetch");
+    let outcome = steward::rebuild_pond(&mut dst, &remote, &graph)
+        .await
+        .expect("re-pull with a rename rotation must not abort");
+
+    assert_eq!(outcome.files, 0);
+    assert_eq!(read_to_string(&mut dst, "/a.txt").await, "CCC");
+    assert_eq!(read_to_string(&mut dst, "/b.txt").await, "AAA");
+    assert_eq!(read_to_string(&mut dst, "/c.txt").await, "BBB");
+    assert_eq!(root_hash(&dst).await, root_hash(&src).await);
+}
+
 /// Deleting a node in the source propagates on pull: the absent node is
 /// unlinked from the mirror.
 #[tokio::test]

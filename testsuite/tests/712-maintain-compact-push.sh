@@ -48,12 +48,12 @@ check '[ -n "'"${SRC_MD5}"'" ]' "producer f3 md5 computed"
 
 echo "--- Step 2: maintain --compact ---"
 pond maintain --compact > /tmp/712-compact.log 2>&1
-check_contains /tmp/712-compact.log "compaction recorded as a transaction" "Compaction committed"
-check_contains /tmp/712-compact.log "log advises pushing the compact bundle" "pond push"
+check_contains /tmp/712-compact.log "Compaction committed" "compaction recorded as a transaction"
+check_contains /tmp/712-compact.log "pond push" 'run `pond push`'
 
-echo "--- Step 3: push the Compact bundle ---"
+echo "--- Step 3: push the Compact commit ---"
 pond push origin > /tmp/712-push.log 2>&1
-check 'grep -qE "push origin complete \(pushed=[1-9]" /tmp/712-push.log' "compact push uploaded >=1 bundle"
+check 'grep -qE "push origin complete \(objects_pushed=[1-9]" /tmp/712-push.log' "compact push uploaded >=1 object"
 
 echo "--- Step 4: verify clean after compaction ---"
 pond verify origin > /tmp/712-verify.log 2>&1
@@ -64,7 +64,8 @@ export POND="$P2"
 pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up >/dev/null 2>&1
 pond pull upstream > /tmp/712-pull.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/712-pull.log' "consumer applied bundles"
+check 'grep -qE "pull upstream complete" /tmp/712-pull.log' "consumer pull completed"
+check 'grep -qE "files: [1-9]" /tmp/712-pull.log' "consumer imported >=1 file"
 IMPORTED_MD5=$(pond cat /imports/up/data/f3.txt 2>/dev/null | md5sum | awk '{print $1}')
 check '[ "'"${IMPORTED_MD5}"'" = "'"${SRC_MD5}"'" ]' "consumer f3 content matches producer post-compact"
 check 'pond cat /imports/up/data/f1.txt | grep -q compact-row-1' "first file survives compaction round-trip"

@@ -7,9 +7,11 @@
 //! `pond remote` subcommands: `add`, `remove`, `list`.
 //!
 //! Remote attachments live as small YAML files under `/sys/remotes/<name>`.
-//! Per-remote runtime state (`last_pushed_seq:<url>`, `last_pulled_seq:<url>`,
+//! Per-remote runtime state (`last_pushed_tip:<url>`, `last_pulled_tip:<url>`,
 //! `remote_mode:<name>`) lives in the control table's raw_config map; the
-//! YAML on disk is intentionally portable (no per-pond watermarks).
+//! YAML on disk is intentionally portable (no per-pond frontier state).  The
+//! tips are the CA3 single-commit-hash frontier that replaced the retired
+//! per-pond seq watermarks.
 //!
 //! The data types ([`RemoteAttachment`] / [`RemoteMode`]) live in the
 //! [`steward`] crate so the post-commit auto-push dispatcher can use them
@@ -671,8 +673,8 @@ pub async fn remove_remote_command(
     }
     if let Some(url) = url_to_clear {
         for key in [
-            format!("last_pushed_seq:{url}"),
-            format!("last_pulled_seq:{url}"),
+            format!("last_pushed_tip:{url}"),
+            format!("last_pulled_tip:{url}"),
         ] {
             if let Err(e) = ship.control_table_mut().raw_config_set(&key, "").await {
                 log::warn!("[WARN] failed to clear {}: {}", key, e);
@@ -714,8 +716,8 @@ pub async fn list_remotes_command(
     }
 
     println!(
-        "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
-        "NAME", "URL", "MODE", "MOUNT", "LAST_PUSHED_SEQ", "LAST_PULLED_SEQ"
+        "{:<20} {:<50} {:<6} {:<20} {:<18} {:<18}",
+        "NAME", "URL", "MODE", "MOUNT", "PUSHED_TIP", "PULLED_TIP"
     );
     for name in entries {
         let attachment = match load_remote_attachment(&mut ship, &name).await {
@@ -743,24 +745,33 @@ pub async fn list_remotes_command(
             .unwrap_or_default()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "-".to_string());
-        let last_pushed = ship
-            .control_table()
-            .raw_config_get(&format!("last_pushed_seq:{}", attachment.url))
-            .await
-            .unwrap_or_default()
-            .unwrap_or_else(|| "-".to_string());
-        let last_pulled = ship
-            .control_table()
-            .raw_config_get(&format!("last_pulled_seq:{}", attachment.url))
-            .await
-            .unwrap_or_default()
-            .unwrap_or_else(|| "-".to_string());
+        let pushed_tip = short_tip(
+            ship.control_table()
+                .raw_config_get(&format!("last_pushed_tip:{}", attachment.url))
+                .await
+                .unwrap_or_default(),
+        );
+        let pulled_tip = short_tip(
+            ship.control_table()
+                .raw_config_get(&format!("last_pulled_tip:{}", attachment.url))
+                .await
+                .unwrap_or_default(),
+        );
         println!(
-            "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
-            name, attachment.url, mode, mount, last_pushed, last_pulled
+            "{:<20} {:<50} {:<6} {:<20} {:<18} {:<18}",
+            name, attachment.url, mode, mount, pushed_tip, pulled_tip
         );
     }
     Ok(())
+}
+
+/// Render a stored 64-hex tip commit hash as a short, stable 16-char prefix for
+/// operator display, or `-` when the ref has never been pushed/pulled.
+fn short_tip(stored: Option<String>) -> String {
+    match stored.filter(|s| !s.is_empty()) {
+        Some(hex) => hex.chars().take(16).collect(),
+        None => "-".to_string(),
+    }
 }
 
 /// Read and parse the YAML for `<name>` from `/sys/remotes/<name>`.

@@ -237,11 +237,13 @@ echo "=== Phase 5: 3-deep transitivity is BLOCKED by the pond_id push filter ===
 check "/imports/B/imports appears in C's listing (B-owned mkdir parent)" \
     "grep -q '/imports/B/imports$' /tmp/c-list-b.txt"
 
-# ... but listing its CHILDREN must NOT succeed (the foreign mount-entry
-# row for 'A' was filtered out of B's push, so /imports/B/imports has
-# no resolvable body in C's view).
-check_fails "listing /imports/B/imports/ on C fails (no foreign rows)" \
-    "pond list /imports/B/imports/"
+# ... and listing its CHILDREN exposes NO foreign mount entry: B's push
+# omits the /imports/A mount node from the content-tree fold (keeping the
+# graft non-transitive), so on C the B-owned /imports/B/imports directory
+# is empty -- it lists successfully but the foreign 'A' entry is absent.
+pond list /imports/B/imports/ > /tmp/c-list-bimports.txt 2>&1 || true
+check "C's /imports/B/imports/ does not expose the foreign 'A' mount (non-transitive)" \
+    "! grep -qE '/imports/B/imports/A(\$|/| )' /tmp/c-list-bimports.txt"
 
 # Direct access through the would-be transitive path must fail too.
 check_fails "reading /imports/B/imports/A/data/a.txt on C fails (3-deep blocked)" \

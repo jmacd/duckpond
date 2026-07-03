@@ -109,10 +109,6 @@ RUN mkdir -p /var/log/duckpond /var/log/experiment
 COPY pond /usr/local/bin/pond
 RUN chmod +x /usr/local/bin/pond
 
-# Copy the emergency recovery script (from crates/cmd/scripts/)
-COPY duckpond-emergency /usr/local/bin/duckpond-emergency
-RUN chmod +x /usr/local/bin/duckpond-emergency
-
 # Copy vendor assets (DuckDB-WASM, Observable Plot, D3) for sitegen
 COPY --from=vendor /vendor/dist/ /usr/local/share/duckpond/vendor/
 

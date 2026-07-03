@@ -576,6 +576,91 @@ fn src_root_id(graph: &FetchedGraph) -> Result<&str, StewardError> {
         .ok_or_else(|| StewardError::Content("manifest has no root entry".to_string()))
 }
 
+/// One node's desired name change within a single directory.
+struct RenameIntent {
+    /// The node's current name in the target.
+    old: String,
+    /// The node's name in the source (its final name after the pull).
+    new: String,
+    /// The node's adopted `node_id`, used to mint a unique temporary name when
+    /// a rename cycle must be broken.
+    node_id: String,
+}
+
+/// Emit a collision-safe sequence of rename ops for one directory's children.
+///
+/// Within a directory a rename's target name can only be occupied by another
+/// node that is itself being renamed away: two nodes cannot share a name in the
+/// source tree, so the target of `old -> new` never collides with a sibling that
+/// keeps its name. Simple chains therefore resolve by repeatedly applying any
+/// rename whose target is already free. A cycle (an `a<->b` swap or a longer
+/// rotation) has no such rename; it is broken by first moving one node to a
+/// unique temporary name (freeing its old name so the rest of the cycle can
+/// proceed), then renaming that temporary to its final name once the name frees.
+fn emit_collision_safe_renames(parent: &str, intents: Vec<RenameIntent>, ops: &mut Vec<ApplyOp>) {
+    // Pending renames keyed by the name each currently occupies. A target `new`
+    // is blocked exactly while it is still a key here (some node has not yet
+    // vacated it).
+    let mut pending: HashMap<String, RenameIntent> = HashMap::new();
+    for intent in intents {
+        if intent.old != intent.new {
+            let _ = pending.insert(intent.old.clone(), intent);
+        }
+    }
+
+    loop {
+        // Apply every rename whose target is currently free, in a deterministic
+        // order so the emitted plan is stable.
+        let mut free: Vec<String> = pending
+            .iter()
+            .filter(|(_, intent)| !pending.contains_key(&intent.new))
+            .map(|(old, _)| old.clone())
+            .collect();
+        free.sort();
+
+        if !free.is_empty() {
+            for old in free {
+                if let Some(intent) = pending.remove(&old) {
+                    ops.push(ApplyOp::Rename {
+                        parent: parent.to_string(),
+                        old: intent.old,
+                        new: intent.new,
+                    });
+                }
+            }
+            continue;
+        }
+
+        if pending.is_empty() {
+            break;
+        }
+
+        // Only cycles remain: break one by staging its lexicographically first
+        // node through a unique temporary name. The node_id makes the temporary
+        // name unique and collision-free against any real sibling.
+        let victim = pending
+            .keys()
+            .min()
+            .cloned()
+            .expect("pending is non-empty in the cycle branch");
+        let intent = pending.remove(&victim).expect("victim key is present");
+        let temp = format!(".pull-rename-tmp-{}", intent.node_id);
+        ops.push(ApplyOp::Rename {
+            parent: parent.to_string(),
+            old: intent.old,
+            new: temp.clone(),
+        });
+        let _ = pending.insert(
+            temp.clone(),
+            RenameIntent {
+                old: temp,
+                new: intent.new,
+                node_id: intent.node_id,
+            },
+        );
+    }
+}
+
 /// Diff the fetched source manifest against the target's current node state,
 /// keyed by `node_id`, producing the ordered apply plan and the create counts.
 fn plan_node_diff(
@@ -630,6 +715,31 @@ fn plan_node_diff(
         let Some(kids) = children.get(parent_id) else {
             continue;
         };
+
+        // Renames for this directory are planned first, as a collision-safe
+        // batch. A source-side rename preserves a node's identity, so a name
+        // swap (a<->b) or longer rename cycle among siblings shows up as two or
+        // more renames whose targets each land on a name another not-yet-moved
+        // sibling still holds. Applying them naively one at a time aborts on the
+        // first collision; emit_collision_safe_renames stages cycles through a
+        // temporary name so the whole rotation lands. Emitting every rename in
+        // this directory before any create also lets a newly adopted node take
+        // a name an existing sibling is vacating in the same pull.
+        let mut renames = Vec::new();
+        for entry in kids {
+            if let Some(t) = target_nodes.get(&entry.node_id)
+                && t.parent_node_id == entry.parent_node_id
+                && t.name != entry.name
+            {
+                renames.push(RenameIntent {
+                    old: t.name.clone(),
+                    new: entry.name.clone(),
+                    node_id: entry.node_id.clone(),
+                });
+            }
+        }
+        emit_collision_safe_renames(parent_id, renames, &mut ops);
+
         for entry in kids {
             plan_one(
                 entry,
@@ -673,13 +783,9 @@ fn plan_one(
                 entry.node_id, t.entry_type, entry.entry_type
             )));
         }
-        if t.name != entry.name {
-            ops.push(ApplyOp::Rename {
-                parent: entry.parent_node_id.clone(),
-                old: t.name.clone(),
-                new: entry.name.clone(),
-            });
-        }
+        // A name change (t.name != entry.name) is not emitted here: renames are
+        // planned as a collision-safe per-directory batch in plan_node_diff,
+        // before this node's create/version op, so swaps and cycles land.
     }
 
     let content_changed = existing.is_none_or(|t| t.child_hash != entry.child_hash);

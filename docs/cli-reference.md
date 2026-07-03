@@ -1692,49 +1692,6 @@ where `PATH != /` (D5.7b).  The legacy `import:` config block remains
 unused; cross-pond data is reached through the mount path rather than
 through factory-level imports.
 
-#### Emergency Recovery (duckpond-emergency)
-
-A standalone shell script for disaster recovery when the pond binary is unavailable.
-Uses only DuckDB to read backup data directly from parquet files.
-
-**Location:** `crates/cmd/scripts/duckpond-emergency`
-
-**Requirements:**
-- DuckDB CLI
-- b3sum (optional, for BLAKE3 verification)
-
-**Usage:**
-```bash
-# List all files in backup
-duckpond-emergency /path/to/backup list
-
-# Show backup metadata
-duckpond-emergency /path/to/backup info
-
-# Extract files matching pattern (SQL LIKE syntax: % = wildcard)
-duckpond-emergency /path/to/backup extract "_delta_log%" ./delta_logs/
-
-# Verify BLAKE3 checksums
-duckpond-emergency /path/to/backup verify
-
-# Export all files
-duckpond-emergency /path/to/backup export-all ./full_restore/
-```
-
-**S3/MinIO:**
-```bash
-export AWS_ENDPOINT_URL="http://localhost:9000"
-export AWS_REGION="us-east-1"
-export AWS_ACCESS_KEY_ID="minioadmin"
-export AWS_SECRET_ACCESS_KEY="minioadmin"
-duckpond-emergency s3://bucket/backup list
-```
-
-> **Note:** `duckpond-emergency` predates the D4 bundle-format change.
-> It currently assumes the legacy chunked-parquet bundle layout; it will
-> need a rewrite (or replacement) for ponds whose bundles were produced
-> by `sync_remote::Remote`.
-
 ### hydrovu
 
 HydroVu API data collection.

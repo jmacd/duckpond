@@ -88,19 +88,13 @@ check_eq() {
     fi
 }
 
-# Extract LAST_PULLED_SEQ for a given remote name from `pond remote list`.
-# Returns "-" if not yet pulled, or the integer string otherwise.
-remote_last_pulled_seq() {
+# Extract PULLED_TIP for a given remote name from `pond remote list`.
+# Returns "-" if not yet pulled, or the short tip hash otherwise.
+remote_last_pulled_tip() {
     local name="$1"
     pond remote list 2>/dev/null | awk -v n="${name}" '
         $1 == n {print $NF; exit}
     '
-}
-
-# Count "applied N bundle(s)" in a pull log, returning N (or empty if absent).
-applied_bundles() {
-    local logfile="$1"
-    grep -oE "applied [0-9]+ bundle" "${logfile}" | awk '{print $2}' | head -1
 }
 
 #############################
@@ -170,8 +164,8 @@ pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --allow-http \
     --overwrite >/dev/null
 
-WM_BEFORE=$(remote_last_pulled_seq upstream)
-echo "LAST_PULLED_SEQ before first pull: ${WM_BEFORE}"
+WM_BEFORE=$(remote_last_pulled_tip upstream)
+echo "PULLED_TIP before first pull: ${WM_BEFORE}"
 
 #############################
 # PULL #1 — initial import
@@ -180,15 +174,17 @@ echo "LAST_PULLED_SEQ before first pull: ${WM_BEFORE}"
 echo ""
 echo "=== Phase 3: Pull #1 (initial import) ==="
 pond pull upstream 2>&1 | tee /tmp/pull1.log
-WM_AFTER1=$(remote_last_pulled_seq upstream)
-APPLIED1=$(applied_bundles /tmp/pull1.log)
-echo "LAST_PULLED_SEQ after pull #1: ${WM_AFTER1}"
-echo "Bundles applied in pull #1:    ${APPLIED1}"
+WM_AFTER1=$(remote_last_pulled_tip upstream)
+echo "PULLED_TIP after pull #1: ${WM_AFTER1}"
 
-check "LAST_PULLED_SEQ after pull #1 is a positive integer" \
-    "[[ \"${WM_AFTER1}\" =~ ^[0-9]+$ ]] && [ \"${WM_AFTER1}\" -gt 0 ]"
-check "pull #1 reports a positive number of applied bundles" \
-    "[[ \"${APPLIED1}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED1}\" -gt 0 ]"
+check_eq "PULLED_TIP before first pull is '-' (never pulled)" \
+    "${WM_BEFORE}" "-"
+check "PULLED_TIP after pull #1 is a non-empty short hash" \
+    "[ -n \"${WM_AFTER1}\" ] && [ \"${WM_AFTER1}\" != \"-\" ]"
+check "pull #1 completed the cross-pond import" \
+    "grep -qE 'pull upstream complete' /tmp/pull1.log"
+check "pull #1 imported at least one file" \
+    "grep -qE 'files: [1-9]' /tmp/pull1.log"
 
 # Sanity: foreign data is queryable via the mount.
 TEMPS_HASH=$(pond cat /imports/A/data/sensors/temps.csv 2>/dev/null | md5sum | cut -d' ' -f1)
@@ -206,16 +202,16 @@ check_eq "pull #1: /imports/A/data/logs/events.csv readable and matches A" \
 #############################
 
 echo ""
-echo "=== Phase 4: Pull #2 (no upstream changes — watermark must persist) ==="
+echo "=== Phase 4: Pull #2 (no upstream changes — tip must persist, no re-walk) ==="
 pond pull upstream 2>&1 | tee /tmp/pull2.log
-WM_AFTER2=$(remote_last_pulled_seq upstream)
-APPLIED2=$(applied_bundles /tmp/pull2.log)
-echo "LAST_PULLED_SEQ after pull #2: ${WM_AFTER2}"
-echo "Bundles applied in pull #2:    ${APPLIED2}"
+WM_AFTER2=$(remote_last_pulled_tip upstream)
+echo "PULLED_TIP after pull #2: ${WM_AFTER2}"
 
-check_eq "pull #2 reports 0 bundles applied (no re-walk)" \
-    "${APPLIED2}" "0"
-check_eq "pull #2 LAST_PULLED_SEQ unchanged from pull #1 (no watermark reset)" \
+check "pull #2 short-circuits as already up to date (no re-fetch)" \
+    "grep -qE 'already up to date' /tmp/pull2.log"
+check "pull #2 does NOT re-run the import" \
+    "! grep -qE 'pull upstream complete' /tmp/pull2.log"
+check_eq "pull #2 PULLED_TIP unchanged from pull #1 (no watermark reset)" \
     "${WM_AFTER2}" "${WM_AFTER1}"
 
 #############################
@@ -238,15 +234,13 @@ echo ""
 echo "=== Phase 6: Pull #3 (one new upstream txn — incremental delta) ==="
 export POND=/tmp/pond-b-540
 pond pull upstream 2>&1 | tee /tmp/pull3.log
-WM_AFTER3=$(remote_last_pulled_seq upstream)
-APPLIED3=$(applied_bundles /tmp/pull3.log)
-echo "LAST_PULLED_SEQ after pull #3: ${WM_AFTER3}"
-echo "Bundles applied in pull #3:    ${APPLIED3}"
+WM_AFTER3=$(remote_last_pulled_tip upstream)
+echo "PULLED_TIP after pull #3: ${WM_AFTER3}"
 
-check "pull #3 reports a positive but small number of applied bundles" \
-    "[[ \"${APPLIED3}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED3}\" -gt 0 ] && [ \"${APPLIED3}\" -le 2 ]"
-check "pull #3 advances LAST_PULLED_SEQ above pull #2's value" \
-    "[ \"${WM_AFTER3}\" -gt \"${WM_AFTER2}\" ]"
+check "pull #3 re-runs the import for the new upstream commit" \
+    "grep -qE 'pull upstream complete' /tmp/pull3.log"
+check "pull #3 advances PULLED_TIP to a new tip hash" \
+    "[ \"${WM_AFTER3}\" != \"${WM_AFTER2}\" ] && [ \"${WM_AFTER3}\" != \"-\" ]"
 
 # The new file is now queryable through the mount.
 EXTRA_HASH=$(pond cat /imports/A/data/sensors/extra.csv 2>/dev/null | md5sum | cut -d' ' -f1)

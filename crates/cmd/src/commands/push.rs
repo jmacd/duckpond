@@ -75,11 +75,19 @@ async fn push_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .await
         .map_err(|e| anyhow!("push {} ({}): {}", name, attachment.url, e))?;
 
+    let tip_hex = outcome.tip.to_hex();
     log::info!(
         "[OK] push {} complete (objects_pushed={}, tip={})",
         name,
         outcome.objects_pushed,
-        outcome.tip.to_hex()
+        tip_hex
     );
+
+    // Record the per-ref frontier: the single commit hash we last pushed to
+    // this remote (the CA3 replacement for the retired per-pond seq watermark).
+    ship.control_table_mut()
+        .raw_config_set(&format!("last_pushed_tip:{}", attachment.url), &tip_hex)
+        .await
+        .map_err(|e| anyhow!("record last_pushed_tip for `{}`: {}", name, e))?;
     Ok(())
 }

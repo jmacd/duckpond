@@ -455,37 +455,14 @@ impl<'a> StewardTransactionGuard<'a> {
         persistence: &tlogfs::OpLogPersistence,
         pond_id: uuid::Uuid,
     ) -> Result<Option<crate::control_table::CommitSpine>, StewardError> {
-        let pond_id_str = pond_id.to_string();
-        let table = persistence.table().clone();
-        let (root_tree_hash, node_manifest_hash) =
-            crate::content_tree::compute_commit_roots_for_table(table, &pond_id_str).await?;
-
-        let parent_commit_hash = self
-            .control_table
-            .commit_hash_at(self.txn_meta.txn_seq - 1)
-            .await?
-            .and_then(|hex| sync_store::content::ObjectHash::from_hex(&hex).ok());
-
-        let provenance = sync_store::content::Provenance {
-            pond_id: pond_id_str,
-            seq: self.txn_meta.txn_seq,
-            time_micros: chrono::Utc::now().timestamp_micros(),
-            author: String::new(),
-            request: self.txn_meta.user.args.join(" "),
-        };
-        let commit = sync_store::content::Commit::new(
-            root_tree_hash,
-            parent_commit_hash,
-            node_manifest_hash,
-            provenance,
-        );
-
-        Ok(Some(crate::control_table::CommitSpine {
-            root_tree_hash: root_tree_hash.to_hex(),
-            parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
-            commit_hash: commit.hash().to_hex(),
-            commit_object: hex::encode(commit.encode()),
-        }))
+        crate::content_tree::compute_commit_spine(
+            persistence.table().clone(),
+            self.control_table,
+            pond_id,
+            self.txn_meta.txn_seq,
+            self.txn_meta.user.args.join(" "),
+        )
+        .await
     }
 
     /// Reconcile this pond's transparency-log tiles with the committed leaf
@@ -506,55 +483,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Failures are logged and swallowed: the transparency log is a derived
     /// publishing artifact and must not unwind an already-committed transaction.
     async fn materialize_tlog(&self, pond_id: uuid::Uuid) {
-        let dir = crate::get_tlog_path(&self.pond_path);
-        let origin = format!("duckpond/{pond_id}");
-        let log = sync_store::TileLog::new(dir, origin);
-
-        // Authoritative leaf sequence: spine-bearing commit objects in order.
-        let leaves = match self.control_table.commit_objects_in_order().await {
-            Ok(l) => l,
-            Err(e) => {
-                error!("failed to read transparency-log leaf sequence: {e}");
-                return;
-            }
-        };
-
-        // Current export position from the published checkpoint.
-        let exported = match log.size() {
-            Ok(n) => n as usize,
-            Err(e) => {
-                error!("failed to read transparency-log checkpoint size: {e}");
-                return;
-            }
-        };
-
-        if exported >= leaves.len() {
-            // Export is level with (or ahead of) the committed log; nothing to
-            // replay.  An over-long export is harmless and re-derivable.
-            return;
-        }
-
-        // Decode the missing tail and replay it, extending the export until its
-        // leaf position equals the committed commit count.
-        let mut missing = Vec::with_capacity(leaves.len() - exported);
-        for hex in &leaves[exported..] {
-            match hex::decode(hex) {
-                Ok(bytes) => missing.push(bytes),
-                Err(e) => {
-                    error!("transparency-log leaf is not valid hex: {e}");
-                    return;
-                }
-            }
-        }
-
-        match log.append_leaf_data(missing) {
-            Ok(checkpoint) => debug!(
-                "transparency log checkpoint emitted (size={}, root={})",
-                checkpoint.size,
-                checkpoint.root.to_hex()
-            ),
-            Err(e) => error!("failed to materialize transparency-log tiles: {e}"),
-        }
+        crate::content_tree::materialize_tlog(&self.pond_path, self.control_table, pond_id).await
     }
 
     /// Run post-commit factories after a successful write transaction
@@ -1217,12 +1146,24 @@ impl<'a> StewardTransactionGuard<'a> {
             };
             match crate::push_content_to_remote(ship, &mut remote, "main").await {
                 Ok(outcome) => {
+                    let tip_hex = outcome.tip.to_hex();
                     info!(
                         "post-commit auto-push: {} done (objects_pushed={}, tip={})",
-                        name,
-                        outcome.objects_pushed,
-                        outcome.tip.to_hex()
+                        name, outcome.objects_pushed, tip_hex
                     );
+                    // Record the per-ref frontier we last pushed (CA3 tip hash,
+                    // replacing the retired per-pond seq watermark).
+                    if let Err(e) = ship
+                        .control_table_mut()
+                        .raw_config_set(&format!("last_pushed_tip:{}", attachment.url), &tip_hex)
+                        .await
+                    {
+                        log::warn!(
+                            "post-commit auto-push: {} pushed but failed to record last_pushed_tip: {}",
+                            name,
+                            e
+                        );
+                    }
                 }
                 Err(e) => {
                     log::error!("post-commit auto-push: {} failed: {}", name, e);

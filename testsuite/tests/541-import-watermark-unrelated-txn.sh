@@ -91,14 +91,9 @@ check_eq() {
     fi
 }
 
-remote_last_pulled_seq() {
+remote_last_pulled_tip() {
     local name="$1"
     pond remote list 2>/dev/null | awk -v n="${name}" '$1 == n {print $NF; exit}'
-}
-
-applied_bundles() {
-    local logfile="$1"
-    grep -oE "applied [0-9]+ bundle" "${logfile}" | awk '{print $2}' | head -1
 }
 
 #############################
@@ -160,14 +155,13 @@ pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --overwrite >/dev/null
 
 pond pull upstream 2>&1 | tee /tmp/pull1.log
-WM1=$(remote_last_pulled_seq upstream)
-APPLIED1=$(applied_bundles /tmp/pull1.log)
-echo "Pull #1: applied=${APPLIED1}  LAST_PULLED_SEQ=${WM1}"
+WM1=$(remote_last_pulled_tip upstream)
+echo "Pull #1: PULLED_TIP=${WM1}"
 
-check "pull #1: LAST_PULLED_SEQ is a positive integer" \
-    "[[ \"${WM1}\" =~ ^[0-9]+$ ]] && [ \"${WM1}\" -gt 0 ]"
-check "pull #1: applied a positive number of bundles" \
-    "[[ \"${APPLIED1}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED1}\" -gt 0 ]"
+check "pull #1: PULLED_TIP is a non-empty short hash" \
+    "[ -n \"${WM1}\" ] && [ \"${WM1}\" != \"-\" ]"
+check "pull #1: cross-pond import ran" \
+    "grep -qE 'pull upstream complete' /tmp/pull1.log"
 
 #############################
 # PHASE 3 — Producer mkdir-only commits
@@ -188,14 +182,13 @@ echo ""
 echo "=== Phase 4: Pull #2 (foreign added mkdir-only txns) ==="
 export POND=/tmp/pond-b-541
 pond pull upstream 2>&1 | tee /tmp/pull2.log
-WM2=$(remote_last_pulled_seq upstream)
-APPLIED2=$(applied_bundles /tmp/pull2.log)
-echo "Pull #2: applied=${APPLIED2}  LAST_PULLED_SEQ=${WM2}"
+WM2=$(remote_last_pulled_tip upstream)
+echo "Pull #2: PULLED_TIP=${WM2}"
 
-check "pull #2: at least 2 bundles applied (one per mkdir commit)" \
-    "[[ \"${APPLIED2}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED2}\" -ge 2 ]"
-check "pull #2: LAST_PULLED_SEQ advanced from pull #1 by >= 2" \
-    "[ \"${WM2}\" -ge \$((${WM1} + 2)) ]"
+check "pull #2: cross-pond import re-ran for the new upstream commits" \
+    "grep -qE 'pull upstream complete' /tmp/pull2.log"
+check "pull #2: PULLED_TIP advanced from pull #1 (mkdir-only commits change the tree)" \
+    "[ \"${WM2}\" != \"${WM1}\" ] && [ \"${WM2}\" != \"-\" ]"
 
 # Mkdir-only commits really did replicate -- the foreign directories
 # are now visible through the mount.
@@ -211,13 +204,14 @@ check "pull #2: foreign /private/inner/ visible at /imports/A/private/inner/" \
 echo ""
 echo "=== Phase 5: Pull #3 (no upstream changes after mkdir history) ==="
 pond pull upstream 2>&1 | tee /tmp/pull3.log
-WM3=$(remote_last_pulled_seq upstream)
-APPLIED3=$(applied_bundles /tmp/pull3.log)
-echo "Pull #3: applied=${APPLIED3}  LAST_PULLED_SEQ=${WM3}"
+WM3=$(remote_last_pulled_tip upstream)
+echo "Pull #3: PULLED_TIP=${WM3}"
 
-check_eq "pull #3: applied 0 bundles (no re-walk after mkdir-only history)" \
-    "${APPLIED3}" "0"
-check_eq "pull #3: LAST_PULLED_SEQ unchanged" "${WM3}" "${WM2}"
+check "pull #3: short-circuits as already up to date (no re-walk)" \
+    "grep -qE 'already up to date' /tmp/pull3.log"
+check "pull #3: import did NOT re-run" \
+    "! grep -qE 'pull upstream complete' /tmp/pull3.log"
+check_eq "pull #3: PULLED_TIP unchanged" "${WM3}" "${WM2}"
 
 #############################
 # PHASE 6 — Producer adds a new file
@@ -237,14 +231,13 @@ echo ""
 echo "=== Phase 7: Pull #4 (one new file commit) ==="
 export POND=/tmp/pond-b-541
 pond pull upstream 2>&1 | tee /tmp/pull4.log
-WM4=$(remote_last_pulled_seq upstream)
-APPLIED4=$(applied_bundles /tmp/pull4.log)
-echo "Pull #4: applied=${APPLIED4}  LAST_PULLED_SEQ=${WM4}"
+WM4=$(remote_last_pulled_tip upstream)
+echo "Pull #4: PULLED_TIP=${WM4}"
 
-check "pull #4: at least 1 bundle applied" \
-    "[[ \"${APPLIED4}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED4}\" -ge 1 ]"
-check "pull #4: LAST_PULLED_SEQ advanced past pull #3" \
-    "[ \"${WM4}\" -gt \"${WM3}\" ]"
+check "pull #4: cross-pond import re-ran for the new file commit" \
+    "grep -qE 'pull upstream complete' /tmp/pull4.log"
+check "pull #4: PULLED_TIP advanced past pull #3" \
+    "[ \"${WM4}\" != \"${WM3}\" ] && [ \"${WM4}\" != \"-\" ]"
 
 EXTRA_HASH=$(pond cat /imports/A/data/sensors/extra.csv 2>/dev/null | md5sum | cut -d' ' -f1)
 EXTRA_EXP=$(md5sum /tmp/extra.csv | cut -d' ' -f1)

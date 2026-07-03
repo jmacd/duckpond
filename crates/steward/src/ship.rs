@@ -1040,11 +1040,28 @@ impl Ship {
         // process validates against the right sequence.
         self.data_persistence
             .sync_last_txn_seq(&pond_id.to_string(), txn_seq);
+        // Content-graph spine: compaction is an honestly recorded rewrite
+        // commit.  Its logical content is unchanged (the invariant above
+        // asserts this), so `root_tree_hash` equals the previous commit's, but
+        // it still gets its own commit object chained to the parent so that
+        // `pond push` can reach this seq via the content graph.  Without a
+        // spine, a post-compaction push fails with "no commit spine recorded".
+        let commit_spine = crate::content_tree::compute_commit_spine(
+            self.data_persistence.table().clone(),
+            &self.control_table,
+            pond_id,
+            txn_seq,
+            txn_meta.user.args.join(" "),
+        )
+        .await?;
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
         self.control_table
-            .record_compact_committed(&txn_meta, new_version, duration_ms, post)
+            .record_compact_committed(&txn_meta, new_version, duration_ms, post, commit_spine)
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
+
+        // Extend the transparency log with the compaction's commit leaf.
+        crate::content_tree::materialize_tlog(&self.pond_path, &self.control_table, pond_id).await;
 
         info!(
             "Compaction committed (seq={}, version={}, +{}/-{} files)",
