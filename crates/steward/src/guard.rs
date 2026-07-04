@@ -570,6 +570,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 "incremental node_manifest_hash diverged from full fold"
             );
             assert_eq!(
+                inputs.node_manifest_root, oracle.node_manifest_root,
+                "incremental node_manifest_root diverged from full fold"
+            );
+            assert_eq!(
                 inputs.manifest_bytes, oracle.manifest_bytes,
                 "incremental manifest bytes diverged from full fold"
             );
@@ -601,6 +605,7 @@ impl<'a> StewardTransactionGuard<'a> {
             parent_commit_hash,
             inputs.root_tree_hash,
             inputs.node_manifest_hash,
+            inputs.node_manifest_root,
             &pond_id_str,
             self.txn_meta.txn_seq,
             self.txn_meta.user.args.join(" "),

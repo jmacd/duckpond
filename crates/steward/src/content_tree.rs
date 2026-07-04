@@ -40,7 +40,8 @@ use datafusion::execution::context::SessionContext;
 
 use sync_store::content::{
     Commit, ManifestEntry, ObjectHash, Provenance, TreeEntry, decode_manifest, encode_manifest,
-    encode_recipe, encode_series, encode_tree, manifest_hash, recipe_hash, series_hash,
+    encode_recipe, encode_series, encode_tree, manifest_hash, node_merkle_rebuild_root,
+    recipe_hash, series_hash,
 };
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
@@ -333,22 +334,34 @@ pub(crate) fn node_manifest_entries(index: &ContentTreeIndex) -> Vec<ManifestEnt
     entries
 }
 
-/// Compute the two content roots a commit references: the `root_tree_hash` and
-/// the `node_manifest_hash` (Section 4.3).  Both come from a single fold of the
-/// data table, so they are guaranteed consistent with each other.
+/// Compute the node-manifest commitments a commit references: the node
+/// manifest object's content hash (`node_manifest_hash`) and the node-keyed
+/// Merkle root over that manifest (`node_manifest_root`).  Both come from a
+/// single fold of the data table, so they are mutually consistent.
 ///
 /// # Errors
 ///
 /// Returns an error if the data table cannot be read or folded, or if the
-/// manifest cannot be encoded (a duplicate `node_id`).
+/// manifest cannot be encoded or hashed (a duplicate `node_id`).
 pub(crate) async fn compute_commit_roots_for_table(
     table: deltalake::DeltaTable,
     local_pond_id: &str,
-) -> Result<(ObjectHash, ObjectHash), StewardError> {
+) -> Result<CommitRoots, StewardError> {
     let index = build_content_tree_for_table(table, local_pond_id).await?;
     let manifest = node_manifest_entries(&index);
-    let manifest_root = manifest_hash(&manifest).map_err(StewardError::Content)?;
-    Ok((index.root_tree_hash, manifest_root))
+    let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    let node_manifest_root = node_merkle_rebuild_root(&manifest).map_err(StewardError::Content)?;
+    Ok(CommitRoots {
+        node_manifest_hash,
+        node_manifest_root,
+    })
+}
+
+/// The node-manifest commitments a commit object references, recomputed from a
+/// pond's live state (used by the pull path to verify a rebuilt mirror).
+pub(crate) struct CommitRoots {
+    pub node_manifest_hash: ObjectHash,
+    pub node_manifest_root: ObjectHash,
 }
 
 /// Build the full node-manifest bytes for the current in-transaction live state
@@ -371,8 +384,8 @@ pub(crate) async fn compute_commit_roots_for_table(
 ///
 /// The reserved-node write's inputs, all folded from the same in-transaction
 /// live snapshot in a single scan: the encoded node manifest (index-node
-/// content) plus the two content roots (`root_tree_hash`, `node_manifest_hash`)
-/// that the commit object needs.
+/// content) plus the content roots (`root_tree_hash`, `node_manifest_hash`,
+/// `node_manifest_root`) that the commit object needs.
 ///
 /// Folding once here lets the guard write the index node and the authoritative
 /// commit-log leaf atomically in the same transaction without re-scanning the
@@ -383,6 +396,7 @@ pub(crate) struct SpineInputs {
     pub manifest_bytes: Vec<u8>,
     pub root_tree_hash: ObjectHash,
     pub node_manifest_hash: ObjectHash,
+    pub node_manifest_root: ObjectHash,
 }
 
 pub(crate) async fn in_txn_spine_inputs(
@@ -404,11 +418,13 @@ pub(crate) async fn in_txn_spine_inputs(
     let index = fold_rows(rows, local_pond_id, None)?;
     let manifest = node_manifest_entries(&index);
     let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    let node_manifest_root = node_merkle_rebuild_root(&manifest).map_err(StewardError::Content)?;
     let manifest_bytes = encode_manifest(&manifest).map_err(StewardError::Content)?;
     Ok(SpineInputs {
         manifest_bytes,
         root_tree_hash: index.root_tree_hash,
         node_manifest_hash,
+        node_manifest_root,
     })
 }
 
@@ -688,11 +704,13 @@ pub(crate) async fn incremental_spine_inputs(
     }
 
     let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    let node_manifest_root = node_merkle_rebuild_root(&manifest).map_err(StewardError::Content)?;
     let manifest_bytes = encode_manifest(&manifest).map_err(StewardError::Content)?;
     Ok(SpineInputs {
         manifest_bytes,
         root_tree_hash,
         node_manifest_hash,
+        node_manifest_root,
     })
 }
 
@@ -854,6 +872,7 @@ pub(crate) fn build_commit_spine(
     parent_commit_hash: Option<ObjectHash>,
     root_tree_hash: ObjectHash,
     node_manifest_hash: ObjectHash,
+    node_manifest_root: ObjectHash,
     pond_id_str: &str,
     txn_seq: i64,
     request: String,
@@ -869,6 +888,7 @@ pub(crate) fn build_commit_spine(
         root_tree_hash,
         parent_commit_hash,
         node_manifest_hash,
+        node_manifest_root,
         provenance,
     );
     CommitSpine {

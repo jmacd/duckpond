@@ -64,6 +64,7 @@ mod tests {
             ObjectHash::of_bytes(&[root_byte]),
             None,
             ObjectHash::of_bytes(b"manifest"),
+            ObjectHash::of_bytes(b"manifest-root"),
             Provenance {
                 pond_id: "pond".to_string(),
                 seq,

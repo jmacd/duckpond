@@ -22,7 +22,7 @@ Phases track the plan in Section 8; each is independently reviewable.
 | D9 | Unified single-pond storage: authoritative LOG + derived INDEX; control demoted (Section 10) | Design accepted |
 | 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | **Done** |
 | 4b | Incremental commit fold (content root from changeset along touched path) | **Done** |
-| 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
+| 5 | `commit_object` gains node-keyed Merkle root (`node_manifest_root`) alongside flat `node_manifest_hash` | **Done** |
 | 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | Not started |
 | 6 | Validation (equivalence + rebuild-from-pond; keep tlog/pull/719 green; presubmit) | Not started |
 
@@ -235,17 +235,27 @@ re-scanned to discover the change.
 Work is proportional to the touched paths' breadth, not the pond. Unchanged
 subtrees are never visited.
 
-### 4.2 `node_manifest_hash` -> node-keyed Merkle root
+### 4.2 `node_manifest_root`: adding a node-keyed Merkle root
 
-The flat manifest hash is **replaced** by the root of a **node-keyed Merkle**
-over the manifest entries -- a sparse Merkle tree / Merkle search tree keyed by
-`node_id`, whose root recomputes only along the touched leaves' paths on a point
-update (`O(change * log n)`), instead of re-hashing all entries (`O(#nodes)`).
+The `commit_object` gains a **node-keyed Merkle root** over the manifest
+entries alongside the existing flat `node_manifest_hash` -- a sparse Merkle tree
+/ Merkle search tree keyed by `node_id`, whose root recomputes only along the
+touched leaves' paths on a point update (`O(change * log n)`), instead of
+re-hashing all entries (`O(#nodes)`).
 
-The existing `sync-store/checksum::Merkle` is **not** reused for this: it is a
-rebuild-only, sorted-array construction (`O(n log n)`, sorts every leaf) and its
-root differs from a sparse-tree root for the same set. Instead we define **one**
-node-keyed construction with two implementations that must agree byte-for-byte:
+The flat `node_manifest_hash` is **kept, not replaced**: it is the
+content-address the pull path uses to fetch and verify the monolithic manifest
+object (`blake3(manifest_bytes) == node_manifest_hash`). The Merkle root is a
+separate commitment that enables incremental verification and, later,
+incremental manifest transfer. Replacing the flat hash would break the
+monolithic-manifest transfer, so both travel in the commit until a later phase
+transfers the manifest as a content-addressed tree.
+
+The existing `sync-store/checksum::Merkle` is **not** reused for the root: it is
+a rebuild-only, sorted-array construction (`O(n log n)`, sorts every leaf) and
+its root differs from a sparse-tree root for the same set. Instead we define
+**one** node-keyed construction with two implementations that must agree
+byte-for-byte:
 
 - an **incremental updater** used on the commit hot path, and
 - a whole-set **`O(n)` rebuilder** used to build or repair the structure and as
@@ -260,16 +270,17 @@ incremental writer with an `O(n)` rebuilder and asserts byte-identical output.
 ```
 commit_object = BLAKE3( root_tree_hash,
                         parent_commit_hash,
-                        node_manifest_root,   // was: node_manifest_hash (flat)
+                        node_manifest_hash,   // flat: manifest object fetch key
+                        node_manifest_root,   // new: node-keyed Merkle root
                         provenance )
 ```
 
-Swapping the flat manifest hash for the Merkle root changes `commit_object`'s
-bytes, and therefore the **value** of every transparency-log leaf. This is a
-permitted format change under Decision D2 (the project resets rather than
-migrates; there are no legacy ponds), and it requires a coordinated reset of any
-peers that sync. The transparency-log **file layout is unchanged**: the leaf is
-still `SHA-256(commit_object)`, the tiles and checkpoint are byte-identical in
+Adding the Merkle-root field changes `commit_object`'s bytes, and therefore the
+**value** of every transparency-log leaf. This is a permitted format change
+under Decision D2 (the project resets rather than migrates; there are no legacy
+ponds), and it requires a coordinated reset of any peers that sync. The
+transparency-log **file layout is unchanged**: the leaf is still
+`SHA-256(commit_object)`, the tiles and checkpoint are byte-identical in
 structure, only the leaf values differ.
 
 ---
@@ -379,9 +390,12 @@ Roughly in dependency order; each phase is independently reviewable.
    post-commit full-rescan fold, keeping the whole-tree fold as rebuilder and
    oracle. **Now scoped under the Section 10 unified design** (in-transaction
    roots enable the in-transaction LOG-node spine).
-5. **`commit_object` reset.** Replace flat `manifest_hash` with the Merkle root;
-   update encode/decode; keep `SHA-256(commit_object)` as the leaf; update the
-   decisions record below and in the superseded document.
+5. **`commit_object` node-keyed Merkle root.** Add `node_manifest_root`
+   alongside the flat `node_manifest_hash` (kept as the manifest object's fetch
+   key); update encode/decode and bump the commit magic; keep
+   `SHA-256(commit_object)` as the leaf; the pull path verifies both the flat
+   hash and the Merkle root against the tip commit. Incremental manifest
+   transfer is deferred to a later delta-INDEX phase. **Done.**
 6. **Validation.** Equivalence tests for both roots (incremental vs rebuild)
    across random mutation sequences; keep `tlog_materialize_test`,
    `content_pull_test`, and `testsuite/tests/719-tlog-verify.sh` green;
@@ -532,11 +546,15 @@ independently reviewable and keeps the whole suite green.
    checksums (checksum subsumption is step 4/5b below). `fold_rows` survives as
    a `#[cfg(debug_assertions)]` oracle asserted against the incremental roots on
    every commit, so the whole test suite validates equivalence. The manifest is
-   still rebuilt and re-hashed with the flat `manifest_hash` each commit; the
-   node-keyed Merkle root and its persisted NodeMerkle cache land with the
-   `commit_object` swap (step 3), where `commit_object` actually adopts it.
-3. **`commit_object` Merkle swap (Section 8 step 5).** Replace the flat
-   `manifest_hash` with the NodeMerkle root in `commit_object`.
+   still rebuilt and re-hashed with the flat `node_manifest_hash` each commit;
+   the node-keyed Merkle root and its persisted NodeMerkle cache land with the
+   `commit_object` change (step 3), where `commit_object` adopts the root
+   alongside the flat hash.
+3. **`commit_object` node-keyed Merkle root (Section 8 step 5).** *(Done.)* Add
+   `node_manifest_root` (the NodeMerkle root) to `commit_object` alongside the
+   flat `node_manifest_hash`, which is retained as the manifest object's fetch
+   key; the pull path verifies both against the tip commit. Incremental manifest
+   transfer via the Merkle root is deferred to a later delta-INDEX phase.
 4. **Checksum subsumption.** Replace the `row_leaf_digest` partition checksums
    with per-directory `tree_hash` comparison in replication/fsck; drop the
    redundant checksum path.

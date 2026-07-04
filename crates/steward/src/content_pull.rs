@@ -432,6 +432,11 @@ pub async fn rebuild_pond(
         .first()
         .map(|(_, c)| c.node_manifest_hash)
         .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
+    let tip_manifest_root = graph
+        .commits
+        .first()
+        .map(|(_, c)| c.node_manifest_root)
+        .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
 
     let (target_nodes, target_series) = crate::content_tree::build_target_state(target).await?;
 
@@ -465,13 +470,19 @@ pub async fn rebuild_pond(
 
     let pond_id = target.data_persistence().pond_id().to_string();
     let table = target.data_persistence().table().clone();
-    let (_, manifest_root) =
-        crate::content_tree::compute_commit_roots_for_table(table, &pond_id).await?;
-    if manifest_root != tip_manifest_hash {
+    let roots = crate::content_tree::compute_commit_roots_for_table(table, &pond_id).await?;
+    if roots.node_manifest_hash != tip_manifest_hash {
         return Err(StewardError::Content(format!(
             "rebuilt node manifest hashes to {} but the tip commit's manifest is {}",
-            manifest_root.to_hex(),
+            roots.node_manifest_hash.to_hex(),
             tip_manifest_hash.to_hex()
+        )));
+    }
+    if roots.node_manifest_root != tip_manifest_root {
+        return Err(StewardError::Content(format!(
+            "rebuilt node manifest Merkle root is {} but the tip commit's root is {}",
+            roots.node_manifest_root.to_hex(),
+            tip_manifest_root.to_hex()
         )));
     }
 
@@ -509,6 +520,11 @@ pub async fn import_pond(
         .commits
         .first()
         .map(|(_, c)| c.node_manifest_hash)
+        .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
+    let tip_manifest_root = graph
+        .commits
+        .first()
+        .map(|(_, c)| c.node_manifest_root)
         .ok_or_else(|| StewardError::Content("fetched graph has no tip commit".to_string()))?;
 
     let foreign_id = foreign_pond_id.to_string();
@@ -553,13 +569,19 @@ pub async fn import_pond(
         )));
     }
 
-    let (_, manifest_root) =
-        crate::content_tree::compute_commit_roots_for_table(table, &foreign_id).await?;
-    if manifest_root != tip_manifest_hash {
+    let roots = crate::content_tree::compute_commit_roots_for_table(table, &foreign_id).await?;
+    if roots.node_manifest_hash != tip_manifest_hash {
         return Err(StewardError::Content(format!(
             "imported node manifest hashes to {} but the tip commit's manifest is {}",
-            manifest_root.to_hex(),
+            roots.node_manifest_hash.to_hex(),
             tip_manifest_hash.to_hex()
+        )));
+    }
+    if roots.node_manifest_root != tip_manifest_root {
+        return Err(StewardError::Content(format!(
+            "imported node manifest Merkle root is {} but the tip commit's root is {}",
+            roots.node_manifest_root.to_hex(),
+            tip_manifest_root.to_hex()
         )));
     }
 
