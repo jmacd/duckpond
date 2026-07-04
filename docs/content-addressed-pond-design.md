@@ -1,6 +1,17 @@
 # Content-Addressed Pond: A Clean-Slate Design
 
-> **Status:** First-principles design note. Describes the pond as a
+> **Status:** Superseded in part by
+> [`incremental-content-tree-design.md`](./incremental-content-tree-design.md).
+> The object model, transparency-log layout, and decisions D4/D6/D7/D8/D5 below
+> remain accurate. Where this note describes **how the commit spine
+> (`root_tree_hash`, `node_manifest_hash`) is computed and stored per commit**
+> (Sections 5, 7, and Decisions D1/D3), the newer document replaces it: those
+> hashes now live in a reserved delta-versioned index node in the data FS and
+> update in `O(change)`, and `commit_object` carries a node-keyed Merkle root in
+> place of the flat manifest hash. Read the newer document first for the commit
+> path.
+>
+> First-principles design note. Describes the pond as a
 > content-addressed object store with a built-in transparency log, designed
 > from scratch. It does not assume the current bundle/frontier replication
 > machinery and is deliberately written so it can be read on its own.

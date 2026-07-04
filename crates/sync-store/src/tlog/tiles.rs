@@ -227,13 +227,6 @@ impl TileLog {
             return Ok(());
         }
 
-        // Drop any stale partial variants of this tile index before writing the
-        // current one, so only one representation of the rightmost tile exists.
-        let partial_dir = self.dir.join(format!("tile/{level}/{}.p", n_path(tile_n)));
-        if partial_dir.exists() {
-            std::fs::remove_dir_all(&partial_dir)?;
-        }
-
         let mut buf = Vec::with_capacity(width as usize * HASH_LEN);
         for i in 0..width {
             let node = first_node + i;
@@ -241,7 +234,13 @@ impl TileLog {
             let end = start + sub as usize;
             buf.extend_from_slice(mth(&leaves[start..end]).as_bytes());
         }
-        write_atomic(&target, &buf)
+        // Write the current representation FIRST, then drop superseded partial
+        // variants of this tile index.  Deleting only after the replacement is
+        // durable keeps at least one width >= the committed size on disk at
+        // every instant, so a crash here never strands the committed prefix.
+        write_atomic(&target, &buf)?;
+        let keep = if full { None } else { Some(width as usize) };
+        prune_partial_variants(&self.dir, level, tile_n, keep)
     }
 
     /// Read `count` hashes from tile `(level, n)` into `out`.
@@ -252,14 +251,12 @@ impl TileLog {
         count: usize,
         out: &mut Vec<LogHash>,
     ) -> Result<(), super::CheckpointError> {
-        let path = self.dir.join(data_tile_rel(level, n, count));
-        let bytes = std::fs::read(&path)?;
+        let bytes = read_tile_at_least(&self.dir, level, n, count)?;
         if bytes.len() < count * HASH_LEN {
             return Err(super::CheckpointError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "tile {} holds {} bytes, expected at least {}",
-                    path.display(),
+                    "tile (level {level}, index {n}) holds {} bytes, expected at least {}",
                     bytes.len(),
                     count * HASH_LEN
                 ),
@@ -326,6 +323,114 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     };
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Read the bytes of tile `(level, n)`, resolving whichever on-disk
+/// representation holds at least `count` hashes.
+///
+/// Every stored tile entry is a completed-subtree hash (a leaf hash at level 0),
+/// so a tile of width `w' >= count` shares the same first `count` hashes as the
+/// width-`count` representation.  Resolving the widest-sufficient tile therefore
+/// lets a reader tolerate a rightmost partial tile that a crash left *wider*
+/// than the committed checkpoint records: `flush`/`write_tile` write the new,
+/// wider representation before deleting the superseded narrower one, so at every
+/// instant at least one representation with width `>= committed_size` exists,
+/// even if a crash interrupts the delete or precedes the checkpoint rename.
+///
+/// Preference order (all correct; ordered for the fewest bytes read in the
+/// steady state): the immutable full tile, then the exact-width partial (the
+/// steady-state name), then the narrowest partial variant wide enough.
+///
+/// # Errors
+///
+/// Returns `NotFound` if no representation with `>= count` hashes exists, or any
+/// other I/O error encountered while reading a candidate.
+fn read_tile_at_least(dir: &Path, level: u8, n: u64, count: usize) -> io::Result<Vec<u8>> {
+    let need = count * HASH_LEN;
+
+    // A full tile is immutable and 256 wide, so it satisfies any request.
+    let full = dir.join(data_tile_rel(level, n, TILE_WIDTH as usize));
+    match std::fs::read(&full) {
+        Ok(bytes) if bytes.len() >= need => return Ok(bytes),
+        Ok(_) => {}
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+
+    // The exact-width partial: the canonical steady-state name.
+    if count > 0 && (count as u64) < TILE_WIDTH {
+        let exact = dir.join(data_tile_rel(level, n, count));
+        match std::fs::read(&exact) {
+            Ok(bytes) if bytes.len() >= need => return Ok(bytes),
+            Ok(_) => {}
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            Err(_) => {}
+        }
+    }
+
+    // Otherwise scan partial variants for the narrowest width >= count (a
+    // crash-left wider partial, superseding an interrupted delete).
+    let pdir = dir.join(format!("tile/{level}/{}.p", n_path(n)));
+    let mut best: Option<(usize, PathBuf)> = None;
+    if let Ok(entries) = std::fs::read_dir(&pdir) {
+        for entry in entries.flatten() {
+            let Some(width) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if width >= count && best.as_ref().is_none_or(|(bw, _)| width < *bw) {
+                best = Some((width, entry.path()));
+            }
+        }
+    }
+    if let Some((_, path)) = best {
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() >= need {
+            return Ok(bytes);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "no tile representation for level {level} index {n} holding >= {count} hashes under {}",
+            dir.display()
+        ),
+    ))
+}
+
+/// Delete partial variants (`tile/<L>/<N>.p/<W>`) of tile `(level, n)` other
+/// than `keep`.  Called *after* the replacement tile is durably written, so a
+/// crash mid-prune only ever leaves a superset of the representations needed to
+/// read the committed size (readers pick the widest-sufficient via
+/// [`read_tile_at_least`]).  Passing `keep = None` removes every partial variant
+/// (used when the tile has just been completed as a full tile).
+fn prune_partial_variants(dir: &Path, level: u8, n: u64, keep: Option<usize>) -> io::Result<()> {
+    let pdir = dir.join(format!("tile/{level}/{}.p", n_path(n)));
+    let entries = match std::fs::read_dir(&pdir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let width = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<usize>().ok());
+        if width == keep {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// The number of stored-hash tile levels tracked (`256^9 == 2^72` leaves, far
@@ -438,14 +543,12 @@ impl TileSession {
         let width = std::cmp::min(TILE_WIDTH, available) as usize;
         let mut bytes = Vec::new();
         if width > 0 {
-            let path = self.dir.join(data_tile_rel(level, tile_index, width));
-            let disk = std::fs::read(&path)?;
+            let disk = read_tile_at_least(&self.dir, level, tile_index, width)?;
             if disk.len() < width * HASH_LEN {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "tile {} holds {} bytes, expected at least {}",
-                        path.display(),
+                        "tile (level {level}, index {tile_index}) holds {} bytes, expected at least {}",
                         disk.len(),
                         width * HASH_LEN
                     ),
@@ -521,8 +624,16 @@ impl TileSession {
         Ok(fold_perfect(&children))
     }
 
-    /// Write every dirty tile at its current width and drop stale partial
+    /// Write every dirty tile at its current width, then drop superseded partial
     /// variants.  Full tiles are written once and never revisited.
+    ///
+    /// The write-then-prune order is the log's crash-safety hinge: the new
+    /// (wider) representation is made durable before the narrower one it
+    /// supersedes is removed, and pruning happens before the checkpoint advances
+    /// the committed size.  At every instant on disk there is therefore a tile
+    /// of width `>= committed_size`, so a crash between flush and the checkpoint
+    /// rename never strands the committed prefix (readers resolve the
+    /// widest-sufficient tile via [`read_tile_at_least`]).
     fn flush(&self) -> io::Result<()> {
         let mut keys: Vec<(u8, u64)> = self.dirty.iter().copied().collect();
         keys.sort_unstable();
@@ -531,16 +642,14 @@ impl TileSession {
             let width = std::cmp::min(TILE_WIDTH, available) as usize;
             let buf = &self.tiles[&(level, tile_index)];
 
-            // A tile's partial variants live in a `<N>.p/` directory; remove it
-            // so only the current representation of this tile index remains.
-            let partial_dir = self
-                .dir
-                .join(format!("tile/{level}/{}.p", n_path(tile_index)));
-            if partial_dir.exists() {
-                std::fs::remove_dir_all(&partial_dir)?;
-            }
             let path = self.dir.join(data_tile_rel(level, tile_index, width));
             write_atomic(&path, &buf[..width * HASH_LEN])?;
+            let keep = if width as u64 == TILE_WIDTH {
+                None
+            } else {
+                Some(width)
+            };
+            prune_partial_variants(&self.dir, level, tile_index, keep)?;
         }
         Ok(())
     }
@@ -745,5 +854,111 @@ mod tests {
                 "leaf {i} should prove against checkpoint root"
             );
         }
+    }
+
+    /// Overwrite the rightmost level-0 partial tile of `dir` so that only a
+    /// representation of width `wider` remains, while the checkpoint keeps
+    /// recording `committed` (< `wider`).  This reproduces the on-disk state
+    /// after a crash between `flush` (which writes the wider partial and prunes
+    /// the narrower one) and the checkpoint rename.
+    fn splice_wider_rightmost_partial(dir: &Path, committed: usize, wider: usize) {
+        assert!(committed < wider && wider < TILE_WIDTH as usize);
+        // Correct bytes for the width-`wider` tile come from a clean log of that
+        // size; its first `committed` hashes equal the committed representation.
+        let src = tempfile::tempdir().expect("tempdir");
+        let wide_log = TileLog::new(src.path(), "duckpond/test");
+        let _ = wide_log
+            .materialize(&leaves(wider))
+            .expect("materialize wide");
+        let wide_bytes =
+            std::fs::read(src.path().join(data_tile_rel(0, 0, wider))).expect("read wide tile");
+
+        let pdir = dir.join("tile/0/000.p");
+        // Drop the committed-width partial (as a completed prune would) and drop
+        // any other variants, then drop in only the wider one.
+        if pdir.exists() {
+            std::fs::remove_dir_all(&pdir).expect("clear partial dir");
+        }
+        std::fs::create_dir_all(&pdir).expect("recreate partial dir");
+        std::fs::write(pdir.join(wider.to_string()), &wide_bytes).expect("write wide partial");
+
+        // The checkpoint still records the committed size.
+        let cp = Checkpoint::read(dir)
+            .expect("read checkpoint")
+            .expect("checkpoint present");
+        assert_eq!(cp.size, committed as u64, "committed size precondition");
+    }
+
+    #[test]
+    fn crash_left_wider_partial_stays_readable_and_appendable() {
+        // A crash between the tile flush and the checkpoint rename can leave the
+        // rightmost partial tile WIDER than the checkpoint records.  The
+        // committed prefix must stay readable and the log must stay appendable.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = TileLog::new(dir.path(), "duckpond/test");
+        let committed = 100usize;
+        let _ = log.materialize(&leaves(committed)).expect("materialize");
+
+        // Simulate the crash window: on-disk rightmost partial is width 150, the
+        // checkpoint still says 100, and the width-100 partial is gone.
+        splice_wider_rightmost_partial(dir.path(), committed, 150);
+
+        // The committed prefix is still readable (reader resolves the wider tile
+        // and truncates); before the fix this errored NotFound.
+        assert_eq!(log.size().expect("size"), committed as u64);
+        let loaded = log
+            .load_leaves()
+            .expect("load committed leaves after crash");
+        assert_eq!(
+            loaded,
+            leaves(committed),
+            "committed leaves survive the crash"
+        );
+
+        // And the log is still appendable: growing it lands a checkpoint whose
+        // root matches a clean whole-tree materialization of the same leaves.
+        let target = 300usize;
+        let cp = log
+            .append_leaf_data((committed..target).map(|i| format!("leaf-{i}")))
+            .expect("append after crash");
+        assert_eq!(cp.size, target as u64);
+        let oracle = TileLog::new(dir.path().join("oracle"), "duckpond/test");
+        let oracle_cp = oracle.materialize(&leaves(target)).expect("materialize");
+        assert_eq!(
+            cp.root, oracle_cp.root,
+            "post-crash append matches clean log"
+        );
+        assert_eq!(log.load_leaves().expect("reload"), leaves(target));
+    }
+
+    #[test]
+    fn crash_left_full_tile_over_partial_checkpoint_stays_readable() {
+        // The tile-completing variant: a crash after the rightmost partial was
+        // promoted to a full immutable tile but before the checkpoint advanced.
+        // A committed size within that tile must still read back.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = TileLog::new(dir.path(), "duckpond/test");
+        let committed = 200usize;
+        let _ = log.materialize(&leaves(committed)).expect("materialize");
+
+        // Replace the width-200 partial with the completed full tile (256) that
+        // a crash could have left, keeping the checkpoint at 200.
+        let src = tempfile::tempdir().expect("tempdir");
+        let full_log = TileLog::new(src.path(), "duckpond/test");
+        let _ = full_log
+            .materialize(&leaves(256))
+            .expect("materialize full");
+        let full_bytes =
+            std::fs::read(src.path().join(data_tile_rel(0, 0, 256))).expect("read full tile");
+        std::fs::remove_dir_all(dir.path().join("tile/0/000.p")).expect("drop partial");
+        std::fs::write(dir.path().join(data_tile_rel(0, 0, 256)), &full_bytes)
+            .expect("write full tile");
+
+        assert_eq!(log.size().expect("size"), committed as u64);
+        assert_eq!(
+            log.load_leaves().expect("load"),
+            leaves(committed),
+            "committed prefix reads back from the completed full tile"
+        );
     }
 }

@@ -84,7 +84,13 @@ impl WD {
         let mut stream = self.dref.handle.entries().await?;
         let mut entries = Vec::new();
         while let Some(result) = stream.next().await {
-            entries.push(result?);
+            let entry = result?;
+            // The reserved node-manifest index node is internal infrastructure
+            // and never appears in directory listings or traversal.
+            if entry.child_node_id.is_index() {
+                continue;
+            }
+            entries.push(entry);
         }
         Ok(entries)
     }
@@ -92,10 +98,21 @@ impl WD {
     /// Get a stream of lightweight directory entries (does NOT load nodes)
     /// Use this for inspecting directory contents without loading all nodes.
     /// For efficient node loading, use pattern matching or batch operations.
+    ///
+    /// The reserved node-manifest index node ([`crate::INDEX_NODE_UUID`]) is
+    /// filtered out so it never surfaces in user-facing enumeration.
     pub async fn entries(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
-        self.dref.handle.entries().await
+        use futures::StreamExt;
+        let stream = self.dref.handle.entries().await?;
+        Ok(Box::pin(stream.filter(|result| {
+            let keep = match result {
+                Ok(entry) => !entry.child_node_id.is_index(),
+                Err(_) => true,
+            };
+            async move { keep }
+        })))
     }
 
     /// Get a single node by name (loads the node from persistence)

@@ -18,6 +18,12 @@ use std::sync::Arc;
 use tinyfs::FS;
 use tlogfs::transaction_guard::TransactionGuard;
 
+/// Reserved directory-entry name of the pond's node-manifest index node under
+/// the root.  Paired with the reserved [`tinyfs::INDEX_NODE_UUID`]; excluded
+/// from the content-tree fold and node manifest (design
+/// `docs/incremental-content-tree-design.md` Section 3).
+const INDEX_NODE_NAME: &str = ".pond-node-index";
+
 /// Configuration for a post-commit factory to be executed
 struct PostCommitFactoryConfig {
     factory_name: String,
@@ -296,6 +302,18 @@ impl<'a> StewardTransactionGuard<'a> {
             )))
         })?;
 
+        // Incremental content tree (Phase 2, Approach A): persist the pond's
+        // node manifest into the reserved index node as part of this same
+        // transaction, before it is finalized.  Only write transactions that
+        // actually changed something get an index-node version; a read
+        // transaction (or a no-op write) leaves it untouched.
+        if self.transaction_type == TransactionType::Write {
+            let (pending_records, modified_dirs) = data_tx.state()?.pending_operation_counts();
+            if pending_records > 0 || modified_dirs > 0 {
+                self.write_index_node(&data_tx).await?;
+            }
+        }
+
         let commit_result = data_tx.commit().await;
 
         // Step 3: Record transaction lifecycle in control table based on result
@@ -474,6 +492,52 @@ impl<'a> StewardTransactionGuard<'a> {
     /// publishing artifact and must not unwind an already-committed transaction.
     async fn materialize_tlog(&self, pond_id: uuid::Uuid) {
         crate::content_tree::materialize_tlog(&self.pond_path, self.control_table, pond_id).await
+    }
+
+    /// Persist the pond's node manifest into the reserved index node as part of
+    /// this write transaction, before it is finalized (design
+    /// `docs/incremental-content-tree-design.md` Phase 2, Approach A).
+    ///
+    /// The manifest -- one entry per node (`node_id -> parent, name,
+    /// entry_type, child_hash`) -- is folded from the in-transaction live state
+    /// (the committed rows plus this transaction's pending records and modified
+    /// directories) and written as one new version of the reserved
+    /// `FilePhysicalSeries` index node under the root.  The node is created on
+    /// the first such commit and appended thereafter; the reserved node is
+    /// excluded from the fold, so writing it never changes `root_tree_hash`.
+    async fn write_index_node(&self, data_tx: &TransactionGuard<'_>) -> Result<(), StewardError> {
+        use tokio::io::AsyncWriteExt;
+
+        let pond_id = self.control_table.pond_id_uuid();
+        let uncommitted = data_tx.state()?.uncommitted_live_rows().await?;
+        let committed_table = data_tx.persistence().table().clone();
+        let manifest_bytes = crate::content_tree::in_txn_manifest_bytes(
+            committed_table,
+            uncommitted,
+            &pond_id.to_string(),
+        )
+        .await?;
+
+        let root = data_tx.root().await?;
+        let mut writer = if root.exists(INDEX_NODE_NAME).await {
+            // Each version is a self-contained full manifest, so a collapsing
+            // write supersedes all prior versions: the index node stays at a
+            // single live version and never accrues user-visible compaction
+            // debt.  Phase 4 will replace full manifests with touched-only
+            // deltas.
+            root.async_writer_path_collapsing_with_type(
+                INDEX_NODE_NAME,
+                tinyfs::EntryType::FilePhysicalSeries,
+            )
+            .await?
+        } else {
+            let node_id = tinyfs::NodeID::from_hex_string(tinyfs::INDEX_NODE_UUID)
+                .map_err(|e| StewardError::Content(format!("reserved index node id: {e}")))?;
+            root.create_file_with_id(INDEX_NODE_NAME, node_id).await?
+        };
+        writer.write_all(&manifest_bytes).await?;
+        writer.shutdown().await?;
+        Ok(())
     }
 
     /// Run post-commit factories after a successful write transaction

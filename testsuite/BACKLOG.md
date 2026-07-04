@@ -7,8 +7,41 @@
 
 ## 🔴 Open Items
 
+> **Priority (reviewed 2026-07-03):**
+> 1. **CA-DELETE-RENAME-CLI** (P2) — highest value; *subsumes* CA-RENAME-CYCLE.
+>    Blocked on a product decision (add `pond rm`/`pond mv`?). User has declined
+>    to add the verbs for now, so this stays parked until that decision changes.
+> 2. **CA-RENAME-CYCLE** (P2) — superseded by #1; no independent work. Becomes
+>    the convergence test once `pond mv` exists.
+> 3. **FLAKY-SITEGEN-OUTPUT** (P3) — monitor only; not a duckpond regression,
+>    mitigation already applied. Act only if it recurs in CI.
+
+### CA-DELETE-RENAME-CLI: Delete/Rename apply-ops have no CLI-driven e2e path
+- **Type**: PRODUCTION-READINESS / CLI GAP (P2)
+- **Priority**: #1 (parked — user declined to add `pond rm`/`pond mv` for now, 2026-07-03)
+- **Symptom**: `content_pull.rs::plan_node_diff` emits `ApplyOp::Delete` and
+  `ApplyOp::Rename` (+ `emit_collision_safe_renames`), but there is NO CLI verb
+  that deletes or renames an OWNED node -- the only CLI deletions are of
+  foreign mount entries / graft pins (`pond remote remove --purge`,
+  `pull.rs`), which are non-transitive and never in the content-tree fold, so
+  they cannot drive a Delete diff for owned content. Verified: no `pond
+  rm`/`mv`/`rename` verb exists (`crates/cmd/src/main.rs`).
+- **Coverage status**: the diff-application logic IS covered end-to-end at the
+  steward replication level (real produce -> push -> pull -> converge, not just
+  `plan_node_diff` unit checks): `content_pull_test.rs::deletion_propagates`,
+  `rename_preserves_node_identity`, `swapped_sibling_names_converge`,
+  `rotated_sibling_names_converge` -- each asserts `root_hash(dst) ==
+  root_hash(src)`. The ONLY missing layer is CLI-driven coverage, which needs a
+  new verb.
+- **Next step (user decision)**: decide whether to add a `pond rm` (and
+  `pond mv`) CLI verb. If added, follow with a `testsuite/tests/NNN-*.sh` that
+  deletes a file and swaps two sibling names upstream and asserts a mirror
+  consumer converges. (Supersedes CA-RENAME-CYCLE.) Not adding a CLI verb
+  unprompted, since it is a product-surface decision.
+
 ### CA-RENAME-CYCLE: emit_collision_safe_renames end-to-end (CLI) coverage
 - **Type**: TEST COVERAGE (P2)
+- **Priority**: #2 (superseded by CA-DELETE-RENAME-CLI; no independent work)
 - **Symptom**: `content_pull.rs::emit_collision_safe_renames` (sibling swap
   a<->b, 3-node rotations, tmp-name cycle breaking) is covered by steward unit
   tests (`swapped_sibling_names_converge`, `rotated_sibling_names_converge`) but
@@ -20,6 +53,7 @@
 ### FLAKY-SITEGEN-OUTPUT: 209/210 sitegen-sidebar tests flake under heavy churn
 - **Type**: TEST FLAKINESS (pre-existing; surfaced during the full
   testsuite run 2026-06-08)
+- **Priority**: #3 (monitor only; not a duckpond regression, mitigation applied)
 - **Symptom**: Under rapid back-to-back container runs (`./run-all.sh`, or
   a tight `run-test.sh` loop), one of `209-sitegen-sidebar-theme.sh` /
   `210-sitegen-nested-sidebar.sh` intermittently fails with
@@ -42,6 +76,89 @@
 ---
 
 ## 🟢 Done
+
+### ✅ CA-TLOG-COMPACT-LEAF: compaction is spine-bearing (720 corrected)
+- **Completed**: 2026-07-03
+- **Type**: STALE-TEST fix (P2) + doc-comment correction
+- **Resolution**: Classified as STALE-TEST, not a code bug. `Ship::compact`
+  (`steward/src/ship.rs:1033-1064`) deliberately stamps a `DataCommitted(Compact)`
+  spine and materializes a transparency-log leaf so a post-compaction
+  `pond push` can reach the rewrite via the content graph (without a spine,
+  push fails "no commit spine recorded"). The transparency log is a log OVER
+  the commit spine, so it correctly carries a leaf for the Compact commit.
+- **What changed**: `720-tlog-history-maintain.sh` Step 3 now expects
+  `Tree size: 5` and history `[1,2,3,4,5]` after `pond maintain --compact`
+  (was asserting size stayed 4), plus a monotonic-sizes check; header/EXPECTED
+  updated to state compaction IS spine-bearing. Fixed the stale doc comment in
+  `steward/src/guard.rs::compute_commit_spine` that listed "compaction" as a
+  non-spine-stamping gap.
+- **Tests**: `720` now 14/14 in-container; 719/721 stay green; `verify` still
+  passes clean after compaction (published leaves stay faithful).
+
+### ✅ CA-TLOG-CRASH-SAFETY: crash-safe tile flush (write-before-delete)
+- **Completed**: 2026-07-03
+- **Type**: BUG FIX (P1, production-readiness) + unit coverage
+- **What**: `sync-store/src/tlog/tiles.rs` -- the tile writer used to
+  `remove_dir_all(<N>.p)` BEFORE writing the widened partial tile, and both ran
+  before `checkpoint.write()`; a crash in that window stranded the committed
+  prefix (log unreadable at its committed size and unappendable). Fixed by
+  (1) making readers resolve the widest-sufficient on-disk representation
+  (`read_tile_at_least`; tile entries are prefix-stable so truncation is
+  correct) and (2) making writers WRITE the new tile first, then prune
+  superseded partial variants (`prune_partial_variants`) -- so at every instant
+  a tile of width >= committed_size exists on disk. `flush`, `write_tile`,
+  `read_tile_hashes`, and `ensure_loaded` all updated.
+- **Tests**: `crash_left_wider_partial_stays_readable_and_appendable` and
+  `crash_left_full_tile_over_partial_checkpoint_stays_readable` splice the exact
+  crash-window on-disk state and assert the committed prefix reads back and the
+  log stays appendable to a root matching a clean materialization. All 28
+  sync-store tlog tests green (incl. byte-identical-across-splits).
+
+### ✅ CA-CONTENT-TREE-HEX: hard-fail on corrupt parent commit hash
+- **Completed**: 2026-07-03
+- **Type**: BUG FIX (P3) -- silent-fallback removal
+- **What**: `steward/src/content_tree.rs` -- `compute_commit_spine` resolved
+  `parent_commit_hash` with `.and_then(|hex| ObjectHash::from_hex(&hex).ok())`,
+  so a present-but-malformed hash silently collapsed to `None` and the commit
+  hash computed as genesis (breaking the chain invisibly). Extracted
+  `parse_optional_parent_commit`: `None` stays a legitimate gap, a malformed
+  hex is now a hard `StewardError::Content`.
+- **Tests**: `content_tree::tests::parse_optional_parent_commit_{none_is_genesis,
+  valid_hex_round_trips,malformed_hex_is_hard_error}`.
+
+### ✅ CA-INCR-MIRROR: incremental mirror-mode pull e2e (727)
+- **Completed**: 2026-07-03
+- **Type**: TEST COVERAGE
+- **What**: `727-incremental-mirror-pull.sh` (file://, 17 checks, green
+  in-container). Covers `rebuild_pond`'s incremental node_id diff in MIRROR
+  mode with real upstream changes, a gap left by 724 (no-op second pull) and
+  726 (import mode, no tip convergence). A producer publishes a file + a series
+  (v1); a consumer `pond restore`s the whole pond (adopting the source
+  pond_id); the producer then makes a delta in one push -- a NEW file (Create
+  diff) AND a new series version (Version diff) -- and the consumer runs a plain
+  `pond pull`. Asserts the incremental diff applies BOTH ops to the existing
+  mirror (new file present, series 14 rows / both versions, original file
+  intact), the mirror still passes `pond fsck`, and its content TIP re-converges
+  to the producer's pushed tip (full replica identity preserved across an
+  incremental update, not just a from-scratch restore).
+
+### ✅ CA-INCR-SERIES-VERSION: incremental series-version pull e2e (726)
+- **Completed**: 2026-07-03
+- **Type**: TEST COVERAGE
+- **What**: `726-incremental-series-version-pull.sh` (file://, 13 checks, green
+  in-container).  Closes the incremental series-VERSION gap left by 717/722
+  (each pulls a series exactly once, as a fresh consumer) and 715 (incremental
+  import of a new FILE, not a new version).  726 is the only case where a
+  consumer already holds version N of a series and must extend it to N+1 on
+  re-pull: a producer ingests version 1 (`host+series://`, 7 rows, day 1), a
+  consumer cross-pond imports and pulls, then the producer appends version 2
+  (day 2, distinct timestamps) to the SAME series path (create-or-append), and
+  the consumer re-pulls.  Asserts the incremental diff applies (14 rows merged,
+  both days present, version 1 neither lost nor doubled) and the consumer's
+  recorded `last_pulled_tip` equals the producer's pushed tip.  This is the
+  end-to-end regression guard for the CA-REVIEW-FIXES item 1 fix
+  (`content_tree.rs::build_target_state_for_pond` per-pond series-map filter)
+  feeding `content_pull.rs::plan_series_versions`.
 
 ### ✅ CA-MIRROR-RESTORE: `pond restore` verb + full-pond restore e2e (724)
 - **Completed**: 2026-07-03

@@ -17,7 +17,7 @@ Phases track the plan in Section 8; each is independently reviewable.
 | Phase | Scope | Status |
 |---|---|---|
 | Tier 0 | Single narrow post-commit scan (no inline blob bytes) + checksum row-leaf reset | **Done** |
-| 2 | Reserved delta-versioned index node (persisted node manifest) | Not started |
+| 2 | Reserved delta-versioned index node (persisted node manifest) | **Done** |
 | 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | Not started |
 | 4 | Incremental commit fold (both roots from changeset + index node) | Not started |
 | 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
@@ -47,6 +47,32 @@ partition-checksum *values* reset. Code:
   full workspace suite, clippy, and fmt are green.
 
 See Section 7 for the rationale and Section 6 for the cost table.
+
+**Phase 2 (done).** The reserved node-manifest index node is implemented
+(Approach A: written in-transaction, pre-commit). One well-known `FileID`
+(`tinyfs::INDEX_NODE_UUID = 00000000-0000-7700-8000-000000000000`, the `0x7`
+low nibble in byte 6 encoding `FilePhysicalSeries`) holds the full node manifest
+as a raw-byte series node named `.pond-node-index` under the data-FS root. Each
+write transaction folds the in-transaction live state (committed rows plus this
+transaction's pending records and synthesized modified-directory snapshots) into
+the complete manifest and appends it as one index-node version; a *collapsing*
+write keeps the node at a single live version, so it never becomes a
+user-visible compaction candidate. The reserved node is excluded from the fold
+(so `root_tree_hash` and the manifest are unchanged by its presence) and hidden
+from all user-facing directory enumeration. Phase 2 still keeps the post-commit
+full-rescan fold for the committed roots; Phase 4 retires that and switches the
+index node from a full manifest to a touched-only delta. Code:
+
+- `tinyfs::INDEX_NODE_UUID` / `index_node_uuid()` / `NodeID::is_index()`
+  (`node.rs`); enumeration filter in `WD::get_entries`/`entries` (`wd.rs`).
+- `tlogfs::persistence::State::uncommitted_live_rows` -- non-mutating pending +
+  synthesized modified-directory rows for the in-transaction fold.
+- `content_tree::in_txn_manifest_bytes` -- merges committed + uncommitted rows,
+  orders latest-version-wins, folds, and encodes the manifest; `hash_directory`
+  skips the reserved node id (fold exclusion).
+- `guard::write_index_node` -- called in `commit()` before `data_tx.commit()`
+  for write transactions; `create_file_with_id` on first commit, collapsing
+  series write thereafter. Unit test `ship::test_index_node_phase2`.
 
 ---
 
@@ -308,6 +334,7 @@ Roughly in dependency order; each phase is independently reviewable.
 2. **Reserved index node.** Allocate the well-known `FileID`; write a
    delta-versioned manifest node (all nodes + tombstones); reuse series
    merge-on-read and `collapsed_through` compaction; exclude it from the fold.
+   **Done.**
 3. **Incremental node-keyed Merkle.** One construction, incremental updater plus
    `O(n)` rebuilder oracle, byte-identical equivalence test.
 4. **Incremental commit fold.** Compute both roots from the changeset plus the

@@ -1454,6 +1454,39 @@ impl State {
         }
     }
 
+    /// Synthesize the uncommitted live rows of the current transaction: every
+    /// pending file/series record plus a full-snapshot row for each in-memory
+    /// directory modified this transaction.  Combined with the committed Delta
+    /// rows, this is exactly the post-commit live state, so the steward content
+    /// fold can run before the transaction is finalized (design
+    /// `docs/incremental-content-tree-design.md` Section 4, Approach A).
+    ///
+    /// Read-only: it neither flushes, allocates versions, nor mutates any
+    /// transaction state.  Synthesized directory rows carry `version = i64::MAX`
+    /// so a latest-wins fold prefers them over any committed row for the same
+    /// node; the value is otherwise unused because the fold hashes directory
+    /// content, not version numbers.
+    pub async fn uncommitted_live_rows(&self) -> Result<Vec<OplogEntry>, TLogFSError> {
+        let inner = self.inner.lock().await;
+        let mut rows: Vec<OplogEntry> = inner.records.clone();
+        let now = Utc::now().timestamp_micros();
+        for (dir_id, dir_state) in &inner.directories {
+            if !dir_state.modified {
+                continue;
+            }
+            let entries: Vec<DirectoryEntry> = dir_state.mapping.values().cloned().collect();
+            let content = inner.serialize_directory_entries(&entries)?;
+            rows.push(OplogEntry::new_directory_full_snapshot(
+                *dir_id,
+                now,
+                i64::MAX,
+                content,
+                inner.txn_seq,
+            ));
+        }
+        Ok(rows)
+    }
+
     /// Get the factory name for a specific node from the oplog
     /// Returns None if the node has no associated factory (static files/directories)
     pub async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {

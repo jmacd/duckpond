@@ -2061,10 +2061,19 @@ mod tests {
 
             // Verify version numbers: root gets v2, new nodes get v1
             // Node IDs are stored in full UUID format, but root is identified by starting with "00000000"
-            if node_id.starts_with("00000000") {
+            if node_id == tinyfs::ROOT_UUID {
                 assert_eq!(
                     versions[0], 2,
                     "Root directory ({}) should have v2 in second transaction",
+                    node_id
+                );
+            } else if node_id == tinyfs::INDEX_NODE_UUID {
+                // The reserved node-manifest index node is created on this first
+                // write transaction, so it carries v1 (design
+                // `docs/incremental-content-tree-design.md` Phase 2).
+                assert_eq!(
+                    versions[0], 1,
+                    "Index node ({}) should have v1 when first created",
                     node_id
                 );
             } else {
@@ -2077,16 +2086,121 @@ mod tests {
         }
 
         // Verify we created the expected number of directories
-        // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes total
+        // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes, plus
+        // the reserved node-manifest index node created on this first write = 7.
         assert_eq!(
             node_versions.len(),
-            6,
-            "Should have 6 nodes in txn_seq=2 (root + 5 new dirs), got: {:?}",
+            7,
+            "Should have 7 nodes in txn_seq=2 (root + 5 new dirs + index node), got: {:?}",
             node_versions.keys().collect::<Vec<_>>()
         );
 
         debug!(
             "[OK] Directory tree creation produces exactly one version per node with correct numbering"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_node_phase2() {
+        // Phase 2 (docs/incremental-content-tree-design.md): the reserved
+        // node-manifest index node is created on the first write, updated as a
+        // single collapsed live version thereafter, carries the full node
+        // manifest, is excluded from the fold, and is hidden from listings.
+        use sync_store::content::decode_manifest;
+
+        const INDEX_NAME: &str = ".pond-node-index";
+
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_index_node");
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
+            .await
+            .expect("Failed to create pond");
+
+        // First write: create two directories.
+        let meta = PondUserMetadata::new(vec!["w1".to_string()]);
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = root.create_dir_path("/a").await?;
+            _ = root.create_dir_path("/b").await?;
+            Ok(())
+        })
+        .await
+        .expect("first write");
+
+        // Second write: add a nested directory.
+        let meta = PondUserMetadata::new(vec!["w2".to_string()]);
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = root.create_dir_path("/a/c").await?;
+            Ok(())
+        })
+        .await
+        .expect("second write");
+
+        // Read the index node and the current content-tree report.
+        let report = crate::content_tree::compute_content_tree(&ship)
+            .await
+            .expect("content tree");
+
+        let meta = PondUserMetadata::new(vec!["read".to_string()]);
+        let tx = ship.begin_read(&meta).await.expect("begin read");
+        let root = tx.root().await.expect("root");
+
+        // The index node is addressable by name for the write path...
+        let index_bytes = root
+            .read_file_path_to_vec(INDEX_NAME)
+            .await
+            .expect("index node exists and is readable");
+
+        // ...but hidden from user-facing enumeration.
+        let matches = root.collect_matches("/*").await.expect("list root");
+        let names: Vec<String> = matches.iter().map(|(np, _)| np.basename()).collect();
+        assert!(
+            !names.iter().any(|n| n == INDEX_NAME),
+            "index node must not appear in directory listings, got: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "a"));
+        assert!(names.iter().any(|n| n == "b"));
+        _ = tx.commit().await.expect("commit read");
+
+        // The manifest carries every real node exactly once, and never itself.
+        let manifest = decode_manifest(&index_bytes).expect("decode manifest");
+        assert!(
+            !manifest
+                .iter()
+                .any(|e| e.node_id == tinyfs::INDEX_NODE_UUID),
+            "index node must be excluded from its own manifest (fold exclusion)"
+        );
+        // root + a + b + a/c = 4 real nodes; the index node is excluded.
+        assert_eq!(
+            manifest.len(),
+            4,
+            "manifest lists exactly the four real nodes, got: {:?}",
+            manifest.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        assert!(manifest.iter().any(|e| e.name == "a"));
+        assert!(manifest.iter().any(|e| e.name == "b"));
+        assert!(manifest.iter().any(|e| e.name == "c"));
+
+        // The manifest's root entry equals the fold's root_tree_hash: writing
+        // the index node never perturbs the excluded-from-fold root hash.
+        let root_entry = manifest
+            .iter()
+            .find(|e| e.parent_node_id.is_empty())
+            .expect("root manifest entry");
+        assert_eq!(
+            root_entry.child_hash, report.root_tree_hash,
+            "manifest root hash matches the content-tree root_tree_hash"
+        );
+
+        // The index node stays at a single live version: a collapse sweep that
+        // targets anything with more than one live version finds no candidate
+        // (the directories are single-version, and the index node collapses on
+        // every write), so it is never a user-visible compaction candidate.
+        let report = ship.collapse_versions(1).await.expect("collapse sweep");
+        assert_eq!(
+            report.files_collapsed, 0,
+            "index node self-collapses and is not a collapse candidate"
         );
     }
 

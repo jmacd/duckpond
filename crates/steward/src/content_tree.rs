@@ -493,6 +493,44 @@ pub(crate) async fn compute_commit_roots_for_table(
     Ok((index.root_tree_hash, manifest_root))
 }
 
+/// Build the full node-manifest bytes for the current in-transaction live state
+/// and persist them into the reserved index node (design
+/// `docs/incremental-content-tree-design.md` Section 4, Approach A / Phase 2).
+///
+/// `committed_table` is the pre-commit Delta table (its rows are read with the
+/// same narrow projection as every read-side fold); `uncommitted` are this
+/// transaction's pending records plus synthesized modified-directory rows (from
+/// [`tlogfs::persistence::State::uncommitted_live_rows`]).  The two are merged
+/// and ordered so the latest version per node wins, then folded exactly like
+/// the post-commit path -- the reserved index node is excluded from the fold,
+/// so the manifest never lists itself.  Phase 2 writes the complete manifest as
+/// one index-node version per commit; Phase 4 will make it a touched-only delta.
+///
+/// # Errors
+///
+/// Returns an error if the committed table cannot be scanned, the merged rows
+/// cannot be folded, or the manifest cannot be encoded (a duplicate `node_id`).
+pub(crate) async fn in_txn_manifest_bytes(
+    committed_table: deltalake::DeltaTable,
+    uncommitted: Vec<OplogEntry>,
+    local_pond_id: &str,
+) -> Result<Vec<u8>, StewardError> {
+    let mut rows = scan_live_rows(committed_table, false).await?;
+    rows.extend(uncommitted);
+    // fold_rows takes the latest version per node from ascending-version order;
+    // pending and synthesized rows carry higher (or `i64::MAX`) versions, so
+    // ordering by version per node makes them win over their committed rows.
+    rows.sort_by(|a, b| {
+        a.pond_id
+            .cmp(&b.pond_id)
+            .then_with(|| a.node_id.to_string().cmp(&b.node_id.to_string()))
+            .then_with(|| a.version.cmp(&b.version))
+    });
+    let index = fold_rows(rows, local_pond_id, None)?;
+    let manifest = node_manifest_entries(&index);
+    encode_manifest(&manifest).map_err(StewardError::Content)
+}
+
 /// Build a target pond's current node state for an incremental rebuild: a map
 /// from `node_id` to its [`ManifestEntry`], and a map from each series
 /// `node_id` to its ordered version blob hashes.
@@ -880,6 +918,16 @@ fn hash_directory(
         // here, the node manifest excludes these mounts too (it is built from
         // the same child lists).
         if child_key.0 != key.0 {
+            continue;
+        }
+        // The reserved node-manifest index node is a child of root but is
+        // deliberately excluded from the content-tree fold and the node
+        // manifest: its content is derived from the very hashes it stores, so
+        // folding it in would be self-referential.  Skipping it here keeps
+        // root's tree_hash and the manifest independent of the index node's
+        // presence, exactly like a cross-pond mount (design
+        // `docs/incremental-content-tree-design.md` Section 3).
+        if child_key.1 == tinyfs::INDEX_NODE_UUID {
             continue;
         }
         let child_hash = hash_child(
