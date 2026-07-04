@@ -1,12 +1,52 @@
 # Incremental Content Tree: O(change) Commits
 
-> **Status:** Active design. **Supersedes**
+> **Status:** Active design, implementation in progress. **Supersedes**
 > [`content-addressed-pond-design.md`](./content-addressed-pond-design.md),
 > which remains a valid description of the object model and transparency log but
 > describes per-commit hashing costs that this note replaces. Where the two
 > disagree about *how* the commit spine is computed and stored, **this document
 > wins**. The object model (blobs, trees, commits, the transparency log file
 > layout) is carried forward unchanged.
+
+---
+
+## 0. Implementation progress
+
+Phases track the plan in Section 8; each is independently reviewable.
+
+| Phase | Scope | Status |
+|---|---|---|
+| Tier 0 | Single narrow post-commit scan (no inline blob bytes) + checksum row-leaf reset | **Done** |
+| 2 | Reserved delta-versioned index node (persisted node manifest) | Not started |
+| 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | Not started |
+| 4 | Incremental commit fold (both roots from changeset + index node) | Not started |
+| 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
+| 6 | Validation (equivalence tests; keep tlog/pull/719 green; presubmit) | Not started |
+
+**Tier 0 (done).** Landed on branch `jmacd/65`. The two full-table `SELECT *`
+post-commit scans (content-tree fold + partition checksums) are now one shared
+**narrow** scan that never reads inline file `content`/`bao_outboard` bytes; the
+partition-checksum row leaf was redefined to exclude those redundant bytes (a
+coordinated Decision D2 reset). `commit_object`, `root_tree_hash`, the node
+manifest, and every transparency-log byte are unchanged -- only the
+partition-checksum *values* reset. Code:
+
+- `content_tree::scan_live_rows` / `scan_live_rows_ctx` -- narrow projection
+  (`arrow_cast(NULL, 'Binary')` for the two byte columns) plus a `WHERE blake3
+  IS NULL` query that splices back the small `content` of the only rows the fold
+  decodes (directories, symlinks, dynamic-node configs).
+- `content_tree::fold_rows` -- split out of the old `scan_and_fold`; fold logic
+  unchanged.
+- `content_tree::compute_commit_snapshot` -- one scan yielding both content
+  roots **and** the partition checksums; `assemble_commit_spine` does only the
+  parent lookup. The guard's main commit path now scans once instead of twice.
+- `remote_adapter::row_leaf_digest` -- the single leaf definition, shared by the
+  per-commit checksum and `fsck`; `partition_checksums_from_rows` computes from
+  already-scanned rows.
+- Unit tests cover the narrow-scan splice and full-vs-narrow leaf equivalence;
+  full workspace suite, clippy, and fmt are green.
+
+See Section 7 for the rationale and Section 6 for the cost table.
 
 ---
 
