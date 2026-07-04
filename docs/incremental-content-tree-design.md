@@ -18,7 +18,7 @@ Phases track the plan in Section 8; each is independently reviewable.
 |---|---|---|
 | Tier 0 | Single narrow post-commit scan (no inline blob bytes) + checksum row-leaf reset | **Done** |
 | 2 | Reserved delta-versioned index node (persisted node manifest) | **Done** |
-| 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | Not started |
+| 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | **Done** |
 | 4 | Incremental commit fold (both roots from changeset + index node) | Not started |
 | 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
 | 6 | Validation (equivalence tests; keep tlog/pull/719 green; presubmit) | Not started |
@@ -73,6 +73,32 @@ index node from a full manifest to a touched-only delta. Code:
 - `guard::write_index_node` -- called in `commit()` before `data_tx.commit()`
   for write transactions; `create_file_with_id` on first commit, collapsing
   series write thereafter. Unit test `ship::test_index_node_phase2`.
+
+**Phase 3 (done).** The node-keyed Merkle of Section 4.2 is implemented as a
+standalone `sync-store` primitive, not yet wired into `commit_object` (that is
+Phase 5). It is a sparse binary Merkle tree of fixed depth 256 keyed by
+`blake3(node_id)`, with an `EMPTY[d]` ladder collapsing the empty positions so
+neither implementation materializes empty subtrees. Two implementations produce
+byte-identical roots, mirroring the tlog tile writer/rebuilder pairing:
+
+- `content::node_merkle::NodeMerkle` -- the incremental updater. It stores every
+  populated node hash, so `set`/`remove` recompute only the changed leaf's
+  root-to-leaf path and `root()` is `O(1)`. `set_entry` derives a leaf value
+  digest from a `ManifestEntry` (entry type, length-prefixed name and parent,
+  child hash) so a rename, reparent, retype, or content change all move the
+  root; the `node_id` is the key.
+- `content::node_merkle::rebuild_root` (re-exported as
+  `node_merkle_rebuild_root`) -- the `O(n)` whole-set rebuilder / oracle; sorts
+  the `(key, value)` pairs and folds them recursively, sharing the same
+  leaf/interior/empty hashing rules. It rejects duplicate `node_id`s, the same
+  guard `encode_manifest` applies.
+
+The `equivalence_over_random_mutations` unit test drives the incremental updater
+through 4000 random insert/update/delete operations over a small key space and
+asserts its root stays byte-identical to a from-scratch rebuild of the live set
+after every mutation; scripted rename/reparent/retype/content and
+insert-then-remove tests pin the leaf semantics. Phase 4 will drive this updater
+from the transaction changeset and feed its root into `commit_object` (Phase 5).
 
 ---
 
@@ -336,7 +362,7 @@ Roughly in dependency order; each phase is independently reviewable.
    merge-on-read and `collapsed_through` compaction; exclude it from the fold.
    **Done.**
 3. **Incremental node-keyed Merkle.** One construction, incremental updater plus
-   `O(n)` rebuilder oracle, byte-identical equivalence test.
+   `O(n)` rebuilder oracle, byte-identical equivalence test. **Done.**
 4. **Incremental commit fold.** Compute both roots from the changeset plus the
    index node along the touched path; feed `commit_object`; retire the
    post-commit full-rescan fold, keeping the whole-tree fold as rebuilder and

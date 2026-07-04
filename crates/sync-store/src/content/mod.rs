@@ -33,10 +33,12 @@
 
 mod commit;
 mod manifest;
+mod node_merkle;
 mod tree;
 
 pub use commit::{Commit, Provenance};
 pub use manifest::{ManifestEntry, decode_manifest, encode_manifest, manifest_hash};
+pub use node_merkle::{NodeMerkle, rebuild_root as node_merkle_rebuild_root};
 pub use tree::{
     TreeEntry, decode_recipe, decode_series, decode_tree, encode_recipe, encode_series,
     encode_tree, recipe_hash, series_hash, tree_hash,

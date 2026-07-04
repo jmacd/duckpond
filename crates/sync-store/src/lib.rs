@@ -32,7 +32,8 @@ mod store;
 pub mod tlog;
 
 pub use content::{
-    Commit, ObjectHash, Provenance, TreeEntry, decode_series, decode_tree, series_hash, tree_hash,
+    Commit, ManifestEntry, NodeMerkle, ObjectHash, Provenance, TreeEntry, decode_series,
+    decode_tree, node_merkle_rebuild_root, series_hash, tree_hash,
 };
 pub use content_remote::ContentRemote;
 pub use error::{Result, StoreError};
