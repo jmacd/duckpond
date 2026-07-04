@@ -318,26 +318,40 @@ impl<'a> StewardTransactionGuard<'a> {
                 // as `live`.  Reading the post-commit Delta state goes
                 // through a fresh DataFusion SessionContext, so it does
                 // not require an active transaction on `persistence`.
+                //
+                // A single scan of the post-commit Delta state yields both the
+                // partition checksums and the content-graph spine's two roots
+                // (design "Incremental Content Tree", Tier 0), so the per-commit
+                // path reads the data table once instead of twice.
                 let pond_id = self.control_table.pond_id_uuid();
                 let post_commit_table = persistence.table().clone();
-                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+                let snapshot = crate::content_tree::compute_commit_snapshot(
                     post_commit_table,
                     pond_id,
                 )
                 .await
                 .map_err(|e| {
                     StewardError::ControlTable(format!(
-                        "Failed to snapshot partition checksums after commit: {}",
+                        "Failed to snapshot content roots and partition checksums after commit: {}",
                         e
                     ))
                 })?;
+                let partition_checksums = snapshot.partition_checksums;
 
-                // Content-graph spine (design Section 5.3): fold the live tree
-                // into a root_tree_hash, chain it to the previous commit, and
-                // record the resulting commit object's hash.  Computed from the
-                // post-commit Delta state through a fresh SessionContext, so no
-                // active transaction on `persistence` is required.
-                let commit_spine = self.compute_commit_spine(persistence, pond_id).await?;
+                // Content-graph spine (design Section 5.3): chain the freshly
+                // folded root_tree_hash to the previous commit and record the
+                // resulting commit object's hash.  The roots come from the
+                // single snapshot above; only the parent lookup touches the
+                // control table here.
+                let commit_spine = crate::content_tree::assemble_commit_spine(
+                    self.control_table,
+                    &pond_id.to_string(),
+                    self.txn_meta.txn_seq,
+                    self.txn_meta.user.args.join(" "),
+                    snapshot.root_tree_hash,
+                    snapshot.node_manifest_hash,
+                )
+                .await?;
 
                 // Design Decision D5: the leaf appended to the transparency log
                 // is the RFC 6962 hash of this commit object.  Capture the
@@ -439,30 +453,6 @@ impl<'a> StewardTransactionGuard<'a> {
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
-    }
-
-    /// Compute the content-graph commit spine for a just-landed write.
-    ///
-    /// Folds the post-commit live tree into a `root_tree_hash`, looks up the
-    /// previous commit on this pond's chain (the `DataCommitted` record at
-    /// `txn_seq - 1`), builds the [`sync_store::content::Commit`] object, and
-    /// returns its hex spine.  The parent is `None` at genesis or wherever an
-    /// earlier seq did not stamp a spine (compaction, factory sub-commits, or
-    /// records written before the spine existed); such gaps break the chain
-    /// for that link but leave each commit's own hash well-defined.
-    async fn compute_commit_spine(
-        &self,
-        persistence: &tlogfs::OpLogPersistence,
-        pond_id: uuid::Uuid,
-    ) -> Result<Option<crate::control_table::CommitSpine>, StewardError> {
-        crate::content_tree::compute_commit_spine(
-            persistence.table().clone(),
-            self.control_table,
-            pond_id,
-            self.txn_meta.txn_seq,
-            self.txn_meta.user.args.join(" "),
-        )
-        .await
     }
 
     /// Reconcile this pond's transparency-log tiles with the committed leaf

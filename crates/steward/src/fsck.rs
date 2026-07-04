@@ -172,8 +172,7 @@ pub async fn fsck(ship: &Ship, opts: FsckOptions) -> Result<FsckReport, StewardE
         for row in rows {
             rows_checked += 1;
             let leaf_key = format!("{}/{}", row.node_id, row.version);
-            let canonical = serde_json::to_vec(&row)?;
-            let digest = *blake3::hash(&canonical).as_bytes();
+            let digest = crate::remote_adapter::row_leaf_digest(&row)?;
             by_partition
                 .entry((row.pond_id.clone(), row.part_id.to_string()))
                 .or_default()

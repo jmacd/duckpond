@@ -71,14 +71,76 @@ pub(crate) async fn compute_commit_spine(
     let pond_id_str = pond_id.to_string();
     let (root_tree_hash, node_manifest_hash) =
         compute_commit_roots_for_table(table, &pond_id_str).await?;
+    assemble_commit_spine(
+        control_table,
+        &pond_id_str,
+        txn_seq,
+        request,
+        root_tree_hash,
+        node_manifest_hash,
+    )
+    .await
+}
 
-    let parent_commit_hash = control_table
-        .commit_hash_at(txn_seq - 1)
-        .await?
-        .and_then(|hex| ObjectHash::from_hex(&hex).ok());
+/// The two content roots plus the partition checksums for a just-landed commit,
+/// all derived from a single scan of the data table (design "Incremental
+/// Content Tree", Tier 0).  Replaces the pre-Tier-0 pair of independent full
+/// scans (one for the fold, one for the checksums).
+pub(crate) struct CommitSnapshot {
+    pub root_tree_hash: ObjectHash,
+    pub node_manifest_hash: ObjectHash,
+    pub partition_checksums: sync_steward::PartitionChecksums,
+}
+
+/// Scan a pond's live rows once and derive both content roots and the partition
+/// checksums from the same rows, so the per-commit path reads the data table a
+/// single time instead of twice.  `pond_id` is the local pond whose rows feed
+/// the checksums and whose root the fold starts from.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be scanned or folded, or if a row
+/// cannot be hashed into its checksum leaf.
+pub(crate) async fn compute_commit_snapshot(
+    table: deltalake::DeltaTable,
+    pond_id: uuid::Uuid,
+) -> Result<CommitSnapshot, StewardError> {
+    let pond_id_str = pond_id.to_string();
+    let rows = scan_live_rows(table, false).await?;
+    let partition_checksums =
+        crate::remote_adapter::partition_checksums_from_rows(&rows, &pond_id_str)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let index = fold_rows(rows, &pond_id_str, None)?;
+    let manifest = node_manifest_entries(&index);
+    let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    Ok(CommitSnapshot {
+        root_tree_hash: index.root_tree_hash,
+        node_manifest_hash,
+        partition_checksums,
+    })
+}
+
+/// Assemble a [`CommitSpine`] from precomputed content roots: look up the
+/// previous commit on this pond's chain, build the [`Commit`] object, and
+/// return its hex spine.  Split from [`compute_commit_spine`] so the per-commit
+/// path can reuse the single-scan roots from [`compute_commit_snapshot`]
+/// instead of re-folding the tree.
+pub(crate) async fn assemble_commit_spine(
+    control_table: &ControlTable,
+    pond_id_str: &str,
+    txn_seq: i64,
+    request: String,
+    root_tree_hash: ObjectHash,
+    node_manifest_hash: ObjectHash,
+) -> Result<Option<CommitSpine>, StewardError> {
+    let parent_commit_hash = parse_optional_parent_commit(
+        control_table.commit_hash_at(txn_seq - 1).await?,
+        txn_seq - 1,
+        pond_id_str,
+    )?;
 
     let provenance = Provenance {
-        pond_id: pond_id_str,
+        pond_id: pond_id_str.to_string(),
         seq: txn_seq,
         time_micros: chrono::Utc::now().timestamp_micros(),
         author: String::new(),
@@ -97,6 +159,29 @@ pub(crate) async fn compute_commit_spine(
         commit_hash: commit.hash().to_hex(),
         commit_object: hex::encode(commit.encode()),
     }))
+}
+
+/// Parse the parent commit's stored hex hash for a new commit's spine.
+///
+/// `None` (no record at `parent_seq`) is the legitimate chain-gap / genesis
+/// case and stays `None`.  A present-but-malformed hex is corruption, not a
+/// gap: it is a hard error rather than being silently collapsed to genesis,
+/// which would recompute this commit's hash as if it had no parent and break
+/// the chain invisibly.
+fn parse_optional_parent_commit(
+    stored: Option<String>,
+    parent_seq: i64,
+    pond_id_str: &str,
+) -> Result<Option<ObjectHash>, StewardError> {
+    match stored {
+        None => Ok(None),
+        Some(hex) => ObjectHash::from_hex(&hex).map(Some).map_err(|e| {
+            StewardError::Content(format!(
+                "corrupt parent commit hash at seq {parent_seq} for pond {pond_id_str}: {e} \
+                 (value {hex:?})"
+            ))
+        }),
+    }
 }
 
 /// Reconcile a pond's transparency-log tiles with its committed leaf sequence
@@ -346,7 +431,11 @@ pub(crate) async fn build_content_tree_for_table(
     table: deltalake::DeltaTable,
     local_pond_id: &str,
 ) -> Result<ContentTreeIndex, StewardError> {
-    scan_and_fold(table, local_pond_id, None).await
+    // Hash/index paths never need blob bytes: file rows fold in via `blake3`,
+    // and the only content the fold decodes (directories, symlinks, dynamic
+    // node configs) has no `blake3`, so the narrow scan fetches exactly it.
+    let rows = scan_live_rows(table, false).await?;
+    fold_rows(rows, local_pond_id, None)
 }
 
 /// Build the node manifest for a pond's content tree from an already-built
@@ -495,7 +584,10 @@ pub async fn materialize_content_objects(ship: &Ship) -> Result<MaterializedObje
     let local_pond_id = ship.data_persistence().pond_id().to_string();
     let table = ship.data_persistence().table().clone();
     let mut materialized = MaterializedObjects::default();
-    let index = scan_and_fold(table, &local_pond_id, Some(&mut materialized)).await?;
+    // Materialization must read every blob so it can be transferred, so this
+    // is the one caller that scans with content (`want_content = true`).
+    let rows = scan_live_rows(table, true).await?;
+    let index = fold_rows(rows, &local_pond_id, Some(&mut materialized))?;
     // The node manifest travels with the closure so a consumer can adopt the
     // source's node_ids (Section 4.5).  It is kept separate from the pure
     // content objects because it is pond-specific (it carries node_ids); the
@@ -506,33 +598,142 @@ pub async fn materialize_content_objects(ship: &Ship) -> Result<MaterializedObje
     Ok(materialized)
 }
 
-/// Shared scan-and-fold core for the hash, index, and materialization paths.
+/// Scan a pond's live rows once for the content fold (and, in the per-commit
+/// path, the partition checksums computed from the same rows).
 ///
-/// When `sink` is `Some`, every folded object's bytes are recorded into it
-/// (split inline vs external per Decision D7); when `None`, only hashes are
-/// computed.  Either way the returned [`ContentTreeIndex`] is identical, so the
-/// child-hash rules live in exactly one implementation.
-async fn scan_and_fold(
+/// When `want_content` is false -- the per-commit hot path and every read-side
+/// fold -- inline file `content` and `bao_outboard` bytes are NOT read from
+/// parquet.  A file row already carries a `blake3` that stands in for its
+/// content, and the only rows whose small `content` the fold decodes
+/// (directories, symlinks, and dynamic-node configs) carry no `blake3`; those
+/// are fetched by a second query filtered to `blake3 IS NULL`.  This keeps a
+/// commit's read volume proportional to structural metadata, not to the inline
+/// blob bytes of the whole pond (design "Incremental Content Tree", Tier 0).
+///
+/// When `want_content` is true -- materialization for push -- every row's
+/// content is read so blobs can be transferred.
+///
+/// # Errors
+///
+/// Returns an error if the data table cannot be registered, queried, or
+/// deserialized.
+async fn scan_live_rows(
     table: deltalake::DeltaTable,
-    local_pond_id: &str,
-    sink: Option<&mut MaterializedObjects>,
-) -> Result<ContentTreeIndex, StewardError> {
+    want_content: bool,
+) -> Result<Vec<OplogEntry>, StewardError> {
     let ctx = SessionContext::new();
     let _previous = ctx
         .register_table("content_live", Arc::new(table))
         .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    scan_live_rows_ctx(&ctx, want_content).await
+}
 
+/// [`scan_live_rows`] re-exported for the checksum path in
+/// [`crate::remote_adapter`], which owns its own `DeltaTable` handle.
+pub(crate) async fn scan_live_rows_owned(
+    table: deltalake::DeltaTable,
+    want_content: bool,
+) -> Result<Vec<OplogEntry>, StewardError> {
+    scan_live_rows(table, want_content).await
+}
+
+/// Column list matching [`OplogEntry`]'s Arrow schema field order, but with the
+/// two large byte columns replaced by typed NULL literals so the parquet reader
+/// never materializes them while the batch still deserializes into a full
+/// [`OplogEntry`] (with `content`/`bao_outboard` left `None`).
+const NARROW_META_SQL: &str = "SELECT part_id, node_id, file_type, timestamp, version, \
+     arrow_cast(NULL, 'Binary') AS content, blake3, size, min_event_time, max_event_time, \
+     min_override, max_override, extended_attributes, factory, format, txn_seq, pond_id, \
+     arrow_cast(NULL, 'Binary') AS bao_outboard, collapsed_through \
+     FROM content_live ORDER BY pond_id, part_id, node_id, version";
+
+/// Content of exactly the structural rows the fold decodes -- those without a
+/// `blake3` (directories, symlinks, dynamic nodes).
+const NARROW_CONTENT_SQL: &str =
+    "SELECT pond_id, node_id, version, content FROM content_live WHERE blake3 IS NULL";
+
+/// Just the structural `content` of a `blake3 IS NULL` row, keyed for splicing
+/// back into its metadata row.
+#[derive(serde::Deserialize)]
+struct StructuralContent {
+    pond_id: String,
+    node_id: String,
+    version: i64,
+    content: Option<Vec<u8>>,
+}
+
+/// [`scan_live_rows`] against a session with `content_live` already registered
+/// (split out so it can be exercised over an in-memory table in tests).
+async fn scan_live_rows_ctx(
+    ctx: &SessionContext,
+    want_content: bool,
+) -> Result<Vec<OplogEntry>, StewardError> {
+    let sql = if want_content {
+        "SELECT * FROM content_live ORDER BY pond_id, part_id, node_id, version"
+    } else {
+        NARROW_META_SQL
+    };
     let batches = ctx
-        .sql("SELECT * FROM content_live ORDER BY pond_id, part_id, node_id, version")
+        .sql(sql)
         .await
         .map_err(|e| StewardError::DeltaLake(e.to_string()))?
         .collect()
         .await
         .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let mut rows: Vec<OplogEntry> = Vec::new();
+    for batch in &batches {
+        let parsed: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+        rows.extend(parsed);
+    }
 
+    if want_content {
+        return Ok(rows);
+    }
+
+    // Splice the small content of structural (blake3-free) rows back in.
+    let content_batches = ctx
+        .sql(NARROW_CONTENT_SQL)
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?
+        .collect()
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let mut by_key: HashMap<(String, String, i64), Vec<u8>> = HashMap::new();
+    for batch in &content_batches {
+        let parsed: Vec<StructuralContent> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+        for c in parsed {
+            if let Some(bytes) = c.content {
+                let _ = by_key.insert((c.pond_id, c.node_id, c.version), bytes);
+            }
+        }
+    }
+    for row in &mut rows {
+        if row.blake3.is_none() {
+            let key = (row.pond_id.clone(), row.node_id.to_string(), row.version);
+            if let Some(bytes) = by_key.remove(&key) {
+                row.content = Some(bytes);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Fold already-scanned live rows into a [`ContentTreeIndex`].
+///
+/// When `sink` is `Some`, every folded object's bytes are recorded into it
+/// (split inline vs external per Decision D7); when `None`, only hashes are
+/// computed.  Either way the returned [`ContentTreeIndex`] is identical, so the
+/// child-hash rules live in exactly one implementation.  The rows must arrive
+/// in ascending `version` order per node (the scan's `ORDER BY`), so later rows
+/// overwrite earlier ones for the latest-version snapshot.
+fn fold_rows(
+    rows: Vec<OplogEntry>,
+    local_pond_id: &str,
+    sink: Option<&mut MaterializedObjects>,
+) -> Result<ContentTreeIndex, StewardError> {
     // Latest-version facts per node, and per-version blobs for series.
-    // Rows arrive in ascending version order, so later rows overwrite earlier
-    // ones for the latest-version snapshot.
     let mut latest: HashMap<NodeKey, NodeFacts> = HashMap::new();
     let mut series_versions: HashMap<NodeKey, BTreeMap<i64, VersionBlob>> = HashMap::new();
     // Highest `collapsed_through` sentinel seen per series node.  A series
@@ -540,39 +741,35 @@ async fn scan_and_fold(
     // merged row carrying this sentinel; the versions are pruned after the scan.
     let mut collapsed_through: HashMap<NodeKey, i64> = HashMap::new();
 
-    for batch in &batches {
-        let rows: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)
-            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
-        for row in rows {
-            let key = (row.pond_id.clone(), row.node_id.to_string());
+    for row in rows {
+        let key = (row.pond_id.clone(), row.node_id.to_string());
 
-            if matches!(
-                row.file_type,
-                EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries
-            ) {
-                let hash = row_blob_hash(&row.blake3, row.content.as_deref());
-                let _ = series_versions.entry(key.clone()).or_default().insert(
-                    row.version,
-                    VersionBlob {
-                        hash,
-                        content: row.content.clone(),
-                    },
-                );
-                if let Some(k) = row.collapsed_through {
-                    let entry = collapsed_through.entry(key.clone()).or_insert(k);
-                    *entry = (*entry).max(k);
-                }
-            }
-
-            let _ = latest.insert(
-                key,
-                NodeFacts {
-                    content: row.content,
-                    blake3: row.blake3,
-                    factory: row.factory,
+        if matches!(
+            row.file_type,
+            EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries
+        ) {
+            let hash = row_blob_hash(&row.blake3, row.content.as_deref());
+            let _ = series_versions.entry(key.clone()).or_default().insert(
+                row.version,
+                VersionBlob {
+                    hash,
+                    content: row.content.clone(),
                 },
             );
+            if let Some(k) = row.collapsed_through {
+                let entry = collapsed_through.entry(key.clone()).or_insert(k);
+                *entry = (*entry).max(k);
+            }
         }
+
+        let _ = latest.insert(
+            key,
+            NodeFacts {
+                content: row.content,
+                blake3: row.blake3,
+                factory: row.factory,
+            },
+        );
     }
 
     // Drop versions superseded by a compaction.  The live series read path skips
@@ -816,4 +1013,139 @@ fn leaf_facts<'a>(
     latest
         .get(key)
         .ok_or_else(|| StewardError::DeltaLake(format!("missing node {}/{}", key.0, key.1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_optional_parent_commit_none_is_genesis() {
+        // No record at the parent seq is a legitimate chain gap, not an error.
+        let got = parse_optional_parent_commit(None, 0, "pond-x").expect("None is ok");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn parse_optional_parent_commit_valid_hex_round_trips() {
+        let want = ObjectHash::from_bytes([7u8; 32]);
+        let got = parse_optional_parent_commit(Some(want.to_hex()), 3, "pond-x")
+            .expect("valid hex parses")
+            .expect("Some");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_optional_parent_commit_malformed_hex_is_hard_error() {
+        // A present-but-corrupt hash must NOT silently collapse to genesis.
+        for bad in ["not-hex", "", "abc", &"zz".repeat(32)] {
+            let err = parse_optional_parent_commit(Some(bad.to_string()), 5, "pond-x")
+                .expect_err("corrupt hex must error");
+            match err {
+                StewardError::Content(msg) => {
+                    assert!(msg.contains("corrupt parent commit hash"), "msg: {msg}");
+                    assert!(msg.contains("seq 5"), "msg: {msg}");
+                }
+                other => panic!("expected Content error, got {other:?}"),
+            }
+        }
+    }
+
+    // Build an in-memory `content_live` table from OplogEntry rows so the narrow
+    // scan can be exercised without a Delta table.
+    fn register_rows(entries: &[OplogEntry]) -> SessionContext {
+        use tlogfs::schema::ForArrow;
+        let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &entries)
+            .expect("encode OplogEntry rows");
+        let schema = batch.schema();
+        let mem =
+            datafusion::datasource::MemTable::try_new(schema, vec![vec![batch]]).expect("memtable");
+        let ctx = SessionContext::new();
+        let _ = ctx
+            .register_table("content_live", Arc::new(mem))
+            .expect("register");
+        ctx
+    }
+
+    #[tokio::test]
+    async fn narrow_scan_drops_blob_content_but_keeps_structural() {
+        use tinyfs::{EntryType, FileID};
+        let pond = tinyfs::local_pond_uuid();
+
+        // Directory: blake3 None, small structural content the fold decodes.
+        let dir_id = FileID::new_physical_dir_id(pond);
+        let dir_content = b"structural-directory-bytes".to_vec();
+        let dir_row = OplogEntry::new_inline(dir_id, 1, 1, dir_content.clone(), 1);
+
+        // Small file: blake3 Some, content redundant with the hash.
+        let file_id =
+            FileID::new_in_partition(dir_id.part_id(), EntryType::FilePhysicalVersion, pond);
+        let file_content = b"redundant-blob-bytes".to_vec();
+        let file_row = OplogEntry::new_small_file(file_id, 2, 1, file_content.clone(), 1);
+
+        let ctx = register_rows(&[dir_row.clone(), file_row.clone()]);
+
+        // Narrow scan: file blob content is dropped, structural content spliced.
+        let narrow = scan_live_rows_ctx(&ctx, false).await.expect("narrow scan");
+        let narrow_file = narrow
+            .iter()
+            .find(|r| r.blake3.is_some())
+            .expect("file row present");
+        assert!(
+            narrow_file.content.is_none(),
+            "blake3-bearing file content must not be read by the narrow scan"
+        );
+        assert!(narrow_file.bao_outboard.is_none());
+        let narrow_dir = narrow
+            .iter()
+            .find(|r| r.blake3.is_none())
+            .expect("dir row present");
+        assert_eq!(
+            narrow_dir.content.as_deref(),
+            Some(dir_content.as_slice()),
+            "structural (blake3-free) content must be spliced back for the fold"
+        );
+
+        // Full scan: every row keeps its content for materialization.
+        let full = scan_live_rows_ctx(&ctx, true).await.expect("full scan");
+        let full_file = full
+            .iter()
+            .find(|r| r.blake3.is_some())
+            .expect("file row present");
+        assert_eq!(full_file.content.as_deref(), Some(file_content.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn checksum_leaf_matches_between_full_and_narrow_rows() {
+        // The redefined leaf digest must be identical whether computed from a
+        // full row (as fsck does) or from a narrow-scan row (as the per-commit
+        // checksum does): both normalize content/bao_outboard away for
+        // blake3-bearing rows and keep structural content otherwise.
+        use tinyfs::{EntryType, FileID};
+        let pond = tinyfs::local_pond_uuid();
+        let dir_id = FileID::new_physical_dir_id(pond);
+        let dir_row = OplogEntry::new_inline(dir_id, 1, 1, b"dir-bytes".to_vec(), 1);
+        let file_id =
+            FileID::new_in_partition(dir_id.part_id(), EntryType::FilePhysicalVersion, pond);
+        let file_row = OplogEntry::new_small_file(file_id, 2, 1, b"blob-bytes".to_vec(), 1);
+
+        let ctx = register_rows(&[dir_row.clone(), file_row.clone()]);
+        let narrow = scan_live_rows_ctx(&ctx, false).await.expect("narrow scan");
+
+        for full in [&dir_row, &file_row] {
+            let matching = narrow
+                .iter()
+                .find(|r| r.node_id == full.node_id && r.version == full.version)
+                .expect("row present in narrow scan");
+            let full_digest =
+                crate::remote_adapter::row_leaf_digest(full).expect("full leaf digest");
+            let narrow_digest =
+                crate::remote_adapter::row_leaf_digest(matching).expect("narrow leaf digest");
+            assert_eq!(
+                full_digest, narrow_digest,
+                "leaf digest must match between full and narrow rows for node {}",
+                full.node_id
+            );
+        }
+    }
 }

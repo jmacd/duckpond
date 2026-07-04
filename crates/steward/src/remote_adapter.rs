@@ -49,7 +49,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -840,50 +839,54 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
     }
 }
 
-/// Compute the per-partition Merkle checksums for `pond_id` rows in
-/// `table`, using the same hash strategy as the trait implementation
-/// above.  Exposed at module scope so that the post-commit hook in
-/// [`crate::guard::StewardTransactionGuard`] can compute the snapshot
-/// recorded on `DataCommitted` without going through a `Ship`/`adapter`
-/// dance.  Takes ownership of the [`deltalake::DeltaTable`] handle so
-/// the caller's borrow on the persistence is released immediately.
-pub(crate) async fn compute_live_checksums_for_table(
-    table: deltalake::DeltaTable,
-    pond_id: Uuid,
+/// Canonical per-row leaf digest for partition checksums.
+///
+/// The inline `content` bytes of a file row are redundant with its `blake3`
+/// (which is `blake3(content)` for physical versions), and `bao_outboard` is a
+/// verified-streaming tree derived from the same content; both are excluded
+/// from the leaf so the per-commit checksum scan need never read inline blob
+/// bytes (design "Incremental Content Tree", Tier 0).  Structural rows
+/// (directories, symlinks, dynamic nodes) carry no `blake3`, so their small
+/// `content` stays in the leaf as their identity.
+///
+/// This is the single definition shared by the post-commit checksum snapshot
+/// and [`crate::fsck`]; both must agree, and both change together relative to
+/// the pre-Tier-0 leaf (a coordinated reset under Decision D2).
+///
+/// # Errors
+///
+/// Returns an error if the normalized row cannot be serialized to JSON.
+pub(crate) fn row_leaf_digest(row: &OplogEntry) -> Result<[u8; 32], serde_json::Error> {
+    let mut normalized = row.clone();
+    if normalized.blake3.is_some() {
+        normalized.content = None;
+    }
+    normalized.bao_outboard = None;
+    let canonical = serde_json::to_vec(&normalized)?;
+    Ok(*blake3::hash(&canonical).as_bytes())
+}
+
+/// Compute the per-partition Merkle checksums for `pond_id`'s rows from an
+/// already-scanned row set, grouping by `part_id` and hashing each row with
+/// [`row_leaf_digest`].  Shared by the standalone [`compute_live_checksums_for_table`]
+/// and the single-scan per-commit snapshot in [`crate::content_tree`].
+///
+/// # Errors
+///
+/// Returns an error if a row cannot be serialized for its leaf digest.
+pub(crate) fn partition_checksums_from_rows(
+    rows: &[OplogEntry],
+    pond_id_str: &str,
 ) -> StewardResult<PartitionChecksums> {
-    let ctx = datafusion::execution::context::SessionContext::new();
-    let _previous = ctx
-        .register_table("delta_table_live", Arc::new(table))
-        .map_err(adapt_err)?;
-
-    let pond_id_str = pond_id.to_string();
-    let sql = format!(
-        "SELECT * FROM delta_table_live WHERE pond_id = '{}' \
-         ORDER BY part_id, node_id, version",
-        pond_id_str
-    );
-    let batches = ctx
-        .sql(&sql)
-        .await
-        .map_err(adapt_err)?
-        .collect()
-        .await
-        .map_err(adapt_err)?;
-
-    // Group rows by part_id; per group, build owned (key,
-    // value_blake3) leaves.  We store owned strings/arrays so the
-    // borrow-bound `Leaf<'_>` can be constructed via `as_str`/`&`
-    // in the final Merkle pass.
     let mut by_partition: HashMap<String, Vec<(String, [u8; 32])>> = HashMap::new();
-    for batch in batches {
-        let rows: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch).map_err(adapt_err)?;
-        for row in rows {
-            let key = format!("{}/{}", row.node_id, row.version);
-            let part = row.part_id.to_string();
-            let canonical = serde_json::to_vec(&row).map_err(adapt_err)?;
-            let digest = *blake3::hash(&canonical).as_bytes();
-            by_partition.entry(part).or_default().push((key, digest));
+    for row in rows {
+        if row.pond_id != pond_id_str {
+            continue;
         }
+        let key = format!("{}/{}", row.node_id, row.version);
+        let part = row.part_id.to_string();
+        let digest = row_leaf_digest(row).map_err(adapt_err)?;
+        by_partition.entry(part).or_default().push((key, digest));
     }
 
     let strategy = Merkle::new();
@@ -899,6 +902,26 @@ pub(crate) async fn compute_live_checksums_for_table(
         let _previous = out.insert(partition, strategy.compute(&leaves));
     }
     Ok(out)
+}
+
+/// Compute the per-partition Merkle checksums for `pond_id` rows in
+/// `table`.  Exposed at module scope so that the post-commit hook in
+/// [`crate::guard::StewardTransactionGuard`] can compute the snapshot
+/// recorded on `DataCommitted` without going through a `Ship`/`adapter`
+/// dance.  Takes ownership of the [`deltalake::DeltaTable`] handle so
+/// the caller's borrow on the persistence is released immediately.
+///
+/// Reads via the narrow metadata scan (no inline blob bytes), so it is
+/// cheap even when the pond holds large inline files.
+pub(crate) async fn compute_live_checksums_for_table(
+    table: deltalake::DeltaTable,
+    pond_id: Uuid,
+) -> StewardResult<PartitionChecksums> {
+    let pond_id_str = pond_id.to_string();
+    let rows = crate::content_tree::scan_live_rows_owned(table, false)
+        .await
+        .map_err(adapt_err)?;
+    partition_checksums_from_rows(&rows, &pond_id_str)
 }
 
 /// Outcome of [`push_pending_to_remote`].
