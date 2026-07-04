@@ -429,6 +429,11 @@ spine relocation, control demotion, and checksum subsumption into these phases.
 
 ## 10. Unified single-pond storage (Decision D9)
 
+> The architectural end state -- including steps 4b/5/5b and the coherence
+> argument for a disposable control filesystem -- is written up separately in
+> `docs/unified-pond-storage-architecture.md`. This section records the decision
+> and the phased mechanics.
+
 The pond is **one `data/` Delta Lake instance**. Steward (`{POND}/control`) is
 **not part of the pond**: it provides local concurrency control and gates access,
 is disposable, and is fully reconstructable from the pond. Authority flows one
