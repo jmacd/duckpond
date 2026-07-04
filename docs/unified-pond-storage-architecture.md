@@ -1,7 +1,8 @@
 # Unified Pond Storage Architecture (Decision D9)
 
-Status: **target architecture.** Step 4a (spine relocation) has landed; steps
-4b, 5, 5b, and 6 are in progress. This document describes where the system ends
+Status: **target architecture.** Steps 4a (spine relocation), 4b (incremental
+commit fold), and 5 (`commit_object` node-keyed Merkle root) have landed; steps
+5b and 6 are in progress. This document describes where the system ends
 up once that sequence completes, and why the design is coherent. It is the
 architectural companion to the phased implementation plan in
 `docs/incremental-content-tree-design.md` (see its Section 10 and progress
@@ -107,7 +108,8 @@ content-changing write, before the Delta transaction finalizes, the steward:
 2. **Writes the INDEX node** version: the node manifest plus the incremental
    caches needed to make the *next* commit `O(change)`.
 3. **Reads the LOG tip** (parent commit hash) from the committed table and
-   **builds the commit object** (`root_tree_hash` + parent + provenance).
+   **builds the commit object** (`root_tree_hash` + parent + `node_manifest_hash`
+   + `node_manifest_root` + provenance).
 4. **Appends the LOG node** version = that commit object.
 5. Commits INDEX + LOG + data rows **in one Delta transaction**.
 
@@ -147,9 +149,12 @@ remove the last pond-derived data from the authoritative-in-control position.
   validation oracle, is retired here. **This is a performance change, not an
   authority change** -- but it is what makes the INDEX node a genuine durable
   incremental cache rather than a per-commit full rewrite.
-- **5 -- `commit_object` Merkle swap.** The commit object commits to the
-  `NodeMerkle` root instead of a flat `manifest_hash`, so the manifest identity
-  is itself incremental.
+- **5 -- `commit_object` node-keyed Merkle root.** *(Done.)* The commit object
+  gains a `node_manifest_root` (the `NodeMerkle` root) alongside the flat
+  `node_manifest_hash`. The flat hash is retained as the manifest object's
+  push/pull fetch-and-verify key; the Merkle root adds an incremental identity
+  commitment (verified by the pull path against the tip commit) and paves the
+  way for a later incremental (delta-INDEX) manifest transfer.
 - **5b -- checksum subsumption.** A partition *is* a directory; that directory's
   `tree_hash` in the INDEX node *is* its content checksum. Replication and fsck
   compare content-tree hashes, and the Tier-0 `row_leaf_digest` partition
