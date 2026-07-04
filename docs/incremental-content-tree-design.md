@@ -19,9 +19,12 @@ Phases track the plan in Section 8; each is independently reviewable.
 | Tier 0 | Single narrow post-commit scan (no inline blob bytes) + checksum row-leaf reset | **Done** |
 | 2 | Reserved delta-versioned index node (persisted node manifest) | **Done** |
 | 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | **Done** |
-| 4 | Incremental commit fold (both roots from changeset + index node) | Not started |
+| D9 | Unified single-pond storage: authoritative LOG + derived INDEX; control demoted (Section 10) | Design accepted |
+| 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | Not started |
+| 4b | Incremental commit fold (both roots from changeset + INDEX along touched path) | Not started |
 | 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
-| 6 | Validation (equivalence tests; keep tlog/pull/719 green; presubmit) | Not started |
+| 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | Not started |
+| 6 | Validation (equivalence + rebuild-from-pond; keep tlog/pull/719 green; presubmit) | Not started |
 
 **Tier 0 (done).** Landed on branch `jmacd/65`. The two full-table `SELECT *`
 post-commit scans (content-tree fold + partition checksums) are now one shared
@@ -280,13 +283,21 @@ records in the control table, each storing `commit_object`. The C2SP
 
 | Per commit | Lives in | Role |
 |---|---|---|
-| `DataCommitted` (`commit_object`) | control table (disposable) | authoritative leaf log |
+| `commit_object` (LOG node version) | **data FS (the pond, replicated)** | **authoritative leaf log** |
+| `DataCommitted` mirror | control table (disposable) | rebuildable cache of the tip |
 | tile + checkpoint | `{POND}/tlog` | derived export for external witnesses |
 | index node version | data FS (replicated) | cache making both roots `O(change)` |
 
-`pond tlog show` / `pond tlog verify` are unchanged. Only the computation and
-storage of the two content roots move; everything downstream of `commit_object`
-is identical.
+> **Architecture revision (Section 10).** The authoritative `commit_object`
+> sequence has moved out of the disposable control table into a pond-resident,
+> append-only **LOG node** in the single pond Delta instance. The control table
+> keeps only a rebuildable cache. See Section 10 for the unified two-reserved-node
+> model; the paragraphs above and the "Why the control filesystem is not that
+> place" note in Section 2 are the motivation.
+
+`pond tlog show` / `pond tlog verify` are unchanged in shape. Only the computation
+and storage of the two content roots move, and the authoritative leaf sequence is
+now read from the pond LOG node rather than the control table.
 
 ---
 
@@ -366,7 +377,8 @@ Roughly in dependency order; each phase is independently reviewable.
 4. **Incremental commit fold.** Compute both roots from the changeset plus the
    index node along the touched path; feed `commit_object`; retire the
    post-commit full-rescan fold, keeping the whole-tree fold as rebuilder and
-   oracle.
+   oracle. **Now scoped under the Section 10 unified design** (in-transaction
+   roots enable the in-transaction LOG-node spine).
 5. **`commit_object` reset.** Replace flat `manifest_hash` with the Merkle root;
    update encode/decode; keep `SHA-256(commit_object)` as the leaf; update the
    decisions record below and in the superseded document.
@@ -375,6 +387,9 @@ Roughly in dependency order; each phase is independently reviewable.
    `content_pull_test`, and `testsuite/tests/719-tlog-verify.sh` green;
    presubmit (`cargo fmt --all`, `cargo clippy --workspace --all-features -- -D
    warnings`, `cargo test --workspace`).
+
+See Section 10 for the revised, unified implementation sequence that folds the
+spine relocation, control demotion, and checksum subsumption into these phases.
 
 ---
 
@@ -396,7 +411,101 @@ Roughly in dependency order; each phase is independently reviewable.
   incremental node-keyed Merkle root in place of the flat `manifest_hash`; this
   is a D2 format reset that changes transparency-log leaf values but not the log
   file layout.
+- **New (D9): unified single-pond storage.** The pond is one `data/` Delta
+  instance holding two reserved fixed-`FileID` nodes -- an authoritative
+  append-only **LOG** node (the `commit_object` spine / transparency-log leaves,
+  transferred on pull) and the derived **INDEX** node (manifest + incremental
+  Merkle/child-hash caches, fold-excluded, rebuilt on pull). `{POND}/control` is
+  demoted to a disposable, rebuildable cache plus the single-writer gate;
+  partition checksums are subsumed by the content tree's per-directory
+  `tree_hash`. This supersedes the earlier placement of the authoritative spine
+  in the control table. See Section 10.
 - **Unchanged:** the object model (blob/tree/commit/series/recipe hashing),
   D4 recipe hashes, D6 single delta-managed remote, D7 external large blobs,
   D8 node-id adoption via the manifest, D5 checkpoint-every-commit tiles, and
   the deferred items (signing, writable fork).
+
+---
+
+## 10. Unified single-pond storage (Decision D9)
+
+The pond is **one `data/` Delta Lake instance**. Steward (`{POND}/control`) is
+**not part of the pond**: it provides local concurrency control and gates access,
+is disposable, and is fully reconstructable from the pond. Authority flows one
+way -- `pond -> control` -- so nothing may exist only in control that cannot be
+rebuilt from the pond.
+
+Two reserved fixed-`FileID` nodes carry all commit machinery, distinguished only
+by their transfer semantics:
+
+```
+  THE POND  (single data/ Delta instance)
+  |- filesystem rows                       (partitions = directories)
+  |- _large_files/blake3=*                 external blobs (no Delta schema fits raw bytes)
+  |
+  |- INDEX node   (INDEX_NODE_UUID)              DERIVED, fold-excluded, REBUILT on pull
+  |     - node manifest: node_id -> parent,name,type,child_hash
+  |     - incremental caches: child-hash map + NodeMerkle nodes
+  |     - per-directory tree_hash == that partition's content checksum
+  |
+  +- LOG node     (new reserved FileID)          AUTHORITATIVE, fold-excluded, TRANSFERRED
+        - append-only: one version per commit = commit_object
+          (embeds root_tree_hash + parent + provenance)
+        - IS the transparency-log leaf sequence, pond-resident
+
+  NOT THE POND
+  |- control/    disposable: single-writer gate + cache of the tip
+  |                reconstruct := read LOG tail + fold current state
+  +- {POND}/tlog  derived SHA-256 tile export of the LOG node
+```
+
+|  | authoritative? | transferred on pull? | recovered by |
+|---|---|---|---|
+| INDEX node | derived | no (rebuilt) | re-fold the rows |
+| LOG node | authoritative | yes | it *is* the history |
+
+Both are fold-excluded because their contents are derived from (INDEX) or
+reference (LOG, via `root_tree_hash`) the very root they would otherwise be
+hashed into -- self-reference, the same reason the index node was excluded in
+Phase 2. They are kept as two `FileID`s rather than one because INDEX is `O(n)`
+and rebuildable (do not ship it -- bandwidth) while LOG is small and
+authoritative (ship it).
+
+### Consequences
+
+- **Atomic commit.** LOG version + INDEX version + data rows land in one Delta
+  transaction, eliminating today's non-atomic "data commit, then control record"
+  window.
+- **Control demoted.** `DataCommittedMetadata` (roots, spine) is no longer
+  authoritative; the control table keeps only a rebuildable tip cache.
+- **Checksums subsumed.** A partition is a directory; its `tree_hash` in the
+  INDEX node is its content checksum. Replication compares content-tree hashes;
+  the Tier-0 `row_leaf_digest` partition checksums are retired onto content-tree
+  hashes (consistent with "the fsck Merkle is a vestige").
+- **`_large_files` stays external** (raw blobs fit no Delta schema); the remote
+  backup chunks them into a Delta table, but the local pond references them by
+  hash.
+
+### Revised implementation sequence
+
+Refines Section 8 steps 4-6 without changing their spirit; each step is
+independently reviewable and keeps the whole suite green.
+
+1. **Spine relocation + atomic commit.** Compute `root_tree_hash` and the
+   manifest hash **in-transaction** (reuse the Phase 2 in-txn fold), build
+   `commit_object`, and append it to the new reserved **LOG** node in the same
+   Delta transaction. Demote control's `DataCommitted` to a rebuildable cache
+   and read the authoritative leaf sequence (`pond tlog *`, materialization)
+   from the LOG node. Still `O(n)` fold; correctness/architecture only.
+2. **Incremental INDEX (Section 8 step 4).** Make the in-transaction fold and
+   the Merkle root incremental along the touched path; persist the INDEX
+   incremental caches. `O(n) -> O(change)`. Keep `fold_rows` as the oracle.
+3. **`commit_object` Merkle swap (Section 8 step 5).** Replace the flat
+   `manifest_hash` with the NodeMerkle root in `commit_object`.
+4. **Checksum subsumption.** Replace the `row_leaf_digest` partition checksums
+   with per-directory `tree_hash` comparison in replication/fsck; drop the
+   redundant checksum path.
+5. **Validation (Section 8 step 6).** Incremental-vs-rebuild equivalence for
+   both roots; a "discard control, rebuild from pond" test; keep
+   `tlog_materialize_test`, `content_pull_test`, and
+   `testsuite/tests/719-tlog-verify.sh` green; full presubmit.

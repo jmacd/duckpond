@@ -927,7 +927,7 @@ fn hash_directory(
         // root's tree_hash and the manifest independent of the index node's
         // presence, exactly like a cross-pond mount (design
         // `docs/incremental-content-tree-design.md` Section 3).
-        if child_key.1 == tinyfs::INDEX_NODE_UUID {
+        if child_key.1 == tinyfs::INDEX_NODE_UUID || child_key.1 == tinyfs::LOG_NODE_UUID {
             continue;
         }
         let child_hash = hash_child(

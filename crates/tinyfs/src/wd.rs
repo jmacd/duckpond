@@ -87,7 +87,7 @@ impl WD {
             let entry = result?;
             // The reserved node-manifest index node is internal infrastructure
             // and never appears in directory listings or traversal.
-            if entry.child_node_id.is_index() {
+            if entry.child_node_id.is_index() || entry.child_node_id.is_log() {
                 continue;
             }
             entries.push(entry);
@@ -108,7 +108,7 @@ impl WD {
         let stream = self.dref.handle.entries().await?;
         Ok(Box::pin(stream.filter(|result| {
             let keep = match result {
-                Ok(entry) => !entry.child_node_id.is_index(),
+                Ok(entry) => !entry.child_node_id.is_index() && !entry.child_node_id.is_log(),
                 Err(_) => true,
             };
             async move { keep }
