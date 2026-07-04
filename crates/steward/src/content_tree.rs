@@ -45,57 +45,23 @@ use sync_store::content::{
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
 
-use crate::control_table::{CommitSpine, ControlTable};
+use crate::control_table::CommitSpine;
 use crate::{Ship, StewardError};
 
-/// Compute the content-graph commit spine for a just-landed write or
-/// compaction.
-///
-/// Folds the post-commit live tree into a `root_tree_hash`, looks up the
-/// previous commit on this pond's chain (the `DataCommitted` record at
-/// `txn_seq - 1`), builds the [`Commit`] object, and returns its hex spine.
-/// The parent is `None` at genesis or wherever an earlier seq did not stamp a
-/// spine; such gaps break the chain for that link but leave each commit's own
-/// hash well-defined.
-///
-/// Shared by the guard's write commit and [`crate::Ship::compact`] so both
-/// paths stamp an identical spine and every committed data write is reachable
-/// via a content-graph commit for push.
-pub(crate) async fn compute_commit_spine(
-    table: deltalake::DeltaTable,
-    control_table: &ControlTable,
-    pond_id: uuid::Uuid,
-    txn_seq: i64,
-    request: String,
-) -> Result<Option<CommitSpine>, StewardError> {
-    let pond_id_str = pond_id.to_string();
-    let (root_tree_hash, node_manifest_hash) =
-        compute_commit_roots_for_table(table, &pond_id_str).await?;
-    assemble_commit_spine(
-        control_table,
-        &pond_id_str,
-        txn_seq,
-        request,
-        root_tree_hash,
-        node_manifest_hash,
-    )
-    .await
-}
-
-/// The two content roots plus the partition checksums for a just-landed commit,
-/// all derived from a single scan of the data table (design "Incremental
-/// Content Tree", Tier 0).  Replaces the pre-Tier-0 pair of independent full
-/// scans (one for the fold, one for the checksums).
+/// The content root plus the partition checksums for a just-landed commit,
+/// derived from a single scan of the data table (design "Incremental Content
+/// Tree", Tier 0).  Under Decision D9 the authoritative spine is stamped
+/// in-transaction into the commit-log node, so this post-commit snapshot serves
+/// the partition checksums plus a `root_tree_hash` validation oracle for step
+/// 4a (step 4b retires this second scan).
 pub(crate) struct CommitSnapshot {
     pub root_tree_hash: ObjectHash,
-    pub node_manifest_hash: ObjectHash,
     pub partition_checksums: sync_steward::PartitionChecksums,
 }
 
-/// Scan a pond's live rows once and derive both content roots and the partition
-/// checksums from the same rows, so the per-commit path reads the data table a
-/// single time instead of twice.  `pond_id` is the local pond whose rows feed
-/// the checksums and whose root the fold starts from.
+/// Scan a pond's live rows once and derive both the content root and the
+/// partition checksums from the same rows.  `pond_id` is the local pond whose
+/// rows feed the checksums and whose root the fold starts from.
 ///
 /// # Errors
 ///
@@ -111,101 +77,37 @@ pub(crate) async fn compute_commit_snapshot(
         crate::remote_adapter::partition_checksums_from_rows(&rows, &pond_id_str)
             .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
     let index = fold_rows(rows, &pond_id_str, None)?;
-    let manifest = node_manifest_entries(&index);
-    let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
     Ok(CommitSnapshot {
         root_tree_hash: index.root_tree_hash,
-        node_manifest_hash,
         partition_checksums,
     })
 }
 
-/// Assemble a [`CommitSpine`] from precomputed content roots: look up the
-/// previous commit on this pond's chain, build the [`Commit`] object, and
-/// return its hex spine.  Split from [`compute_commit_spine`] so the per-commit
-/// path can reuse the single-scan roots from [`compute_commit_snapshot`]
-/// instead of re-folding the tree.
-pub(crate) async fn assemble_commit_spine(
-    control_table: &ControlTable,
-    pond_id_str: &str,
-    txn_seq: i64,
-    request: String,
-    root_tree_hash: ObjectHash,
-    node_manifest_hash: ObjectHash,
-) -> Result<Option<CommitSpine>, StewardError> {
-    let parent_commit_hash = parse_optional_parent_commit(
-        control_table.commit_hash_at(txn_seq - 1).await?,
-        txn_seq - 1,
-        pond_id_str,
-    )?;
-
-    let provenance = Provenance {
-        pond_id: pond_id_str.to_string(),
-        seq: txn_seq,
-        time_micros: chrono::Utc::now().timestamp_micros(),
-        author: String::new(),
-        request,
-    };
-    let commit = Commit::new(
-        root_tree_hash,
-        parent_commit_hash,
-        node_manifest_hash,
-        provenance,
-    );
-
-    Ok(Some(CommitSpine {
-        root_tree_hash: root_tree_hash.to_hex(),
-        parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
-        commit_hash: commit.hash().to_hex(),
-        commit_object: hex::encode(commit.encode()),
-    }))
-}
-
-/// Parse the parent commit's stored hex hash for a new commit's spine.
-///
-/// `None` (no record at `parent_seq`) is the legitimate chain-gap / genesis
-/// case and stays `None`.  A present-but-malformed hex is corruption, not a
-/// gap: it is a hard error rather than being silently collapsed to genesis,
-/// which would recompute this commit's hash as if it had no parent and break
-/// the chain invisibly.
-fn parse_optional_parent_commit(
-    stored: Option<String>,
-    parent_seq: i64,
-    pond_id_str: &str,
-) -> Result<Option<ObjectHash>, StewardError> {
-    match stored {
-        None => Ok(None),
-        Some(hex) => ObjectHash::from_hex(&hex).map(Some).map_err(|e| {
-            StewardError::Content(format!(
-                "corrupt parent commit hash at seq {parent_seq} for pond {pond_id_str}: {e} \
-                 (value {hex:?})"
-            ))
-        }),
-    }
-}
-
 /// Reconcile a pond's transparency-log tiles with its committed leaf sequence
-/// and re-emit the checkpoint (design Decision D5).
+/// and re-emit the checkpoint (design Decision D5/D9).
 ///
-/// The authoritative leaf sequence is the ordered `commit_object` bytes of the
-/// spine-bearing `DataCommitted` records; the tile log is a derived,
-/// re-materializable export.  The writer drives its next leaf position from the
-/// committed leaf count, replaying every leaf the export is missing in commit
-/// order, so a dropped append self-heals on the next commit.
+/// The authoritative leaf sequence is the pond-resident commit-log node's
+/// ordered `commit_object` bytes; the tile log is a derived, re-materializable
+/// export.  The writer drives its next leaf position from the committed leaf
+/// count, replaying every leaf the export is missing in commit order, so a
+/// dropped append self-heals on the next commit.
 ///
 /// Failures are logged and swallowed: the transparency log is a derived
 /// publishing artifact and must not unwind an already-committed transaction.
 /// Shared by the guard's write commit and [`crate::Ship::compact`].
 pub(crate) async fn materialize_tlog(
     pond_path: &std::path::Path,
-    control_table: &ControlTable,
+    table: deltalake::DeltaTable,
     pond_id: uuid::Uuid,
 ) {
     let dir = crate::get_tlog_path(pond_path);
     let origin = format!("duckpond/{pond_id}");
     let log = sync_store::TileLog::new(dir, origin);
 
-    let leaves = match control_table.commit_objects_in_order().await {
+    // Decision D9: the authoritative leaf sequence is the pond-resident commit
+    // log node, not the disposable control table.  Each log-node version holds
+    // one encoded commit object; the tile export is reconciled against them.
+    let leaves = match read_log_leaves(table, &pond_id.to_string()).await {
         Ok(l) => l,
         Err(e) => {
             log::error!("failed to read transparency-log leaf sequence: {e}");
@@ -225,16 +127,7 @@ pub(crate) async fn materialize_tlog(
         return;
     }
 
-    let mut missing = Vec::with_capacity(leaves.len() - exported);
-    for hex in &leaves[exported..] {
-        match hex::decode(hex) {
-            Ok(bytes) => missing.push(bytes),
-            Err(e) => {
-                log::error!("transparency-log leaf is not valid hex: {e}");
-                return;
-            }
-        }
-    }
+    let missing: Vec<Vec<u8>> = leaves[exported..].to_vec();
 
     match log.append_leaf_data(missing) {
         Ok(checkpoint) => log::debug!(
@@ -494,8 +387,8 @@ pub(crate) async fn compute_commit_roots_for_table(
 }
 
 /// Build the full node-manifest bytes for the current in-transaction live state
-/// and persist them into the reserved index node (design
-/// `docs/incremental-content-tree-design.md` Section 4, Approach A / Phase 2).
+/// (design `docs/incremental-content-tree-design.md` Section 4, Approach A /
+/// Phase 2).
 ///
 /// `committed_table` is the pre-commit Delta table (its rows are read with the
 /// same narrow projection as every read-side fold); `uncommitted` are this
@@ -510,11 +403,28 @@ pub(crate) async fn compute_commit_roots_for_table(
 ///
 /// Returns an error if the committed table cannot be scanned, the merged rows
 /// cannot be folded, or the manifest cannot be encoded (a duplicate `node_id`).
-pub(crate) async fn in_txn_manifest_bytes(
+///
+/// The reserved-node write's inputs, all folded from the same in-transaction
+/// live snapshot in a single scan: the encoded node manifest (index-node
+/// content) plus the two content roots (`root_tree_hash`, `node_manifest_hash`)
+/// that the commit object needs.
+///
+/// Folding once here lets the guard write the index node and the authoritative
+/// commit-log leaf atomically in the same transaction without re-scanning the
+/// data table (design `docs/incremental-content-tree-design.md` Section 10,
+/// step 4a).  The two reserved nodes are excluded from the fold, so writing
+/// them never perturbs these roots.
+pub(crate) struct SpineInputs {
+    pub manifest_bytes: Vec<u8>,
+    pub root_tree_hash: ObjectHash,
+    pub node_manifest_hash: ObjectHash,
+}
+
+pub(crate) async fn in_txn_spine_inputs(
     committed_table: deltalake::DeltaTable,
     uncommitted: Vec<OplogEntry>,
     local_pond_id: &str,
-) -> Result<Vec<u8>, StewardError> {
+) -> Result<SpineInputs, StewardError> {
     let mut rows = scan_live_rows(committed_table, false).await?;
     rows.extend(uncommitted);
     // fold_rows takes the latest version per node from ascending-version order;
@@ -528,7 +438,116 @@ pub(crate) async fn in_txn_manifest_bytes(
     });
     let index = fold_rows(rows, local_pond_id, None)?;
     let manifest = node_manifest_entries(&index);
-    encode_manifest(&manifest).map_err(StewardError::Content)
+    let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    let manifest_bytes = encode_manifest(&manifest).map_err(StewardError::Content)?;
+    Ok(SpineInputs {
+        manifest_bytes,
+        root_tree_hash: index.root_tree_hash,
+        node_manifest_hash,
+    })
+}
+
+/// Read the reserved commit-log node's leaves from `table` in commit order:
+/// each element is the raw encoded `commit_object` bytes of one leaf, ordered
+/// by ascending series version (design Decision D9).  Returns an empty vector
+/// when the log node does not exist yet (genesis, before the first
+/// content-changing commit).
+///
+/// The log node is a raw byte series; each version stores exactly one leaf, so
+/// leaves are read at version granularity rather than through the merged series
+/// read (which would concatenate every leaf).
+pub(crate) async fn read_log_leaves(
+    table: deltalake::DeltaTable,
+    pond_id: &str,
+) -> Result<Vec<Vec<u8>>, StewardError> {
+    let ctx = SessionContext::new();
+    let _previous = ctx
+        .register_table("log_live", Arc::new(table))
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let sql = format!(
+        "SELECT version, content FROM log_live \
+         WHERE pond_id = '{pond_id}' AND node_id = '{log}' ORDER BY version",
+        log = tinyfs::LOG_NODE_UUID,
+    );
+    let batches = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?
+        .collect()
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let mut leaves: Vec<Vec<u8>> = Vec::new();
+    for batch in &batches {
+        let parsed: Vec<LogLeaf> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+        for row in parsed {
+            let bytes = row.content.ok_or_else(|| {
+                StewardError::Content(format!(
+                    "commit-log leaf at version {} has no content",
+                    row.version
+                ))
+            })?;
+            leaves.push(bytes);
+        }
+    }
+    Ok(leaves)
+}
+
+/// One commit-log leaf row: its series version plus the inline commit-object
+/// bytes.  Matches the `version, content` projection in [`read_log_leaves`].
+#[derive(serde::Deserialize)]
+struct LogLeaf {
+    version: i64,
+    content: Option<Vec<u8>>,
+}
+
+/// The current tip of the commit-log node -- the hash of its last leaf's commit
+/// object -- to use as the `parent_commit_hash` of the next commit.  `None`
+/// when the log node is empty (genesis).
+pub(crate) async fn log_tip_commit_hash(
+    table: deltalake::DeltaTable,
+    pond_id: &str,
+) -> Result<Option<ObjectHash>, StewardError> {
+    let leaves = read_log_leaves(table, pond_id).await?;
+    let Some(last) = leaves.last() else {
+        return Ok(None);
+    };
+    let commit = Commit::decode(last)
+        .map_err(|e| StewardError::Content(format!("decode commit-log tip: {e}")))?;
+    Ok(Some(commit.hash()))
+}
+
+/// Build a commit spine from precomputed roots and an explicit parent, without
+/// consulting the control table.  Used by the guard to stamp the
+/// pond-resident, authoritative commit-log leaf in-transaction (Decision D9);
+/// the parent comes from the log node's tip, not the control-table cache.
+pub(crate) fn build_commit_spine(
+    parent_commit_hash: Option<ObjectHash>,
+    root_tree_hash: ObjectHash,
+    node_manifest_hash: ObjectHash,
+    pond_id_str: &str,
+    txn_seq: i64,
+    request: String,
+) -> CommitSpine {
+    let provenance = Provenance {
+        pond_id: pond_id_str.to_string(),
+        seq: txn_seq,
+        time_micros: chrono::Utc::now().timestamp_micros(),
+        author: String::new(),
+        request,
+    };
+    let commit = Commit::new(
+        root_tree_hash,
+        parent_commit_hash,
+        node_manifest_hash,
+        provenance,
+    );
+    CommitSpine {
+        root_tree_hash: root_tree_hash.to_hex(),
+        parent_commit_hash: parent_commit_hash.map(|h| h.to_hex()),
+        commit_hash: commit.hash().to_hex(),
+        commit_object: hex::encode(commit.encode()),
+    }
 }
 
 /// Build a target pond's current node state for an incremental rebuild: a map
@@ -1066,38 +1085,6 @@ fn leaf_facts<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_optional_parent_commit_none_is_genesis() {
-        // No record at the parent seq is a legitimate chain gap, not an error.
-        let got = parse_optional_parent_commit(None, 0, "pond-x").expect("None is ok");
-        assert!(got.is_none());
-    }
-
-    #[test]
-    fn parse_optional_parent_commit_valid_hex_round_trips() {
-        let want = ObjectHash::from_bytes([7u8; 32]);
-        let got = parse_optional_parent_commit(Some(want.to_hex()), 3, "pond-x")
-            .expect("valid hex parses")
-            .expect("Some");
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    fn parse_optional_parent_commit_malformed_hex_is_hard_error() {
-        // A present-but-corrupt hash must NOT silently collapse to genesis.
-        for bad in ["not-hex", "", "abc", &"zz".repeat(32)] {
-            let err = parse_optional_parent_commit(Some(bad.to_string()), 5, "pond-x")
-                .expect_err("corrupt hex must error");
-            match err {
-                StewardError::Content(msg) => {
-                    assert!(msg.contains("corrupt parent commit hash"), "msg: {msg}");
-                    assert!(msg.contains("seq 5"), "msg: {msg}");
-                }
-                other => panic!("expected Content error, got {other:?}"),
-            }
-        }
-    }
 
     // Build an in-memory `content_live` table from OplogEntry rows so the narrow
     // scan can be exercised without a Delta table.

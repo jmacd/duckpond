@@ -144,7 +144,7 @@ impl Ship {
                 root_version,
                 0, // Duration unknown/not tracked
                 root_checksums,
-                None, // genesis spine not stamped on this path (see guard::compute_commit_spine)
+                None, // genesis: the first content-changing commit writes the first commit-log leaf (Decision D9)
             )
             .await?;
 
@@ -1040,28 +1040,28 @@ impl Ship {
         // process validates against the right sequence.
         self.data_persistence
             .sync_last_txn_seq(&pond_id.to_string(), txn_seq);
-        // Content-graph spine: compaction is an honestly recorded rewrite
-        // commit.  Its logical content is unchanged (the invariant above
-        // asserts this), so `root_tree_hash` equals the previous commit's, but
-        // it still gets its own commit object chained to the parent so that
-        // `pond push` can reach this seq via the content graph.  Without a
-        // spine, a post-compaction push fails with "no commit spine recorded".
-        let commit_spine = crate::content_tree::compute_commit_spine(
-            self.data_persistence.table().clone(),
-            &self.control_table,
-            pond_id,
-            txn_seq,
-            txn_meta.user.args.join(" "),
-        )
-        .await?;
+        // Content-graph spine (Decision D9): compaction is content-preserving
+        // (the invariant above asserts `root_tree_hash` is unchanged), so it is
+        // transparent to the content graph and appends NO commit-log leaf --
+        // like `git gc`/repack adding no commits.  Push/pull resolve the tip
+        // from the last content-changing commit, whose root already matches, so
+        // a compaction seq needs no spine of its own.
+        let commit_spine = None;
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
         self.control_table
             .record_compact_committed(&txn_meta, new_version, duration_ms, post, commit_spine)
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
 
-        // Extend the transparency log with the compaction's commit leaf.
-        crate::content_tree::materialize_tlog(&self.pond_path, &self.control_table, pond_id).await;
+        // Reconcile the transparency log against the pond-resident commit-log
+        // node.  Compaction added no leaf, so this is a no-op unless a prior
+        // commit's tile export was left lagging.
+        crate::content_tree::materialize_tlog(
+            &self.pond_path,
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await;
 
         info!(
             "Compaction committed (seq={}, version={}, +{}/-{} files)",
@@ -2076,6 +2076,14 @@ mod tests {
                     "Index node ({}) should have v1 when first created",
                     node_id
                 );
+            } else if node_id == tinyfs::LOG_NODE_UUID {
+                // The reserved commit-log node is created on this first
+                // content-changing write, so it carries v1 (Decision D9).
+                assert_eq!(
+                    versions[0], 1,
+                    "Log node ({}) should have v1 when first created",
+                    node_id
+                );
             } else {
                 assert_eq!(
                     versions[0], 1,
@@ -2087,11 +2095,12 @@ mod tests {
 
         // Verify we created the expected number of directories
         // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes, plus
-        // the reserved node-manifest index node created on this first write = 7.
+        // the reserved node-manifest index node and the reserved commit-log
+        // node, both created on this first write = 8.
         assert_eq!(
             node_versions.len(),
-            7,
-            "Should have 7 nodes in txn_seq=2 (root + 5 new dirs + index node), got: {:?}",
+            8,
+            "Should have 8 nodes in txn_seq=2 (root + 5 new dirs + index node + log node), got: {:?}",
             node_versions.keys().collect::<Vec<_>>()
         );
 

@@ -1336,16 +1336,21 @@ impl State {
     ) -> Result<Vec<FileID>, TLogFSError> {
         let inner = self.inner.lock().await;
         let series = EntryType::FilePhysicalSeries.as_str();
+        // The reserved commit-log node is a series whose every version is a
+        // permanent transparency-log leaf (Decision D9); it must never be
+        // collapsed, so it is excluded from candidacy here.
+        let log_node = tinyfs::LOG_NODE_UUID;
         let sql = format!(
             "SELECT t.pond_id AS pond_id, t.part_id AS part_id, t.node_id AS node_id \
              FROM delta_table t \
              JOIN ( \
                  SELECT part_id, node_id, MAX(COALESCE(collapsed_through, -1)) AS k \
                  FROM delta_table \
-                 WHERE file_type = '{series}' \
+                 WHERE file_type = '{series}' AND node_id != '{log_node}' \
                  GROUP BY part_id, node_id \
              ) m ON t.part_id = m.part_id AND t.node_id = m.node_id \
              WHERE t.file_type = '{series}' AND t.size > 0 AND t.version > m.k \
+               AND t.node_id != '{log_node}' \
              GROUP BY t.pond_id, t.part_id, t.node_id \
              HAVING COUNT(*) > {threshold}"
         );

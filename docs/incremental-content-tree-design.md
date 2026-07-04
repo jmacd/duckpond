@@ -20,7 +20,7 @@ Phases track the plan in Section 8; each is independently reviewable.
 | 2 | Reserved delta-versioned index node (persisted node manifest) | **Done** |
 | 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | **Done** |
 | D9 | Unified single-pond storage: authoritative LOG + derived INDEX; control demoted (Section 10) | Design accepted |
-| 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | Not started |
+| 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | **Done** |
 | 4b | Incremental commit fold (both roots from changeset + INDEX along touched path) | Not started |
 | 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
 | 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | Not started |
@@ -491,12 +491,30 @@ authoritative (ship it).
 Refines Section 8 steps 4-6 without changing their spirit; each step is
 independently reviewable and keeps the whole suite green.
 
-1. **Spine relocation + atomic commit.** Compute `root_tree_hash` and the
-   manifest hash **in-transaction** (reuse the Phase 2 in-txn fold), build
-   `commit_object`, and append it to the new reserved **LOG** node in the same
-   Delta transaction. Demote control's `DataCommitted` to a rebuildable cache
-   and read the authoritative leaf sequence (`pond tlog *`, materialization)
-   from the LOG node. Still `O(n)` fold; correctness/architecture only.
+1. **Spine relocation + atomic commit.** *(Done.)* Compute `root_tree_hash`
+   and the manifest hash **in-transaction** (reuse the Phase 2 in-txn fold),
+   build `commit_object`, and append it to the new reserved **LOG** node in the
+   same Delta transaction. Demote control's `DataCommitted` to a rebuildable
+   cache and read the authoritative leaf sequence (`pond tlog *`,
+   materialization) from the LOG node. Still `O(n)` fold; correctness/
+   architecture only.
+   - The LOG node (`tinyfs::LOG_NODE_UUID`, name `.pond-commit-log`) is a
+     non-collapsing `FilePhysicalSeries`; each version holds one encoded
+     `commit_object` and is a permanent transparency-log leaf. It is excluded
+     from the fold, hidden from enumeration, and excluded from collapse
+     candidacy (`list_collapsible_series`) so leaves are never compacted.
+   - The parent of each commit is the LOG node's current tip
+     (`log_tip_commit_hash`), read from the committed table before the new leaf
+     is appended -- not the control table.
+   - **Compaction appends no LOG leaf.** Compaction is content-preserving
+     (`root_tree_hash` equals the parent's), so it is transparent to the
+     content graph, exactly like `git gc`/repack adds no commits. Push/pull
+     resolve the tip from the last content-changing commit, whose root already
+     matches. This dissolves the atomicity question for the `optimize`-based
+     compaction path (which cannot inject a data row into its own Delta commit).
+   - The post-commit fold is kept as a validation oracle for this step (the
+     in-transaction `root_tree_hash` must equal the post-commit fold); step 4b
+     retires that second scan.
 2. **Incremental INDEX (Section 8 step 4).** Make the in-transaction fold and
    the Merkle root incremental along the touched path; persist the INDEX
    incremental caches. `O(n) -> O(change)`. Keep `fold_rows` as the oracle.
