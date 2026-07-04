@@ -345,44 +345,36 @@ impl<'a> StewardTransactionGuard<'a> {
                 // through a fresh DataFusion SessionContext, so it does
                 // not require an active transaction on `persistence`.
                 //
-                // A single scan of the post-commit Delta state yields both the
-                // partition checksums and the content-graph spine's two roots
-                // (design "Incremental Content Tree", Tier 0), so the per-commit
-                // path reads the data table once instead of twice.
+                // The post-commit path still needs the local pond's partition
+                // checksums for the control-table `DataCommitted` record.  Under
+                // Decision D9 the authoritative content roots are stamped
+                // in-transaction into the commit-log node (by
+                // `write_reserved_nodes`), so this scan no longer folds the
+                // content tree -- step 4b retired that second O(n) fold, leaving
+                // the incremental in-transaction fold as the sole content-root
+                // computation.  Reading the post-commit Delta state goes through
+                // a fresh DataFusion SessionContext, so it does not require an
+                // active transaction on `persistence`.  (Checksum subsumption by
+                // the per-directory tree hashes is a later step, 5b.)
                 let pond_id = self.control_table.pond_id_uuid();
                 let post_commit_table = persistence.table().clone();
-                let snapshot = crate::content_tree::compute_commit_snapshot(
+                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
                     post_commit_table,
                     pond_id,
                 )
                 .await
                 .map_err(|e| {
                     StewardError::ControlTable(format!(
-                        "Failed to snapshot content roots and partition checksums after commit: {}",
+                        "Failed to snapshot partition checksums after commit: {}",
                         e
                     ))
                 })?;
-                let partition_checksums = snapshot.partition_checksums;
 
                 // Content-graph spine (Decision D9): the authoritative spine was
                 // already stamped into the pond-resident commit-log node, in the
                 // same Delta transaction as the data, by `write_reserved_nodes`.
                 // The control-table copy recorded below is a disposable,
                 // rebuildable cache -- not the source of truth.
-                //
-                // The post-commit fold above still runs as a validation oracle
-                // for step 4a: the in-transaction roots must equal the
-                // post-commit roots, or the fold is inconsistent.  Step 4b makes
-                // the index incremental and retires this second scan.
-                if let Some(spine) = &in_txn_spine
-                    && spine.root_tree_hash != snapshot.root_tree_hash.to_hex()
-                {
-                    return Err(StewardError::Content(format!(
-                        "in-transaction root_tree_hash {} disagrees with post-commit fold {}",
-                        spine.root_tree_hash,
-                        snapshot.root_tree_hash.to_hex(),
-                    )));
-                }
                 let commit_spine = in_txn_spine;
 
                 // The leaf appended to the transparency log is the commit
@@ -536,14 +528,52 @@ impl<'a> StewardTransactionGuard<'a> {
         let pond_id_str = pond_id.to_string();
         let uncommitted = data_tx.state()?.uncommitted_live_rows().await?;
         let committed_table = data_tx.persistence().table().clone();
-        let inputs = crate::content_tree::in_txn_spine_inputs(
+
+        let root = data_tx.root().await?;
+
+        // The prior committed manifest is the incremental fold's baseline; it is
+        // absent only at genesis, before the first content-changing commit wrote
+        // the index node.  Reading it through the working directory transparently
+        // reassembles an externalized (large) manifest.
+        let prior_manifest_bytes = if root.exists(INDEX_NODE_NAME).await {
+            Some(root.read_file_path_to_vec(INDEX_NODE_NAME).await?)
+        } else {
+            None
+        };
+
+        let inputs = crate::content_tree::incremental_spine_inputs(
             committed_table.clone(),
-            uncommitted,
+            prior_manifest_bytes,
+            uncommitted.clone(),
             &pond_id_str,
         )
         .await?;
 
-        let root = data_tx.root().await?;
+        // Design step 4b oracle: the incremental roots must match a full fold of
+        // the same live state.  Kept only in debug builds, so tests and local
+        // development validate every commit while release builds pay just the
+        // O(change) incremental fold.
+        #[cfg(debug_assertions)]
+        {
+            let oracle = crate::content_tree::in_txn_spine_inputs(
+                committed_table.clone(),
+                uncommitted,
+                &pond_id_str,
+            )
+            .await?;
+            assert_eq!(
+                inputs.root_tree_hash, oracle.root_tree_hash,
+                "incremental root_tree_hash diverged from full fold"
+            );
+            assert_eq!(
+                inputs.node_manifest_hash, oracle.node_manifest_hash,
+                "incremental node_manifest_hash diverged from full fold"
+            );
+            assert_eq!(
+                inputs.manifest_bytes, oracle.manifest_bytes,
+                "incremental manifest bytes diverged from full fold"
+            );
+        }
 
         // Index node: one full manifest per version, collapsing so it stays at a
         // single live version (Phase 2).

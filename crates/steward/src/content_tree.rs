@@ -33,55 +33,20 @@
 //! Dynamic nodes hash their stored definition (factory type plus config), not
 //! their computed output, and their generated children are not folded in.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::execution::context::SessionContext;
 
 use sync_store::content::{
-    Commit, ManifestEntry, ObjectHash, Provenance, TreeEntry, encode_manifest, encode_recipe,
-    encode_series, encode_tree, manifest_hash, recipe_hash, series_hash,
+    Commit, ManifestEntry, ObjectHash, Provenance, TreeEntry, decode_manifest, encode_manifest,
+    encode_recipe, encode_series, encode_tree, manifest_hash, recipe_hash, series_hash,
 };
 use tinyfs::{EntryType, ROOT_UUID};
 use tlogfs::schema::{OplogEntry, decode_directory_entries};
 
 use crate::control_table::CommitSpine;
 use crate::{Ship, StewardError};
-
-/// The content root plus the partition checksums for a just-landed commit,
-/// derived from a single scan of the data table (design "Incremental Content
-/// Tree", Tier 0).  Under Decision D9 the authoritative spine is stamped
-/// in-transaction into the commit-log node, so this post-commit snapshot serves
-/// the partition checksums plus a `root_tree_hash` validation oracle for step
-/// 4a (step 4b retires this second scan).
-pub(crate) struct CommitSnapshot {
-    pub root_tree_hash: ObjectHash,
-    pub partition_checksums: sync_steward::PartitionChecksums,
-}
-
-/// Scan a pond's live rows once and derive both the content root and the
-/// partition checksums from the same rows.  `pond_id` is the local pond whose
-/// rows feed the checksums and whose root the fold starts from.
-///
-/// # Errors
-///
-/// Returns an error if the data table cannot be scanned or folded, or if a row
-/// cannot be hashed into its checksum leaf.
-pub(crate) async fn compute_commit_snapshot(
-    table: deltalake::DeltaTable,
-    pond_id: uuid::Uuid,
-) -> Result<CommitSnapshot, StewardError> {
-    let pond_id_str = pond_id.to_string();
-    let rows = scan_live_rows(table, false).await?;
-    let partition_checksums =
-        crate::remote_adapter::partition_checksums_from_rows(&rows, &pond_id_str)
-            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
-    let index = fold_rows(rows, &pond_id_str, None)?;
-    Ok(CommitSnapshot {
-        root_tree_hash: index.root_tree_hash,
-        partition_checksums,
-    })
-}
 
 /// Reconcile a pond's transparency-log tiles with its committed leaf sequence
 /// and re-emit the checkpoint (design Decision D5/D9).
@@ -445,6 +410,370 @@ pub(crate) async fn in_txn_spine_inputs(
         root_tree_hash: index.root_tree_hash,
         node_manifest_hash,
     })
+}
+
+/// One node's live child listing, as recomputed incrementally.  A directory's
+/// `tree_hash` is `encode_tree` over `(name, entry_type, child_hash)` for its
+/// content children, so those three fields are all the incremental fold needs.
+#[derive(Clone)]
+struct ChildLite {
+    node_id: String,
+    name: String,
+    entry_type: EntryType,
+}
+
+/// Compute the two commit roots incrementally along the touched path only,
+/// using the pond's previously committed node manifest as the child-hash
+/// baseline (design `docs/incremental-content-tree-design.md` Section 10,
+/// step 4b).
+///
+/// The prior manifest records every node's `child_hash`, parent, name, and
+/// type, so it fully describes the committed tree.  This transaction's
+/// changeset (`uncommitted`) replaces the listings of modified directories and
+/// the content hashes of touched leaves; every directory on the root-to-change
+/// path then has its `tree_hash` recomputed bottom-up, while untouched subtrees
+/// keep their cached `child_hash`.  The result is byte-identical to a full
+/// [`fold_rows`] of the post-commit live state, which a debug assertion in the
+/// guard verifies against this on every commit.
+///
+/// `prior_manifest_bytes` is `None` only at genesis (no index node yet), when
+/// there is no baseline to build on and the full fold in [`in_txn_spine_inputs`]
+/// runs instead.
+///
+/// # Errors
+///
+/// Returns an error if the prior manifest cannot be decoded, a touched series'
+/// committed versions cannot be read, a referenced child has no known hash, or
+/// a tree/manifest cannot be encoded.
+pub(crate) async fn incremental_spine_inputs(
+    committed_table: deltalake::DeltaTable,
+    prior_manifest_bytes: Option<Vec<u8>>,
+    uncommitted: Vec<OplogEntry>,
+    local_pond_id: &str,
+) -> Result<SpineInputs, StewardError> {
+    let Some(prior_bytes) = prior_manifest_bytes else {
+        // Genesis: no committed manifest exists to build on, so fold the whole
+        // (small) initial tree once.
+        return in_txn_spine_inputs(committed_table, uncommitted, local_pond_id).await;
+    };
+    let prior = decode_manifest(&prior_bytes).map_err(StewardError::Content)?;
+
+    // Baseline drawn from the prior manifest: every node's current child_hash,
+    // type, parent, and each directory's content-child listing.
+    let mut child_hash: HashMap<String, ObjectHash> = HashMap::new();
+    let mut etype_of: HashMap<String, EntryType> = HashMap::new();
+    let mut parent_of: HashMap<String, String> = HashMap::new();
+    let mut dir_children: HashMap<String, Vec<ChildLite>> = HashMap::new();
+    for e in &prior {
+        let _ = child_hash.insert(e.node_id.clone(), e.child_hash);
+        let _ = etype_of.insert(e.node_id.clone(), e.entry_type);
+        if e.node_id == ROOT_UUID {
+            continue;
+        }
+        let _ = parent_of.insert(e.node_id.clone(), e.parent_node_id.clone());
+        dir_children
+            .entry(e.parent_node_id.clone())
+            .or_default()
+            .push(ChildLite {
+                node_id: e.node_id.clone(),
+                name: e.name.clone(),
+                entry_type: e.entry_type,
+            });
+    }
+
+    // Split this transaction's changeset into the latest directory snapshot,
+    // the latest leaf row, and the accumulated series version blobs per node.
+    let mut dir_rows: HashMap<String, (i64, Vec<u8>)> = HashMap::new();
+    let mut leaf_latest: HashMap<String, OplogEntry> = HashMap::new();
+    let mut series_new: HashMap<String, BTreeMap<i64, ObjectHash>> = HashMap::new();
+    let mut series_collapsed: HashMap<String, i64> = HashMap::new();
+    let mut changed: BTreeSet<String> = BTreeSet::new();
+    for row in uncommitted {
+        // Foreign-pond rows (cross-pond mount subtrees) are never folded into
+        // this pond's tree: the fold skips a mount point and everything under
+        // it, so the changeset must ignore those rows too.
+        if row.pond_id != local_pond_id {
+            continue;
+        }
+        let node = row.node_id.to_string();
+        let _ = changed.insert(node.clone());
+        let _ = etype_of.insert(node.clone(), row.file_type);
+        match row.file_type {
+            EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
+                let hash = row_blob_hash(&row.blake3, row.content.as_deref());
+                let _ = series_new
+                    .entry(node.clone())
+                    .or_default()
+                    .insert(row.version, hash);
+                if let Some(k) = row.collapsed_through {
+                    let slot = series_collapsed.entry(node).or_insert(k);
+                    *slot = (*slot).max(k);
+                }
+            }
+            EntryType::DirectoryPhysical => {
+                let content = row.content.clone().unwrap_or_default();
+                let slot = dir_rows
+                    .entry(node)
+                    .or_insert((row.version, content.clone()));
+                if row.version >= slot.0 {
+                    *slot = (row.version, content);
+                }
+            }
+            _ => {
+                let win = leaf_latest
+                    .get(&node)
+                    .is_none_or(|prev| row.version >= prev.version);
+                if win {
+                    let _ = leaf_latest.insert(node, row);
+                }
+            }
+        }
+    }
+
+    // New content hash of every touched leaf, dispatching on kind exactly as
+    // `hash_child` does.
+    for (node, row) in &leaf_latest {
+        let hash = match row.file_type {
+            EntryType::FilePhysicalVersion | EntryType::TablePhysicalVersion => {
+                row_blob_hash(&row.blake3, row.content.as_deref())
+            }
+            EntryType::Symlink => ObjectHash::of_bytes(row.content.as_deref().unwrap_or(&[])),
+            EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
+                let factory = row.factory.as_deref().ok_or_else(|| {
+                    StewardError::DeltaLake(format!(
+                        "dynamic node {node} is missing its factory type"
+                    ))
+                })?;
+                recipe_hash(factory, row.content.as_deref().unwrap_or(&[]))
+            }
+            other => {
+                return Err(StewardError::DeltaLake(format!(
+                    "unexpected leaf entry type {other:?} for node {node}"
+                )));
+            }
+        };
+        let _ = child_hash.insert(node.clone(), hash);
+    }
+
+    // New content hash of every touched series: its committed version blobs
+    // followed by this transaction's appended versions, with every version at
+    // or below the highest `collapsed_through` sentinel (from either side)
+    // pruned, exactly as [`fold_rows`] does, then hashed as one series object.
+    for (node, appended) in &series_new {
+        let (mut versions, committed_collapsed) =
+            read_series_committed(committed_table.clone(), local_pond_id, node).await?;
+        for (version, hash) in appended {
+            let _ = versions.insert(*version, *hash);
+        }
+        let collapsed = committed_collapsed
+            .into_iter()
+            .chain(series_collapsed.get(node).copied())
+            .max();
+        let ordered: Vec<ObjectHash> = versions
+            .into_iter()
+            .filter(|(version, _)| collapsed.is_none_or(|k| *version > k))
+            .map(|(_, hash)| hash)
+            .collect();
+        let _ = child_hash.insert(node.clone(), series_hash(&ordered));
+    }
+
+    // Replace the listing of every modified directory, skipping the entries the
+    // fold also skips: cross-pond mounts and the two reserved nodes.
+    for (node, (_, content)) in &dir_rows {
+        let entries = decode_directory_entries(content)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+        let mut kids: Vec<ChildLite> = Vec::with_capacity(entries.len());
+        for de in entries {
+            let child_pond = de
+                .pond_id
+                .clone()
+                .unwrap_or_else(|| local_pond_id.to_string());
+            if child_pond != local_pond_id {
+                continue;
+            }
+            let cid = de.child_node_id.to_string();
+            if cid == tinyfs::INDEX_NODE_UUID || cid == tinyfs::LOG_NODE_UUID {
+                continue;
+            }
+            let _ = parent_of.insert(cid.clone(), node.clone());
+            let _ = etype_of.insert(cid.clone(), de.entry_type);
+            kids.push(ChildLite {
+                node_id: cid,
+                name: de.name,
+                entry_type: de.entry_type,
+            });
+        }
+        let _ = dir_children.insert(node.clone(), kids);
+    }
+
+    // Every directory on a root-to-change path must be re-hashed: a directory
+    // whose own listing changed, plus every ancestor of any touched node.
+    let mut dirty: BTreeSet<String> = BTreeSet::new();
+    for node in &changed {
+        if dir_rows.contains_key(node) {
+            let _ = dirty.insert(node.clone());
+        }
+        let mut cursor = parent_of.get(node).cloned();
+        while let Some(dir) = cursor {
+            let newly = dirty.insert(dir.clone());
+            cursor = parent_of.get(&dir).cloned();
+            if !newly {
+                // This directory (and therefore its ancestors) is already dirty.
+                break;
+            }
+        }
+    }
+    // A content-changing commit always alters the root tree.
+    let _ = dirty.insert(ROOT_UUID.to_string());
+
+    // Recompute dirty directories deepest-first, so each parent reads the fresh
+    // child_hash of any dirty child before it is itself hashed.
+    let mut depth_memo: HashMap<String, usize> = HashMap::new();
+    let mut order: Vec<String> = dirty.iter().cloned().collect();
+    order.sort_by_key(|d| std::cmp::Reverse(node_depth(d, &parent_of, &mut depth_memo)));
+    for dir in order {
+        let kids = dir_children.get(&dir).cloned().unwrap_or_default();
+        let mut tree_entries: Vec<TreeEntry> = Vec::with_capacity(kids.len());
+        for kid in kids {
+            let ch = child_hash.get(&kid.node_id).ok_or_else(|| {
+                StewardError::DeltaLake(format!(
+                    "incremental fold: child {} of directory {dir} has no known hash",
+                    kid.node_id
+                ))
+            })?;
+            tree_entries.push(TreeEntry::new(kid.name, kid.entry_type, *ch));
+        }
+        let encoded = encode_tree(&tree_entries).map_err(StewardError::Content)?;
+        let _ = child_hash.insert(dir, ObjectHash::of_bytes(&encoded));
+    }
+
+    let root_tree_hash = *child_hash.get(ROOT_UUID).ok_or_else(|| {
+        StewardError::DeltaLake("incremental fold produced no root tree hash".to_string())
+    })?;
+
+    // Rebuild the manifest by walking the live tree from the root, so deleted
+    // (now-unreachable) subtrees drop out and only live nodes are recorded.
+    let mut manifest: Vec<ManifestEntry> = Vec::with_capacity(prior.len());
+    manifest.push(ManifestEntry::new(
+        ROOT_UUID.to_string(),
+        String::new(),
+        String::new(),
+        EntryType::DirectoryPhysical,
+        root_tree_hash,
+    ));
+    let mut stack = vec![ROOT_UUID.to_string()];
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(dir) = stack.pop() {
+        if !seen.insert(dir.clone()) {
+            continue;
+        }
+        for kid in dir_children.get(&dir).cloned().unwrap_or_default() {
+            let ch = child_hash.get(&kid.node_id).ok_or_else(|| {
+                StewardError::DeltaLake(format!(
+                    "incremental fold: live child {} has no known hash",
+                    kid.node_id
+                ))
+            })?;
+            manifest.push(ManifestEntry::new(
+                kid.node_id.clone(),
+                dir.clone(),
+                kid.name,
+                kid.entry_type,
+                *ch,
+            ));
+            if kid.entry_type == EntryType::DirectoryPhysical {
+                stack.push(kid.node_id);
+            }
+        }
+    }
+
+    let node_manifest_hash = manifest_hash(&manifest).map_err(StewardError::Content)?;
+    let manifest_bytes = encode_manifest(&manifest).map_err(StewardError::Content)?;
+    Ok(SpineInputs {
+        manifest_bytes,
+        root_tree_hash,
+        node_manifest_hash,
+    })
+}
+
+/// Depth of a node below the root (root = 0), memoized across a fold.  A node
+/// whose parent chain does not reach the root (a detached fragment) is treated
+/// as maximally deep so it is recomputed before any real ancestor.
+fn node_depth(
+    node: &str,
+    parent_of: &HashMap<String, String>,
+    memo: &mut HashMap<String, usize>,
+) -> usize {
+    if node == ROOT_UUID {
+        return 0;
+    }
+    if let Some(d) = memo.get(node) {
+        return *d;
+    }
+    let depth = match parent_of.get(node) {
+        Some(parent) => node_depth(parent, parent_of, memo).saturating_add(1),
+        None => usize::MAX,
+    };
+    let _ = memo.insert(node.to_string(), depth);
+    depth
+}
+
+/// Read a series node's committed version blob hashes from `table`, keyed by
+/// version, together with the highest `collapsed_through` sentinel recorded on
+/// any of its committed rows.  Unlike [`fold_rows`], the pruning is left to the
+/// caller so this transaction's appended sentinel can be folded in first.
+///
+/// Used by the incremental fold to rebuild a touched series' hash from its
+/// committed history plus this transaction's appended versions.
+///
+/// # Errors
+///
+/// Returns an error if the series rows cannot be read or deserialized.
+async fn read_series_committed(
+    table: deltalake::DeltaTable,
+    pond_id: &str,
+    node_id: &str,
+) -> Result<(BTreeMap<i64, ObjectHash>, Option<i64>), StewardError> {
+    let ctx = SessionContext::new();
+    let _previous = ctx
+        .register_table("series_live", Arc::new(table))
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let sql = format!(
+        "SELECT version, blake3, content, collapsed_through FROM series_live \
+         WHERE pond_id = '{pond_id}' AND node_id = '{node_id}' ORDER BY version",
+    );
+    let batches = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?
+        .collect()
+        .await
+        .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+    let mut rows: Vec<SeriesVersionRow> = Vec::new();
+    for batch in &batches {
+        let parsed: Vec<SeriesVersionRow> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| StewardError::DeltaLake(e.to_string()))?;
+        rows.extend(parsed);
+    }
+    let collapsed = rows.iter().filter_map(|r| r.collapsed_through).max();
+    let mut versions: BTreeMap<i64, ObjectHash> = BTreeMap::new();
+    for row in rows {
+        let _ = versions.insert(
+            row.version,
+            row_blob_hash(&row.blake3, row.content.as_deref()),
+        );
+    }
+    Ok((versions, collapsed))
+}
+
+/// One committed series version row: its version and the fields
+/// [`row_blob_hash`] needs, plus the compaction sentinel.
+#[derive(serde::Deserialize)]
+struct SeriesVersionRow {
+    version: i64,
+    blake3: Option<String>,
+    content: Option<Vec<u8>>,
+    collapsed_through: Option<i64>,
 }
 
 /// Read the reserved commit-log node's leaves from `table` in commit order:

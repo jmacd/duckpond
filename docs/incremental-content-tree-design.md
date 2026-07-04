@@ -21,7 +21,7 @@ Phases track the plan in Section 8; each is independently reviewable.
 | 3 | Incremental node-keyed Merkle (updater + `O(n)` rebuilder oracle) | **Done** |
 | D9 | Unified single-pond storage: authoritative LOG + derived INDEX; control demoted (Section 10) | Design accepted |
 | 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | **Done** |
-| 4b | Incremental commit fold (both roots from changeset + INDEX along touched path) | Not started |
+| 4b | Incremental commit fold (content root from changeset along touched path) | **Done** |
 | 5 | `commit_object` reset (flat `manifest_hash` -> Merkle root) | Not started |
 | 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | Not started |
 | 6 | Validation (equivalence + rebuild-from-pond; keep tlog/pull/719 green; presubmit) | Not started |
@@ -520,9 +520,21 @@ independently reviewable and keeps the whole suite green.
    - The post-commit fold is kept as a validation oracle for this step (the
      in-transaction `root_tree_hash` must equal the post-commit fold); step 4b
      retires that second scan.
-2. **Incremental INDEX (Section 8 step 4).** Make the in-transaction fold and
-   the Merkle root incremental along the touched path; persist the INDEX
-   incremental caches. `O(n) -> O(change)`. Keep `fold_rows` as the oracle.
+2. **Incremental INDEX (Section 8 step 4).** *(Done, content root.)* Make the
+   in-transaction fold incremental along the touched path: the previously
+   committed node manifest (read from the index node, which reassembles a large
+   manifest transparently) is the child-hash baseline, this transaction's
+   changeset replaces modified directory listings and touched leaf/series
+   hashes, and every directory on a root-to-change path has its `tree_hash`
+   recomputed bottom-up while untouched subtrees keep their cached `child_hash`
+   (`crate::content_tree::incremental_spine_inputs`). The second post-commit
+   `fold_rows` is retired; the post-commit scan now yields only the partition
+   checksums (checksum subsumption is step 4/5b below). `fold_rows` survives as
+   a `#[cfg(debug_assertions)]` oracle asserted against the incremental roots on
+   every commit, so the whole test suite validates equivalence. The manifest is
+   still rebuilt and re-hashed with the flat `manifest_hash` each commit; the
+   node-keyed Merkle root and its persisted NodeMerkle cache land with the
+   `commit_object` swap (step 3), where `commit_object` actually adopts it.
 3. **`commit_object` Merkle swap (Section 8 step 5).** Replace the flat
    `manifest_hash` with the NodeMerkle root in `commit_object`.
 4. **Checksum subsumption.** Replace the `row_leaf_digest` partition checksums
