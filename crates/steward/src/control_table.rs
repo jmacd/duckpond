@@ -574,6 +574,7 @@ impl ControlTable {
         data_fs_version: Option<i64>,
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
         outcome: Result<(), String>,
     ) -> Result<(), StewardError> {
         let mut records = Vec::with_capacity(3);
@@ -584,7 +585,7 @@ impl ControlTable {
                 version,
                 duration_ms,
                 partition_checksums,
-                None,
+                commit_spine,
             ));
         }
         let mut completed = self.base_record(RecordKind::Completed, factory_meta);

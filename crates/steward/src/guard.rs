@@ -318,7 +318,13 @@ impl<'a> StewardTransactionGuard<'a> {
         if self.transaction_type == TransactionType::Write {
             let (pending_records, modified_dirs) = data_tx.state()?.pending_operation_counts();
             if pending_records > 0 || modified_dirs > 0 {
-                in_txn_spine = self.write_reserved_nodes(&data_tx).await?;
+                in_txn_spine = self
+                    .write_reserved_nodes(
+                        &data_tx,
+                        self.txn_meta.txn_seq,
+                        self.txn_meta.user.args.join(" "),
+                    )
+                    .await?;
             }
         }
 
@@ -503,6 +509,8 @@ impl<'a> StewardTransactionGuard<'a> {
     async fn write_reserved_nodes(
         &self,
         data_tx: &TransactionGuard<'_>,
+        txn_seq: i64,
+        commit_args: String,
     ) -> Result<Option<CommitSpine>, StewardError> {
         use tokio::io::AsyncWriteExt;
 
@@ -589,8 +597,8 @@ impl<'a> StewardTransactionGuard<'a> {
             inputs.node_manifest_hash,
             inputs.node_manifest_root,
             &pond_id_str,
-            self.txn_meta.txn_seq,
-            self.txn_meta.user.args.join(" "),
+            txn_seq,
+            commit_args,
         );
         let commit_object = hex::decode(&spine.commit_object)
             .map_err(|e| StewardError::Content(format!("encode commit-log leaf: {e}")))?;
@@ -1043,6 +1051,28 @@ impl<'a> StewardTransactionGuard<'a> {
         )
         .await;
 
+        // Decision D9: every content-changing guarded commit must update the
+        // reserved index and commit-log nodes so the pond's node manifest and
+        // authoritative spine stay consistent with the data written in the same
+        // Delta transaction.  A post-commit factory that produced content is
+        // such a commit, so fold its reserved nodes here -- before the commit --
+        // exactly as the primary `commit()` path does.  Skipping this left the
+        // manifest stale (missing the factory's nodes), which the next ordinary
+        // commit's incremental fold detected as a divergence from the full fold.
+        let factory_spine = {
+            let (pending_records, modified_dirs) = factory_tx.state()?.pending_operation_counts();
+            if pending_records > 0 || modified_dirs > 0 {
+                self.write_reserved_nodes(
+                    &factory_tx,
+                    factory_txn_seq,
+                    metadata.user.args.join(" "),
+                )
+                .await?
+            } else {
+                None
+            }
+        };
+
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
         let commit_result = factory_tx.commit().await;
@@ -1055,12 +1085,17 @@ impl<'a> StewardTransactionGuard<'a> {
         let outcome: Result<(), String> = result.as_ref().map(|_| ()).map_err(|e| format!("{}", e));
 
         match commit_result {
-            Ok((Some(new_version), _persistence)) => {
+            Ok((Some(new_version), persistence)) => {
                 // Partition checksums are retired (Decision D9, step 5b): the
                 // per-directory tree hashes in the content tree subsume them,
                 // so the vestigial `DataCommittedMetadata.partition_checksums`
                 // field is left empty for the legacy replication path.
                 let partition_checksums = sync_steward::PartitionChecksums::new();
+
+                // The factory commit appended a commit-log leaf exactly when it
+                // wrote reserved nodes (content changed).  Record its spine into
+                // the disposable control-table cache and reconcile the tlog.
+                let has_leaf = factory_spine.is_some();
 
                 // DataCommitted + Completed (factory txn) + PostPush* (parent)
                 // in a single batched control-table commit.
@@ -1072,6 +1107,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         Some(new_version),
                         duration_ms,
                         partition_checksums,
+                        factory_spine,
                         outcome,
                     )
                     .await
@@ -1081,6 +1117,11 @@ impl<'a> StewardTransactionGuard<'a> {
                             e
                         ))
                     })?;
+                if has_leaf {
+                    let pond_id = self.control_table.pond_id_uuid();
+                    self.materialize_tlog(persistence.table().clone(), pond_id)
+                        .await;
+                }
                 debug!(
                     "Post-commit factory transaction {} committed (seq={}, version={})",
                     &metadata.user.txn_id, factory_txn_seq, new_version
@@ -1098,6 +1139,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         None,
                         duration_ms,
                         Default::default(),
+                        None,
                         outcome,
                     )
                     .await
