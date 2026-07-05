@@ -473,6 +473,7 @@ impl ControlTable {
         ts_micros: i64,
         data_delta_version: i64,
         include_completed: bool,
+        spine: Option<&CommitSpine>,
     ) -> Result<(), StewardError> {
         let mut begin = self.base_record(RecordKind::Begin, txn_meta);
         begin.ts_micros = ts_micros;
@@ -481,7 +482,10 @@ impl ControlTable {
         let metadata = DataCommittedMetadata {
             partition_checksums: HashMap::new(),
             data_delta_version,
-            ..Default::default()
+            root_tree_hash: spine.map(|s| s.root_tree_hash.clone()),
+            parent_commit_hash: spine.and_then(|s| s.parent_commit_hash.clone()),
+            commit_hash: spine.map(|s| s.commit_hash.clone()),
+            commit_object: spine.map(|s| s.commit_object.clone()),
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut committed = self.base_record(RecordKind::DataCommitted, txn_meta);

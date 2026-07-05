@@ -188,15 +188,12 @@ three things, none of which contradict the invariant:
 2. **A cache of pond-derived facts.** The audit log and the spine cache are
    copies of what `data/` already proves. They exist for fast local queries
    (`pond log`, tip lookup) and are rebuildable at any time -- `pond
-   rebuild-control` reconstructs the audit skeleton from Delta history, and the
-   content itself is fully reconstructable from `data/` alone (Phase 6's
-   `rebuild_control_preserves_content_roots` confirms the `fsck` content root
-   and content-tree root survive a control discard + rebuild byte-for-byte).
-   The authoritative commit spine lives in the LOG node, so a rebuild *can*
-   in principle recompute the cached spine from it; today `rebuild-control`
-   reconstructs the audit skeleton with empty spine metadata (a known
-   follow-up) rather than replaying the LOG, which does not affect content
-   integrity.
+   rebuild-control` reconstructs the audit skeleton from Delta history and
+   replays the commit spine from the authoritative LOG node, so `pond log`,
+   tip lookups, and content-addressed push all work after a rebuild. Phase 6's
+   `rebuild_control_preserves_content_roots` confirms the `fsck` content root,
+   the content-tree root, and the full commit-object spine survive a control
+   discard + rebuild byte-for-byte.
 3. **Local operator state.** Which remotes this replica is attached to, their
    modes, and the `last_pushed_seq` / `last_pulled_seq` watermarks. This is the
    one class of state that is *not* rebuildable from the pond -- and that is

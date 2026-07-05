@@ -818,6 +818,10 @@ pond rebuild-control --force
   again.  The original `txn_seq`, `txn_id`, CLI args, Delta version, and
   commit timestamp are all recovered from the `pond_txn` commit
   metadata.
+- **Commit spine** -- the `commit_hash` / `root_tree_hash` /
+  `commit_object` of every content-changing commit are replayed from the
+  authoritative, pond-resident LOG node, so tip lookups and
+  content-addressed `pond push` work against a rebuilt control table.
 
 **Does NOT recover (operator follow-up required):**
 - **Remote attachments' settings** -- remote modes and

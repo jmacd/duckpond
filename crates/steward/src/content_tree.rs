@@ -864,6 +864,38 @@ pub(crate) async fn log_tip_commit_hash(
     Ok(Some(commit.hash()))
 }
 
+/// Read the commit spines from a pond's log node, keyed by transaction `seq`.
+///
+/// Each log leaf is a `commit_object` whose provenance carries the `seq` of the
+/// transaction that stamped it; this decodes every leaf into a [`CommitSpine`]
+/// (the four hex fields the control table caches) so a control-table rebuild
+/// can restore the spine from the authoritative, pond-resident log rather than
+/// leaving it empty.  Returns an empty map for a pond with no content-changing
+/// commits.
+///
+/// # Errors
+///
+/// Returns an error if the log node cannot be read or a leaf cannot be decoded.
+pub(crate) async fn read_log_spines(
+    table: deltalake::DeltaTable,
+    pond_id: &str,
+) -> Result<HashMap<i64, CommitSpine>, StewardError> {
+    let leaves = read_log_leaves(table, pond_id).await?;
+    let mut spines = HashMap::with_capacity(leaves.len());
+    for bytes in leaves {
+        let commit = Commit::decode(&bytes)
+            .map_err(|e| StewardError::Content(format!("decode commit-log leaf: {e}")))?;
+        let spine = CommitSpine {
+            root_tree_hash: commit.root_tree_hash.to_hex(),
+            parent_commit_hash: commit.parent_commit_hash.map(|h| h.to_hex()),
+            commit_hash: commit.hash().to_hex(),
+            commit_object: hex::encode(&bytes),
+        };
+        let _ = spines.insert(commit.provenance.seq, spine);
+    }
+    Ok(spines)
+}
+
 /// Build a commit spine from precomputed roots and an explicit parent, without
 /// consulting the control table.  Used by the guard to stamp the
 /// pond-resident, authoritative commit-log leaf in-transaction (Decision D9);
