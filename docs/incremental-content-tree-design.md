@@ -563,15 +563,21 @@ independently reviewable and keeps the whole suite green.
    pond's `root_tree_hash` is byte-identical pre/post instead of comparing
    per-partition `row_leaf_digest` Merkles, and the commit path
    (`StewardTransactionGuard`, root-init) no longer computes partition
-   checksums -- the vestigial `DataCommittedMetadata.partition_checksums` field
-   is left empty for the disposable legacy replication stack (`sync-remote` /
-   `sync-steward`), which is untouched. `row_leaf_digest` /
-   `compute_live_checksums_for_table` survive only for that legacy adapter and
-   a full-vs-narrow-leaf equivalence test.
+   checksums. The `DataCommittedMetadata.partition_checksums` field, the dead
+   bundle-based replication stack (`sync-remote` and `sync-steward` crates, the
+   `steward` `remote_adapter`, `row_leaf_digest`, and
+   `compute_live_checksums_for_table`), and the `sync-tests` crate have all been
+   removed; production replication is entirely content-addressed. The live
+   control-table schema formerly in `sync-steward` now lives in
+   `steward::inner_control`.
 5. **Validation (Section 8 step 6).** *(Done.)* Incremental-vs-rebuild
    equivalence for both roots is asserted on every write transaction by the
-   `StewardTransactionGuard` debug oracle (`root_tree_hash`,
-   `node_manifest_hash`, `node_manifest_root`, and the manifest bytes); a new
+   `StewardTransactionGuard` fold oracle (`root_tree_hash`,
+   `node_manifest_hash`, `node_manifest_root`, and the manifest bytes). The
+   oracle is always on in debug builds and opt-in in release builds via the
+   `POND_VERIFY_FOLD` environment variable (see
+   `content_tree::fold_verification_enabled`), so a high-value pond can validate
+   every commit without a debug rebuild. A new
    `content_tree_test::incremental_roots_match_full_fold_over_diverse_mutations`
    drives create / nested-dir / overwrite / rename / delete through that oracle.
    A new `rebuild_control_test::rebuild_control_preserves_content_roots` discards

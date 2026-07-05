@@ -101,7 +101,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sitegen = { workspace = true }
 steward = { workspace = true }
-sync-remote = { workspace = true }
 sync-store = { workspace = true }
 tempfile = { workspace = true }
 

@@ -2,7 +2,7 @@
 
 //! Errors returned by the steward crate.
 
-/// Errors returned from the [`crate::Steward`] and related types.
+/// Errors returned from the control table and related types.
 #[derive(Debug, thiserror::Error)]
 pub enum StewardError {
     /// The pond path was invalid.
@@ -55,10 +55,9 @@ pub enum StewardError {
     #[error("legacy pond: {0}")]
     LegacyPond(String),
 
-    /// Error originating from an external [`crate::Steward`]-like
-    /// adapter (e.g. duckpond's tlogfs-backed `RemoteSteward` impl).
-    /// Used to carry arbitrary error types across the trait
-    /// boundary without coupling sync-steward to consumer-specific
+    /// Error originating from an external control-table-like
+    /// adapter.  Used to carry arbitrary error types across a trait
+    /// boundary without coupling the control table to consumer-specific
     /// error hierarchies.
     #[error("adapter error: {0}")]
     Adapter(Box<dyn std::error::Error + Send + Sync>),

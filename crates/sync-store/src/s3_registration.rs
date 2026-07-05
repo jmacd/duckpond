@@ -4,10 +4,9 @@
 //! handlers with delta-rs WITHOUT depending on the `deltalake-aws`
 //! crate (which has version-pinning issues at deltalake 0.30).
 //!
-//! Mirrors the registration pattern used by duckpond's
-//! `crates/remote/src/s3_registration.rs`.  Call
-//! [`register_s3_handlers`] once at process startup BEFORE opening
-//! or creating any `s3://` URL.
+//! Call [`register_s3_handlers`] once at process startup BEFORE opening
+//! or creating any `s3://` URL (for example before opening a
+//! [`crate::ContentRemote`] on an `s3://` backend).
 
 use deltalake::logstore::{
     LogStore, LogStoreFactory, ObjectStoreFactory, ObjectStoreRef, StorageConfig, default_logstore,

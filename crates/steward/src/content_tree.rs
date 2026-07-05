@@ -438,6 +438,32 @@ struct ChildLite {
     entry_type: EntryType,
 }
 
+/// Whether the expensive full-fold verification oracle runs on every
+/// content-changing commit.
+///
+/// The oracle recomputes both commit roots with a full `O(n)`
+/// [`in_txn_spine_inputs`] fold and asserts they match the `O(change)`
+/// [`incremental_spine_inputs`] result (step 4b).  It is always on in debug
+/// builds.  In release builds it is opt-in via the `POND_VERIFY_FOLD`
+/// environment variable -- set to any value other than empty, `0`, or `false`
+/// -- so a high-value pond can validate every commit without a debug rebuild.
+/// The environment is read once and cached for the process lifetime.
+pub(crate) fn fold_verification_enabled() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("POND_VERIFY_FOLD")
+            .ok()
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Compute the two commit roots incrementally along the touched path only,
 /// using the pond's previously committed node manifest as the child-hash
 /// baseline (design `docs/incremental-content-tree-design.md` Section 10,
@@ -449,8 +475,9 @@ struct ChildLite {
 /// the content hashes of touched leaves; every directory on the root-to-change
 /// path then has its `tree_hash` recomputed bottom-up, while untouched subtrees
 /// keep their cached `child_hash`.  The result is byte-identical to a full
-/// [`fold_rows`] of the post-commit live state, which a debug assertion in the
-/// guard verifies against this on every commit.
+/// [`fold_rows`] of the post-commit live state, which the guard verifies against
+/// this on every commit when [`fold_verification_enabled`] is true (always in
+/// debug builds; opt-in via `POND_VERIFY_FOLD` in release builds).
 ///
 /// `prior_manifest_bytes` is `None` only at genesis (no index node yet), when
 /// there is no baseline to build on and the full fold in [`in_txn_spine_inputs`]
@@ -1066,15 +1093,6 @@ async fn scan_live_rows(
     scan_live_rows_ctx(&ctx, want_content).await
 }
 
-/// [`scan_live_rows`] re-exported for the checksum path in
-/// [`crate::remote_adapter`], which owns its own `DeltaTable` handle.
-pub(crate) async fn scan_live_rows_owned(
-    table: deltalake::DeltaTable,
-    want_content: bool,
-) -> Result<Vec<OplogEntry>, StewardError> {
-    scan_live_rows(table, want_content).await
-}
-
 /// Column list matching [`OplogEntry`]'s Arrow schema field order, but with the
 /// two large byte columns replaced by typed NULL literals so the parquet reader
 /// never materializes them while the batch still deserializes into a full
@@ -1529,39 +1547,5 @@ mod tests {
             .find(|r| r.blake3.is_some())
             .expect("file row present");
         assert_eq!(full_file.content.as_deref(), Some(file_content.as_slice()));
-    }
-
-    #[tokio::test]
-    async fn checksum_leaf_matches_between_full_and_narrow_rows() {
-        // The redefined leaf digest must be identical whether computed from a
-        // full row (as fsck does) or from a narrow-scan row (as the per-commit
-        // checksum does): both normalize content/bao_outboard away for
-        // blake3-bearing rows and keep structural content otherwise.
-        use tinyfs::{EntryType, FileID};
-        let pond = tinyfs::local_pond_uuid();
-        let dir_id = FileID::new_physical_dir_id(pond);
-        let dir_row = OplogEntry::new_inline(dir_id, 1, 1, b"dir-bytes".to_vec(), 1);
-        let file_id =
-            FileID::new_in_partition(dir_id.part_id(), EntryType::FilePhysicalVersion, pond);
-        let file_row = OplogEntry::new_small_file(file_id, 2, 1, b"blob-bytes".to_vec(), 1);
-
-        let ctx = register_rows(&[dir_row.clone(), file_row.clone()]);
-        let narrow = scan_live_rows_ctx(&ctx, false).await.expect("narrow scan");
-
-        for full in [&dir_row, &file_row] {
-            let matching = narrow
-                .iter()
-                .find(|r| r.node_id == full.node_id && r.version == full.version)
-                .expect("row present in narrow scan");
-            let full_digest =
-                crate::remote_adapter::row_leaf_digest(full).expect("full leaf digest");
-            let narrow_digest =
-                crate::remote_adapter::row_leaf_digest(matching).expect("narrow leaf digest");
-            assert_eq!(
-                full_digest, narrow_digest,
-                "leaf digest must match between full and narrow rows for node {}",
-                full.node_id
-            );
-        }
     }
 }

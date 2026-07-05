@@ -145,10 +145,13 @@ remove the last pond-derived data from the authoritative-in-control position.
   manifest Merkle root) are computed from the changeset along the touched path
   instead of a full scan, and the INDEX node persists the incremental caches
   (child-hash map + `NodeMerkle` nodes) that make this possible. Commit cost
-  goes from `O(n)` to `O(change)`. The post-commit full fold, kept in 4a as a
-  validation oracle, is retired here. **This is a performance change, not an
-  authority change** -- but it is what makes the INDEX node a genuine durable
-  incremental cache rather than a per-commit full rewrite.
+  goes from `O(n)` to `O(change)`. The in-transaction incremental fold is
+  cross-checked against a full `O(n)` fold by an oracle that is always on in
+  debug builds and opt-in in release builds via the `POND_VERIFY_FOLD`
+  environment variable, so a high-value pond can validate every commit without a
+  debug rebuild. **This is a performance change, not an authority change** --
+  but it is what makes the INDEX node a genuine durable incremental cache rather
+  than a per-commit full rewrite.
 - **5 -- `commit_object` node-keyed Merkle root.** *(Done.)* The commit object
   gains a `node_manifest_root` (the `NodeMerkle` root) alongside the flat
   `node_manifest_hash`. The flat hash is retained as the manifest object's
@@ -163,9 +166,12 @@ remove the last pond-derived data from the authoritative-in-control position.
   commit path. The per-transaction partition checksums -- previously the last
   pond-derived datum that `control/` held and `rebuild-control` could not
   recover -- are **no longer computed**, because the same guarantee comes from
-  the pond-resident tree hashes. The vestigial
-  `DataCommittedMetadata.partition_checksums` field is left empty for the
-  disposable legacy replication stack, which is otherwise unchanged.
+  the pond-resident tree hashes. The `DataCommittedMetadata.partition_checksums`
+  field has been removed outright, together with the dead bundle-based
+  replication stack (the `sync-remote` and `sync-steward` crates and the
+  `steward` `remote_adapter`); production replication is entirely
+  content-addressed. The live control-table schema formerly in `sync-steward`
+  now lives in `steward::inner_control`.
 
 The endpoint: **`control/` holds nothing pond-derived that isn't rebuildable
 from `data/`.** The audit log comes from Delta `pond_txn` history; the spine
@@ -233,7 +239,7 @@ lineage-independent content check that needs neither `control/` nor matching
 | `root_tree_hash`, node manifest | recomputable from `data/` rows; cached in INDEX node | -- |
 | Commit spine + provenance | **LOG node** (`data/`) | `control/` spine cache |
 | Transaction audit log | Delta `pond_txn` history (`data/`) | `control/` audit rows |
-| Partition content checksum | content-tree `tree_hash` (recomputed from `data/`; cached in INDEX node) | `control/` checksums (retired -- field left empty) |
+| Partition content checksum | content-tree `tree_hash` (recomputed from `data/`; cached in INDEX node) | `control/` checksums (retired -- field removed) |
 | Transparency-log leaves | **LOG node** (`data/`) | `tlog/` tile export |
 | Remote topology & watermarks | `control/` (local only) | -- |
 | Write lock | `control/` (ephemeral) | -- |

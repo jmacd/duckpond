@@ -131,17 +131,13 @@ impl Ship {
         // (P2-VERIFY-BOOTSTRAP-DRIFT).
         let root_version = ship.data_persistence.table().version().unwrap_or(0);
         // Partition checksums are retired (Decision D9, step 5b): the content
-        // root recorded in the commit-log node subsumes them.  The vestigial
-        // `DataCommittedMetadata.partition_checksums` field is left empty for
-        // the legacy replication path.
-        let root_checksums = sync_steward::PartitionChecksums::new();
+        // root recorded in the commit-log node subsumes them.
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
                 root_version,
-                0, // Duration unknown/not tracked
-                root_checksums,
+                0,    // Duration unknown/not tracked
                 None, // genesis: the first content-changing commit writes the first commit-log leaf (Decision D9)
             )
             .await?;
@@ -247,11 +243,10 @@ impl Ship {
     ///
     /// Since D6 the resulting pond is initialized with a minimal root v1 under
     /// the source `pond_id` so the content-addressed mirror pull
-    /// ([`crate::rebuild_pond`]) has a root to diff onto.  This is NOT suitable
-    /// for the bundle bootstrap path ([`sync_remote::Remote::bootstrap_consumer`]
-    /// then [`sync_remote::Remote::pull`]), which requires an empty data table
-    /// so the source's replicated seq=1 root bundle does not collide with a
-    /// local root; use [`Ship::create_pond_for_restoration`] for that.
+    /// ([`crate::rebuild_pond`]) has a root to diff onto.  It is NOT suitable
+    /// for a bootstrap path that requires an empty data table so a source's
+    /// replicated seq=1 root does not collide with a local root; use
+    /// [`Ship::create_pond_for_restoration`] for that.
     pub async fn create_replica<P: AsRef<Path>>(
         pond_path: P,
         pond_id: uuid::Uuid,
@@ -1053,16 +1048,9 @@ impl Ship {
         let commit_spine = None;
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
         // Partition checksums are retired (step 5b); the content invariant
-        // above is the compaction integrity check.  The vestigial control
-        // field is left empty for the legacy replication path.
+        // above is the compaction integrity check.
         self.control_table
-            .record_compact_committed(
-                &txn_meta,
-                new_version,
-                duration_ms,
-                sync_steward::PartitionChecksums::new(),
-                commit_spine,
-            )
+            .record_compact_committed(&txn_meta, new_version, duration_ms, commit_spine)
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
 
@@ -1227,16 +1215,8 @@ impl Ship {
         .await?;
 
         ship.control_table
-            // D5.7a: bootstrap data_delta_version=0 record is never pushed,
-            // so partition_checksums are unobservable — pass empty.
-            .record_data_committed(
-                &txn_meta,
-                TransactionType::Write,
-                0,
-                0,
-                sync_steward::PartitionChecksums::new(),
-                None,
-            )
+            // D5.7a: bootstrap data_delta_version=0 record is never pushed.
+            .record_data_committed(&txn_meta, TransactionType::Write, 0, 0, None)
             .await?;
 
         ship.control_table

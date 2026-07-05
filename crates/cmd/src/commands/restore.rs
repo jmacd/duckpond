@@ -69,7 +69,7 @@ pub async fn restore_command(
         allow_http,
     };
     if url.starts_with("s3://") {
-        sync_remote::register_s3_handlers();
+        sync_store::register_s3_handlers();
     }
     let storage_options = attachment.to_storage_options()?;
     let remote = sync_store::ContentRemote::open_at_url(url, storage_options)

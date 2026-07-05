@@ -41,9 +41,7 @@ serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sync-steward = { workspace = true }
 sync-store = { workspace = true }
-sync-remote = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }

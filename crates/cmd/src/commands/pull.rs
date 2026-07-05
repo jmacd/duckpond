@@ -88,7 +88,7 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     let attachment = load_remote_attachment(ship, name).await?;
 
     if attachment.url.starts_with("s3://") {
-        sync_remote::register_s3_handlers();
+        sync_store::register_s3_handlers();
     }
 
     let ship_pre = ship

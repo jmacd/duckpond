@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control table: lifecycle records, settings, partition checksums.
+//! Control table: lifecycle records and settings.
 //!
 //! The control table is a Delta Lake table peer of the data store.  It
 //! holds two kinds of payloads in the same row schema:
@@ -29,11 +29,10 @@ use deltalake::kernel::{
 };
 use deltalake::protocol::SaveMode;
 use serde::{Deserialize, Serialize};
-use sync_store::checksum::{Checksum, ChecksumKind};
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::{Result, StewardError};
+use super::error::{Result, StewardError};
 
 /// Lifecycle record kinds.  Stored as a string in the control table for
 /// readability and forward-compatibility (new variants don't break old
@@ -131,17 +130,9 @@ pub struct ControlRecord {
     pub metadata_json: String,
 }
 
-/// Map of `partition_key -> Checksum` recorded on a [`RecordKind::DataCommitted`].
-pub type PartitionChecksums = HashMap<String, Checksum>;
-
 /// JSON form of the `metadata_json` payload on `DataCommitted` records.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DataCommittedMetadata {
-    /// Partition checksums for partitions touched by this commit, plus
-    /// every other partition's most recent checksum (so that
-    /// `partition_checksums_at(seq)` is a complete snapshot).
-    #[serde(default)]
-    pub partition_checksums: HashMap<String, ChecksumValue>,
     /// The data store's Delta Lake version at the moment this commit
     /// was recorded.  `remote-push` reads this to locate the
     /// commit-log entry whose Add/Remove actions describe the bundle.
@@ -170,37 +161,6 @@ pub struct DataCommittedMetadata {
     /// `None` on unstamped records.
     #[serde(default)]
     pub commit_object: Option<String>,
-}
-
-/// Serialized form of [`Checksum`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChecksumValue {
-    /// Strategy that produced the bytes.
-    pub kind: ChecksumKind,
-    /// Lowercase hex-encoded bytes.
-    pub hex: String,
-}
-
-impl From<&Checksum> for ChecksumValue {
-    fn from(c: &Checksum) -> Self {
-        Self {
-            kind: c.kind,
-            hex: c.hex(),
-        }
-    }
-}
-
-impl From<&ChecksumValue> for Checksum {
-    fn from(v: &ChecksumValue) -> Self {
-        let mut bytes = Vec::with_capacity(v.hex.len() / 2);
-        let mut iter = v.hex.chars();
-        while let (Some(a), Some(b)) = (iter.next(), iter.next()) {
-            let high = a.to_digit(16).unwrap_or(0) as u8;
-            let low = b.to_digit(16).unwrap_or(0) as u8;
-            bytes.push((high << 4) | low);
-        }
-        Checksum::new(v.kind, bytes)
-    }
 }
 
 /// SQL table name under which the control table is registered with the
@@ -440,10 +400,9 @@ impl ControlTable {
     ///
     /// Callers are responsible for choosing a SAFE `horizon_seq`: every
     /// transaction at or below it must already be replicated to all push
-    /// remotes, its checksums durably serialized into bundles, and be
-    /// old enough that no retained-history reader needs it.  The deleted
-    /// rows leave tombstoned parquet files behind until a subsequent
-    /// vacuum reclaims them.  Returns the number of rows deleted.
+    /// remotes and be old enough that no retained-history reader needs it.
+    /// The deleted rows leave tombstoned parquet files behind until a
+    /// subsequent vacuum reclaims them.  Returns the number of rows deleted.
     pub async fn prune_below(&mut self, pond_id: Uuid, horizon_seq: i64) -> Result<usize> {
         let predicate = format!(
             "{pid} = '{p}' AND {rk} != '{setting}' AND {ts} <= {h}",
@@ -688,30 +647,6 @@ impl ControlTable {
         Ok(out)
     }
 
-    /// Resolve the partition_checksums map at `(pond_id, txn_seq)`.
-    /// Returns the `metadata.partition_checksums` field of the
-    /// `DataCommitted` record at that seq, or `None` if no such commit
-    /// exists for that pond_id.
-    pub async fn partition_checksums_at(
-        &self,
-        pond_id: Uuid,
-        txn_seq: i64,
-    ) -> Result<Option<PartitionChecksums>> {
-        let all = self.all_records_for(pond_id).await?;
-        let rec = all
-            .iter()
-            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
-        let Some(rec) = rec else {
-            return Ok(None);
-        };
-        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
-        let mut out = PartitionChecksums::new();
-        for (k, v) in meta.partition_checksums {
-            out.insert(k, Checksum::from(&v));
-        }
-        Ok(Some(out))
-    }
-
     /// Resolve the data store's Delta Lake version at
     /// `(pond_id, txn_seq)`.  Returns the `metadata.data_delta_version`
     /// field of the `DataCommitted` record at that seq, or `None` if
@@ -847,7 +782,7 @@ impl ControlTable {
     /// local pond_id when calling this.
     pub async fn config_set(&mut self, pond_id: Uuid, key: &str, value: &str) -> Result<()> {
         let mut meta = HashMap::new();
-        meta.insert("v".to_string(), value.to_string());
+        let _ = meta.insert("v".to_string(), value.to_string());
         let metadata_json = serde_json::to_string(&meta)?;
         let rec = ControlRecord {
             pond_id,
@@ -884,7 +819,7 @@ impl ControlTable {
         settings.sort_by_key(|(ts, _, _)| *ts);
         let mut out = HashMap::new();
         for (_ts, k, v) in settings {
-            out.insert(k, v);
+            let _ = out.insert(k, v);
         }
         Ok(out)
     }
@@ -1075,16 +1010,5 @@ mod tests {
         ] {
             assert_eq!(parse_record_kind(k.as_str()).unwrap(), k);
         }
-    }
-
-    #[test]
-    fn checksum_value_roundtrip() {
-        let original = Checksum::new(
-            ChecksumKind::Merkle,
-            vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
-        );
-        let serialized = ChecksumValue::from(&original);
-        let deserialized = Checksum::from(&serialized);
-        assert_eq!(original, deserialized);
     }
 }

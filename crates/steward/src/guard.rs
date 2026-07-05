@@ -352,11 +352,8 @@ impl<'a> StewardTransactionGuard<'a> {
                 // the incremental in-transaction fold as the sole content-root
                 // computation.  Step 5b then retired the per-partition
                 // checksums entirely: the per-directory tree hashes in the
-                // content tree subsume them, so the vestigial
-                // `DataCommittedMetadata.partition_checksums` field is left
-                // empty for the legacy replication path.
+                // content tree subsume them.
                 let pond_id = self.control_table.pond_id_uuid();
-                let partition_checksums = sync_steward::PartitionChecksums::new();
 
                 // Content-graph spine (Decision D9): the authoritative spine was
                 // already stamped into the pond-resident commit-log node, in the
@@ -376,7 +373,6 @@ impl<'a> StewardTransactionGuard<'a> {
                         self.transaction_type,
                         new_version,
                         duration_ms,
-                        partition_checksums,
                         commit_spine,
                     )
                     .await
@@ -540,11 +536,11 @@ impl<'a> StewardTransactionGuard<'a> {
         .await?;
 
         // Design step 4b oracle: the incremental roots must match a full fold of
-        // the same live state.  Kept only in debug builds, so tests and local
-        // development validate every commit while release builds pay just the
-        // O(change) incremental fold.
-        #[cfg(debug_assertions)]
-        {
+        // the same live state.  Always on in debug builds; in release builds it
+        // is opt-in via POND_VERIFY_FOLD (see `fold_verification_enabled`) so a
+        // high-value pond can validate every commit while other deployments pay
+        // just the O(change) incremental fold.
+        if crate::content_tree::fold_verification_enabled() {
             let oracle = crate::content_tree::in_txn_spine_inputs(
                 committed_table.clone(),
                 uncommitted,
@@ -1087,11 +1083,8 @@ impl<'a> StewardTransactionGuard<'a> {
         match commit_result {
             Ok((Some(new_version), persistence)) => {
                 // Partition checksums are retired (Decision D9, step 5b): the
-                // per-directory tree hashes in the content tree subsume them,
-                // so the vestigial `DataCommittedMetadata.partition_checksums`
-                // field is left empty for the legacy replication path.
-                let partition_checksums = sync_steward::PartitionChecksums::new();
-
+                // per-directory tree hashes in the content tree subsume them.
+                //
                 // The factory commit appended a commit-log leaf exactly when it
                 // wrote reserved nodes (content changed).  Record its spine into
                 // the disposable control-table cache and reconcile the tlog.
@@ -1106,7 +1099,6 @@ impl<'a> StewardTransactionGuard<'a> {
                         execution_seq,
                         Some(new_version),
                         duration_ms,
-                        partition_checksums,
                         factory_spine,
                         outcome,
                     )
@@ -1138,7 +1130,6 @@ impl<'a> StewardTransactionGuard<'a> {
                         execution_seq,
                         None,
                         duration_ms,
-                        Default::default(),
                         None,
                         outcome,
                     )
@@ -1274,7 +1265,7 @@ impl<'a> StewardTransactionGuard<'a> {
         for (name, attachment) in to_push {
             info!("post-commit auto-push: {} -> {}", name, attachment.url);
             if attachment.url.starts_with("s3://") {
-                sync_remote::register_s3_handlers();
+                sync_store::register_s3_handlers();
             }
             let storage_options = match attachment.to_storage_options() {
                 Ok(o) => o,

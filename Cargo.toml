@@ -12,9 +12,6 @@ members = [
 "crates/gitpond",
 "crates/billing",
 "crates/sync-store",
-"crates/sync-steward",
-"crates/sync-remote",
-"crates/sync-tests",
 ]
 
 [workspace.package]
@@ -40,8 +37,6 @@ utilities = { path = "crates/utilities" }
 sitegen = { path = "crates/sitegen" }
 billing = { path = "crates/billing" }
 sync-store = { path = "crates/sync-store" }
-sync-steward = { path = "crates/sync-steward" }
-sync-remote = { path = "crates/sync-remote" }
 
 anyhow = "1.0.82"
 arrow = { version = "57", default-features = false, features = ["prettyprint", "ipc"] }

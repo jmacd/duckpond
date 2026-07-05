@@ -27,9 +27,12 @@ pub mod checksum;
 pub mod content;
 pub mod content_remote;
 mod error;
+mod s3_registration;
 pub mod schema;
 mod store;
 pub mod tlog;
+
+pub use s3_registration::register_s3_handlers;
 
 pub use content::{
     Commit, ManifestEntry, NodeMerkle, ObjectHash, Provenance, TreeEntry, decode_series,

@@ -233,7 +233,7 @@ async fn add_remote_attachment_internal(
     //       upstream; operator should set up the upstream pond first).
     let local_pond_id = ship.control_table().pond_id_uuid();
     if attachment.url.starts_with("s3://") {
-        sync_remote::register_s3_handlers();
+        sync_store::register_s3_handlers();
     }
     let storage_options = attachment.to_storage_options()?;
     let is_import = mode == RemoteMode::Pull && matches!(mount_path, Some(p) if p != "/");
@@ -505,7 +505,7 @@ async fn validate_no_foreign_store_id_collision(
         // Probe the existing remote to learn its store_id.
         let storage_options = attachment.to_storage_options()?;
         if attachment.url.starts_with("s3://") {
-            sync_remote::register_s3_handlers();
+            sync_store::register_s3_handlers();
         }
         let existing_store_id =
             match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options).await {
