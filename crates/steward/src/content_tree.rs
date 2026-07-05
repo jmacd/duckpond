@@ -454,13 +454,21 @@ pub(crate) fn fold_verification_enabled() -> bool {
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("POND_VERIFY_FOLD")
+        let enabled = std::env::var("POND_VERIFY_FOLD")
             .ok()
             .map(|v| {
                 let v = v.trim();
                 !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if enabled {
+            log::warn!(
+                "POND_VERIFY_FOLD is set: every write transaction recomputes both \
+                 commit roots with a full O(n) fold to cross-check the incremental \
+                 O(change) result. This adds per-commit overhead; unset it to disable."
+            );
+        }
+        enabled
     })
 }
 
