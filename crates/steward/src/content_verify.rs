@@ -76,14 +76,10 @@ pub async fn verify_content_against_remote(
     remote: &ContentRemote,
     ref_name: &str,
 ) -> Result<ContentVerifyReport, StewardError> {
-    let last_write_seq = ship
-        .control_table()
-        .get_last_write_sequence()
-        .await
-        .map_err(|e| StewardError::Content(format!("read last write sequence: {e}")))?;
-    let local_tip = if last_write_seq > 0 {
+    let tip_seq = ship.control_table().latest_spine_seq().await?;
+    let local_tip = if let Some(seq) = tip_seq {
         ship.control_table()
-            .commit_hash_at(last_write_seq)
+            .commit_hash_at(seq)
             .await?
             .map(|hex| ObjectHash::from_hex(&hex))
             .transpose()
@@ -142,10 +138,11 @@ pub async fn verify_content_against_remote(
             if local == remote_t {
                 ContentVerifyState::UpToDate
             } else if let Some(found_seq) =
-                find_in_local_history(ship, remote_t, last_write_seq).await?
+                find_in_local_history(ship, remote_t, tip_seq.unwrap_or(0)).await?
             {
                 ContentVerifyState::RemoteBehind {
-                    local_unpushed: last_write_seq - found_seq,
+                    local_unpushed: count_spine_between(ship, found_seq, tip_seq.unwrap_or(0))
+                        .await?,
                 }
             } else {
                 ContentVerifyState::Diverged
@@ -171,14 +168,15 @@ pub async fn verify_content_against_remote(
 }
 
 /// Find the seq at which the local commit spine recorded `target`, scanning
-/// from `last_write_seq` downward.  Returns `None` if no local commit matches,
-/// which means `target` is not in this pond's history.
+/// from `tip_seq` downward.  Seqs that stamped no spine (compaction) return
+/// `None` from `commit_hash_at` and are skipped.  Returns `None` if no local
+/// commit matches, which means `target` is not in this pond's history.
 async fn find_in_local_history(
     ship: &Ship,
     target: ObjectHash,
-    last_write_seq: i64,
+    tip_seq: i64,
 ) -> Result<Option<i64>, StewardError> {
-    let mut seq = last_write_seq;
+    let mut seq = tip_seq;
     while seq > 0 {
         if let Some(hex) = ship.control_table().commit_hash_at(seq).await? {
             let hash = ObjectHash::from_hex(&hex)
@@ -190,4 +188,25 @@ async fn find_in_local_history(
         seq -= 1;
     }
     Ok(None)
+}
+
+/// Count the spine-bearing commits in `(low_exclusive, high_inclusive]`.  This
+/// is the number of content-changing commits the local pond holds beyond the
+/// remote tip found at `low_exclusive`.  Content-preserving seqs (compaction)
+/// stamp no spine and are not counted, so a compaction between the two tips
+/// does not inflate the unpushed count.
+async fn count_spine_between(
+    ship: &Ship,
+    low_exclusive: i64,
+    high_inclusive: i64,
+) -> Result<i64, StewardError> {
+    let mut count = 0;
+    let mut seq = high_inclusive;
+    while seq > low_exclusive {
+        if ship.control_table().commit_hash_at(seq).await?.is_some() {
+            count += 1;
+        }
+        seq -= 1;
+    }
+    Ok(count)
 }

@@ -740,6 +740,18 @@ impl ControlTable {
             .map_err(map_err)
     }
 
+    /// The highest local `txn_seq` that stamped a content-graph commit spine:
+    /// the pond's content tip.  Content-preserving transactions (compaction)
+    /// record no spine, so their seq is skipped; push and verify resolve the
+    /// tip through this method so a compaction seq never mis-resolves as the
+    /// tip.  Returns `None` if the pond has no spine-bearing commit.
+    pub async fn latest_spine_seq(&self) -> Result<Option<i64>, StewardError> {
+        self.inner
+            .latest_spine_seq(self.pond_id_uuid())
+            .await
+            .map_err(map_err)
+    }
+
     /// Mutable view of the underlying `sync_steward::ControlTable`.
     pub fn inner_mut(&mut self) -> &mut sync_steward::ControlTable {
         &mut self.inner

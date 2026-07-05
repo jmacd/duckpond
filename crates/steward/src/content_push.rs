@@ -40,10 +40,13 @@ pub struct ContentPushOutcome {
 /// Push the pond's current content closure and tip commit to `remote` under
 /// `ref_name`.
 ///
-/// The tip is the commit recorded at the pond's latest write seq.  Its encoded
-/// object bytes are taken from the persisted commit spine and verified to hash
-/// to the recorded commit hash before being sent, so the remote tip can never
-/// disagree with the object it names.
+/// The tip is the last content-changing commit (the highest seq that stamped a
+/// content-graph spine).  Content-preserving transactions such as compaction
+/// record no spine and are skipped, so a push right after compaction resolves
+/// the same tip as before it.  The tip's encoded object bytes are taken from the
+/// persisted commit spine and verified to hash to the recorded commit hash
+/// before being sent, so the remote tip can never disagree with the object it
+/// names.
 ///
 /// The full inline closure is sent every time.  A re-put of an object the
 /// remote already holds is idempotent, so this is correct though not minimal;
@@ -52,7 +55,7 @@ pub struct ContentPushOutcome {
 ///
 /// # Errors
 ///
-/// Returns an error if the pond has no commit spine at its latest write seq,
+/// Returns an error if the pond has no content-changing commit to push,
 /// if the persisted commit object does not hash to the recorded commit hash,
 /// if any external large blob is missing or its bytes do not hash to the
 /// recorded key, or if reading the content tree or writing to the remote fails.
@@ -61,7 +64,13 @@ pub async fn push_content_to_remote(
     remote: &mut ContentRemote,
     ref_name: &str,
 ) -> Result<ContentPushOutcome, StewardError> {
-    let seq = ship.last_write_seq();
+    let seq = ship
+        .control_table()
+        .latest_spine_seq()
+        .await?
+        .ok_or_else(|| {
+            StewardError::Content("no content-changing commit to push (empty pond)".to_string())
+        })?;
 
     let commit_hash_hex = ship
         .control_table()

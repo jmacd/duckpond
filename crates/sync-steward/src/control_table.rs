@@ -817,6 +817,30 @@ impl ControlTable {
         Ok(meta.commit_object)
     }
 
+    /// The highest `txn_seq` for `pond_id` that stamped a content-graph commit
+    /// spine (its `DataCommitted` metadata carries a `commit_hash`).  This is
+    /// the pond's content tip: the last content-changing commit.
+    ///
+    /// Content-preserving transactions such as compaction (`Ship::compact`)
+    /// record a `DataCommitted` row with no spine, so their seq is skipped
+    /// here.  Push and pull resolve the tip through this method precisely so a
+    /// compaction seq never mis-resolves as the tip (design: "Compaction adds
+    /// no commit").  Returns `None` if the pond has no spine-bearing commit.
+    pub async fn latest_spine_seq(&self, pond_id: Uuid) -> Result<Option<i64>> {
+        let all = self.all_records_for(pond_id).await?;
+        let mut best: Option<i64> = None;
+        for rec in &all {
+            if rec.record_kind != RecordKind::DataCommitted {
+                continue;
+            }
+            let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+            if meta.commit_hash.is_some() && best.is_none_or(|b| rec.txn_seq > b) {
+                best = Some(rec.txn_seq);
+            }
+        }
+        Ok(best)
+    }
+
     /// Set a configuration key/value scoped to `pond_id`.  Records a
     /// [`RecordKind::Setting`] row.  Settings are pond-instance state
     /// (e.g., `last_pulled_seq:<remote>`); the Steward always uses its

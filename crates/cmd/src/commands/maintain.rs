@@ -77,8 +77,8 @@ pub async fn maintain_command(
         }
         if compact && report.data.as_ref().map(|d| d.compacted).unwrap_or(false) {
             println!(
-                "  data compaction recorded as a transaction; \
-                 run `pond push` to replicate it as a Compact bundle"
+                "  data compaction reclaimed local storage; the content is \
+                 unchanged, so replicas need no update"
             );
         }
         if let Some(ref collapse) = collapse_report {
