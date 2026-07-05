@@ -9,11 +9,11 @@
 #     2. Consumer pond P2: `pond remote add upstream URL /imports/up`
 #        (cross-pond mount; foreign store_id must differ), then `pond pull`.
 #     3. Verify the imported file CONTENT (md5) matches the producer exactly
-#        and that `pond remote list` LAST_PULLED_SEQ advanced.
+#        and that `pond remote list` PULLED_TIP advanced.
 #     4. Pull again with no upstream change -> "applied 0 bundle(s)" and the
 #        watermark is UNCHANGED (bandwidth-bug regression guard).
 #     5. Producer adds a third file + push; consumer pull picks up exactly
-#        the new file; LAST_PULLED_SEQ advances.
+#        the new file; PULLED_TIP advances.
 #     6. `pond remote remove upstream` (detach) -> imported data STILL
 #        readable via the mount.
 #     7. Re-add + `pond remote remove --purge` -> mount entry gone, the
@@ -23,7 +23,7 @@
 #
 # EXPECTED:
 #   - Content md5 matches across the import boundary.
-#   - Watermark advances only when there are new upstream bundles.
+#   - Pull tip advances only when there are new upstream commits.
 #   - Detach preserves data; --purge removes the mount.
 #
 # History:
@@ -63,20 +63,20 @@ pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up > /tmp/711-add.log 2>&1
 check_contains /tmp/711-add.log "remote add reports pull mount" "mode=pull, mount=/imports/up"
 pond pull upstream > /tmp/711-pull1.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/711-pull1.log' "pull #1 applied >0 bundles"
+check 'grep -q "pull upstream complete" /tmp/711-pull1.log' "pull #1 completed cross-pond import"
 
 echo "--- Step 3: content + watermark ---"
 IMPORTED_MD5=$(pond cat /imports/up/data/f1.txt 2>/dev/null | md5sum | awk '{print $1}')
 check '[ "'"${IMPORTED_MD5}"'" = "'"${F1_MD5}"'" ]' "imported f1 content matches producer (md5)"
 check 'pond cat /imports/up/data/f2.txt | grep -q p1-four' "imported f2 content present"
 PULLED1=$(remote_last_pulled upstream)
-check '[ -n "'"${PULLED1}"'" ] && [ "'"${PULLED1}"'" != "-" ]' "LAST_PULLED_SEQ advanced after pull #1"
+check '[ -n "'"${PULLED1}"'" ] && [ "'"${PULLED1}"'" != "-" ]' "PULLED_TIP set after pull #1"
 
 echo "--- Step 4: idempotent pull (watermark guard) ---"
 pond pull upstream > /tmp/711-pull2.log 2>&1
-check 'grep -q "applied 0 bundle" /tmp/711-pull2.log' "pull #2 applied 0 bundles"
+check 'grep -q "already up to date" /tmp/711-pull2.log' "pull #2 short-circuits (no re-walk)"
 PULLED2=$(remote_last_pulled upstream)
-check '[ "'"${PULLED2}"'" = "'"${PULLED1}"'" ]' "LAST_PULLED_SEQ unchanged on empty pull"
+check '[ "'"${PULLED2}"'" = "'"${PULLED1}"'" ]' "PULLED_TIP unchanged on empty pull"
 
 echo "--- Step 5: incremental upstream change propagates ---"
 export POND="$P1"
@@ -84,10 +84,10 @@ printf 'p1-five\n' > /tmp/711-f3.txt
 pond copy host:///tmp/711-f3.txt /data/f3.txt >/dev/null 2>&1   # auto-pushed
 export POND="$P2"
 pond pull upstream > /tmp/711-pull3.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/711-pull3.log' "pull #3 applied new bundle(s)"
+check 'grep -qE "files: [1-9]" /tmp/711-pull3.log' "pull #3 imported new file(s)"
 check 'pond cat /imports/up/data/f3.txt | grep -q p1-five'      "new file visible after pull #3"
 PULLED3=$(remote_last_pulled upstream)
-check '[ "'"${PULLED3}"'" -gt "'"${PULLED2}"'" ]' "LAST_PULLED_SEQ advanced on pull #3"
+check '[ -n "'"${PULLED3}"'" ] && [ "'"${PULLED3}"'" != "'"${PULLED2}"'" ]' "PULLED_TIP advanced on pull #3"
 
 echo "--- Step 6: detach preserves data ---"
 pond remote remove upstream > /tmp/711-detach.log 2>&1

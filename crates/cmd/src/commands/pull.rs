@@ -2,16 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `pond pull [<name>]` -- pull new bundles from one or more remotes via
-//! the D4 [`sync_remote::Remote`] pipeline.
+//! `pond pull [<name>]` -- pull the content-addressed object graph from one or
+//! more remotes.  A root (or absent) mount path mirrors the source into the
+//! local pond; a non-root mount path is a cross-pond import that rebuilds the
+//! foreign pond's tree under its own pond_id and mounts it at the path.
 
 use crate::commands::remote::{
     RemoteMode, list_remote_names, load_remote_attachment, remote_mode_for,
 };
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
-use steward::{REMOTE_MOUNT_PATH_PREFIX, ShipRemoteSteward, StewardError};
-use sync_remote::Remote;
+use steward::{REMOTE_MOUNT_PATH_PREFIX, StewardError};
 use uuid::Uuid;
 
 /// Pull from `name`, or from every remote in `pull`/`both` mode when `name`
@@ -55,15 +56,61 @@ pub async fn pull_command(ship_context: &ShipContext, name: Option<String>) -> R
     }
 }
 
+/// Return `true` when the remote's tip commit for ref `main` already equals the
+/// tip we last pulled for `url`, meaning the local mirror/mount is up to date
+/// and the full graph fetch can be skipped.  Records nothing; the caller
+/// refreshes `last_pulled_tip` only after a real rebuild/import lands.
+async fn already_at_tip(
+    ship: &steward::Ship,
+    remote: &sync_store::ContentRemote,
+    url: &str,
+    name: &str,
+) -> Result<bool> {
+    let remote_tip = remote
+        .get_tip("main")
+        .await
+        .map_err(|e| anyhow!("get tip from `{}`: {}", url, e))?;
+    let last_pulled = ship
+        .control_table()
+        .raw_config_get(&format!("last_pulled_tip:{url}"))
+        .await
+        .map_err(|e| anyhow!("read last_pulled_tip for `{}`: {}", name, e))?;
+    if let (Some(tip), Some(prev)) = (remote_tip, last_pulled.as_deref())
+        && tip.to_hex() == prev
+    {
+        log::info!("[OK] pull {name} already up to date (tip={prev})");
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     let attachment = load_remote_attachment(ship, name).await?;
 
     if attachment.url.starts_with("s3://") {
-        sync_remote::register_s3_handlers();
+        sync_store::register_s3_handlers();
+    }
+
+    let ship_pre = ship
+        .as_pond()
+        .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
+    let mount_path: Option<String> = ship_pre
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
+        .await
+        .map_err(|e| anyhow!("read mount_path for `{}`: {}", name, e))?
+        .filter(|s| !s.is_empty() && s != "/");
+
+    // Mirror restart / backup restore (root or no mount): pull the full
+    // content graph and rebuild the local pond by node_id.  Cross-pond import
+    // (non-root mount): fetch the foreign content graph and rebuild it under
+    // the foreign pond_id, then mount it.
+    if mount_path.is_none() {
+        return pull_mirror(ship, name, &attachment).await;
     }
 
     let storage_options = attachment.to_storage_options()?;
-    let remote = Remote::open_at_url(&attachment.url, storage_options)
+    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
 
@@ -72,110 +119,168 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
 
     let local_pond_id = ship_ref.control_table().pond_id_uuid();
-    let foreign_pond_id = remote.store_id();
+    let foreign_pond_id = remote.pond_id();
 
-    // Look up the mount path BEFORE the pull, so we can materialize the
-    // mount entry afterwards.  Empty / missing / "/" => no mount entry
-    // (push-only backup or mirror restart).
-    let mount_path: Option<String> = ship_ref
-        .control_table()
-        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
-        .await
-        .map_err(|e| anyhow!("read mount_path for `{}`: {}", name, e))?
-        .filter(|s| !s.is_empty() && s != "/");
-
-    // First-pull bootstrap: if `last_pulled_seq:<url>` is unset, seed it to
-    // one below the remote's oldest available bundle so the pull applies
-    // every bundle the remote has.  A current producer replicates its
-    // pond_init txn (txn_seq=1) as a normal bundle, so the consumer
-    // receives the identity-bearing root-dir rows and matches on `verify`
-    // (P2-VERIFY-BOOTSTRAP-DRIFT); a legacy producer's oldest bundle is 2,
-    // so the seed is 1 (the old skip-the-bootstrap behavior).  Works for
-    // both mirror restart (foreign==local) and cross-pond import.  If the
-    // producer has already compacted+pruned past the oldest the consumer
-    // needs, the pull returns `BehindRetention` and the operator should use
-    // `pond restart-from-compact`.
-    let last_pulled_key = format!("last_pulled_seq:{}", attachment.url);
-    let already_pulled = ship_ref
-        .control_table()
-        .raw_config_get(&last_pulled_key)
-        .await
-        .map_err(|e| anyhow!("read last_pulled_seq for `{}`: {}", name, e))?
-        .is_some();
-    if !already_pulled {
-        let oldest = remote
-            .oldest_available_seq()
-            .await
-            .map_err(|e| anyhow!("read oldest bundle seq for `{}`: {}", name, e))?
-            .unwrap_or(1);
-        let seed = (oldest - 1).max(0);
-        seed_initial_last_pulled(ship_ref, &attachment.url, name, seed).await?;
+    // This is the import path: mount_path is guaranteed non-root here.
+    let mount_path = mount_path.expect("import path requires a non-root mount_path");
+    if foreign_pond_id == local_pond_id {
+        return Err(anyhow!(
+            "remote `{}` has mount_path `{}` but its store_id matches this pond's \
+             pond_id; cross-pond import requires a foreign store_id",
+            name,
+            mount_path
+        ));
     }
 
-    let mut adapter = ShipRemoteSteward::new(ship_ref);
-    let report = remote
-        .pull(&mut adapter)
-        .await
-        .map_err(|e| anyhow!("pull from `{}`: {}", attachment.url, e))?;
+    // Incremental short-circuit (CA3): if the remote tip already equals the
+    // tip we last pulled, the mount is up to date -- skip the full graph fetch
+    // and re-import entirely.  This is the bandwidth-bug guard: without it,
+    // every pull re-walks and re-downloads the whole reachable object closure.
+    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+        return Ok(());
+    }
 
+    // Fetch the foreign object graph and rebuild it under the foreign pond_id
+    // partition, then mount it.  The local allocator stays contiguous; only the
+    // foreign pond's seq frontier advances inside `import_pond`.
+    let graph = steward::fetch_object_graph(&remote, "main")
+        .await
+        .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
+    if graph.is_empty() {
+        log::info!(
+            "pull {}: remote ref `main` is empty; nothing to import",
+            name
+        );
+        return Ok(());
+    }
+    let foreign_uuid7 = uuid7::Uuid::from(*foreign_pond_id.as_bytes());
+    let outcome = steward::import_pond(ship_ref, &remote, &graph, foreign_uuid7)
+        .await
+        .map_err(|e| anyhow!("import from `{}`: {}", attachment.url, e))?;
     log::info!(
-        "[OK] pull {}: applied {} bundle(s) from {}",
+        "[OK] pull {} complete (cross-pond import: {:?})",
         name,
-        report.bundles_applied.len(),
-        attachment.url
+        outcome
     );
 
-    // Materialize the cross-pond mount entry, if any.  Runs after the
-    // pull so the foreign data is already in our Delta table.  Skipped
-    // for mirror restarts (foreign pond_id == local pond_id) since
-    // the mount path is "/" -- already filtered to None above.
-    if let Some(path) = mount_path {
-        if foreign_pond_id == local_pond_id {
-            return Err(anyhow!(
-                "remote `{}` has mount_path `{}` but its store_id matches this pond's \
-                 pond_id; cross-pond import requires a foreign store_id",
-                name,
-                path
-            ));
-        }
-        materialize_mount(ship_ref, name, &path, foreign_pond_id).await?;
+    // Materialize the mount and record the graft pin in ONE transaction.  The
+    // mount node is omitted from the content-tree fold (keeping the graft
+    // non-transitive); the pin file is ordinary pond-owned content -- covered
+    // by our commit hash and replicated to consumers as a content-addressed
+    // reference to the foreign tip.
+    let pinned_tip = graph
+        .tip
+        .ok_or_else(|| anyhow!("imported graph from `{}` has no tip commit", name))?;
+    materialize_mount(
+        ship_ref,
+        name,
+        &mount_path,
+        foreign_pond_id,
+        &pinned_tip.to_hex(),
+    )
+    .await?;
+
+    // Record the per-ref frontier we last pulled: the foreign tip commit hash
+    // now mounted (CA3 replacement for the retired seq watermark).
+    ship_ref
+        .control_table_mut()
+        .raw_config_set(
+            &format!("last_pulled_tip:{}", attachment.url),
+            &pinned_tip.to_hex(),
+        )
+        .await
+        .map_err(|e| anyhow!("record last_pulled_tip for `{}`: {}", name, e))?;
+
+    Ok(())
+}
+
+/// Mirror restart / backup restore: fetch the remote's full content graph
+/// for ref `main` and rebuild the local pond by node_id.  Used when the
+/// attachment has no mount path (or `/`).
+async fn pull_mirror(
+    ship: &mut steward::Steward,
+    name: &str,
+    attachment: &steward::RemoteAttachment,
+) -> Result<()> {
+    let storage_options = attachment.to_storage_options()?;
+    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
+        .await
+        .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
+
+    let ship_ref = ship
+        .as_pond_mut()
+        .ok_or_else(|| anyhow!("pull requires a pond steward (not a host steward)"))?;
+
+    // Incremental short-circuit (CA3): skip the full graph fetch and rebuild
+    // when the mirror already reflects the remote tip.
+    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+        return Ok(());
     }
 
-    Ok(())
-}
-
-/// Seed `last_pulled_seq:<url>` to `seed` on first pull so the subsequent
-/// pull applies every bundle from `seed + 1` onward.  `seed` is normally
-/// `oldest_available_seq - 1` so the consumer starts at the remote's
-/// oldest bundle (the producer's replicated pond_init for current
-/// producers, or the first Write bundle for legacy ones).
-async fn seed_initial_last_pulled(
-    ship: &mut steward::Ship,
-    url: &str,
-    name: &str,
-    seed: i64,
-) -> Result<()> {
-    ship.control_table_mut()
-        .raw_config_set(&format!("last_pulled_seq:{}", url), &seed.to_string())
+    let graph = steward::fetch_object_graph(&remote, "main")
         .await
-        .map_err(|e| anyhow!("seed last_pulled_seq for `{}` ({}): {}", name, url, e))?;
+        .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
+    if graph.is_empty() {
+        log::info!(
+            "pull {}: remote ref `main` is empty; nothing to rebuild",
+            name
+        );
+        return Ok(());
+    }
+    let outcome = steward::rebuild_pond(ship_ref, &remote, &graph)
+        .await
+        .map_err(|e| anyhow!("rebuild from `{}`: {}", attachment.url, e))?;
+    log::info!(
+        "[OK] pull {} complete (mirror rebuild: {:?})",
+        name,
+        outcome
+    );
+
+    // Record the per-ref frontier we last pulled: the tip commit hash the
+    // mirror now reflects (CA3 replacement for the retired seq watermark).
+    if let Some(tip) = graph.tip {
+        ship_ref
+            .control_table_mut()
+            .raw_config_set(
+                &format!("last_pulled_tip:{}", attachment.url),
+                &tip.to_hex(),
+            )
+            .await
+            .map_err(|e| anyhow!("record last_pulled_tip for `{}`: {}", name, e))?;
+    }
     Ok(())
 }
 
-/// Insert (idempotently) a directory entry at `mount_path` whose
-/// `pond_id` is the foreign pond's id.  Reading through this entry
-/// will yield the foreign pond's tree.
+/// Insert (idempotently) a directory entry at `mount_path` whose `pond_id` is
+/// the foreign pond's id, and record the graft pin at `/sys/grafts/<name>` --
+/// both in a SINGLE transaction so a cross-pond pull adds exactly one local
+/// commit.  Reading through the mount entry yields the foreign pond's tree; the
+/// pin file is ordinary pond-owned content (covered by our commit hash and
+/// replicated to consumers) that pins the foreign tip commit hash without
+/// re-replicating the foreign closure.
 async fn materialize_mount(
     ship: &mut steward::Ship,
     name: &str,
     mount_path: &str,
     foreign_pond_id: Uuid,
+    pinned_tip_hex: &str,
 ) -> Result<()> {
     let (parent, leaf) = split_mount_path(mount_path)?;
     let name_owned = name.to_string();
     let mount_owned = mount_path.to_string();
     let parent_owned = parent.to_string();
     let leaf_owned = leaf.to_string();
+
+    let pin = steward::GraftPin {
+        foreign_pond_id: foreign_pond_id.to_string(),
+        mount_path: mount_path.to_string(),
+        pinned_tip: pinned_tip_hex.to_string(),
+    };
+    let pin_yaml = pin
+        .to_yaml()
+        .map_err(|e| anyhow!("serialize graft pin for `{}`: {}", name, e))?;
+    let pin_path = steward::GraftPin::pin_path(name);
+    let pin_name = name_owned.clone();
 
     ship.write_transaction(
         &steward::PondUserMetadata::new(vec![
@@ -185,6 +290,9 @@ async fn materialize_mount(
             mount_owned,
         ]),
         async move |fs| {
+            use tinyfs::EntryType;
+            use tokio::io::AsyncWriteExt;
+
             let root = fs.root().await?;
             let _ = root.create_dir_all(&parent_owned).await?;
             let parent_wd = root.open_dir_path(&parent_owned).await?;
@@ -193,19 +301,39 @@ async fn materialize_mount(
 
             if let Some(existing) = parent_wd.get(&leaf_owned).await? {
                 let existing_pond = existing.node.id().pond_id();
-                if existing_pond == foreign_uuid7 {
-                    // Idempotent: mount already points at the right pond.
-                    return Ok(());
+                if existing_pond != foreign_uuid7 {
+                    return Err(StewardError::Aborted(format!(
+                        "mount path `{}/{}` already exists with pond_id {}; cannot \
+                         attach foreign pond {}",
+                        parent_owned, leaf_owned, existing_pond, foreign_uuid7
+                    )));
                 }
-                return Err(StewardError::Aborted(format!(
-                    "mount path `{}/{}` already exists with pond_id {}; cannot \
-                     attach foreign pond {}",
-                    parent_owned, leaf_owned, existing_pond, foreign_uuid7
-                )));
+                // Idempotent: mount already points at the right pond.
+            } else {
+                let foreign_node = fs.foreign_root_node(foreign_uuid7).await?;
+                let _ = parent_wd.insert_node(&leaf_owned, foreign_node).await?;
             }
 
-            let foreign_node = fs.foreign_root_node(foreign_uuid7).await?;
-            let _ = parent_wd.insert_node(&leaf_owned, foreign_node).await?;
+            // Record / refresh the graft pin in the same transaction.
+            let _ = root.create_dir_all(steward::SYS_DIR).await?;
+            let _ = root.create_dir_all(steward::SYS_GRAFTS_DIR).await?;
+            if root.exists(&pin_path).await {
+                let grafts_dir = root.open_dir_path(steward::SYS_GRAFTS_DIR).await?;
+                grafts_dir.remove_entry(&pin_name).await.map_err(|e| {
+                    StewardError::Aborted(format!("remove existing graft pin {}: {}", pin_path, e))
+                })?;
+            }
+            let mut writer = root
+                .async_writer_path_with_type(&pin_path, EntryType::FilePhysicalVersion)
+                .await?;
+            writer
+                .write_all(pin_yaml.as_bytes())
+                .await
+                .map_err(|e| StewardError::Aborted(format!("write graft pin: {}", e)))?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|e| StewardError::Aborted(format!("close graft pin: {}", e)))?;
             Ok(())
         },
     )

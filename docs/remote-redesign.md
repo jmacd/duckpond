@@ -280,6 +280,86 @@ These elaborate the migration described in
 | **CA3** | **Switch sync to commit-DAG fetch**: compare root tree hashes, descend by child hash, transfer objects the peer lacks; frontier becomes a single commit hash. | `crates/sync-remote/src/remote.rs` push/pull; `remote_adapter.rs` `apply_pulled_bundle` | run object-graph `verify` next to `verify_against_remote`; require parity |
 | **CA4** | **Retire bundle/frontier** once parity holds: drop `partition_checksums` from the bundle, the per-pond `seq` allocator's frontier role, and `Ship::compact`'s checksum-invariance assertions; `fsck` becomes the CAS-invariant scrub (design Section 6.1). | `remote_adapter.rs:536,738`; `persistence.rs` seq allocator; `ship.rs:920,989`; `fsck.rs` | bundle path removed only after CA3 parity is demonstrated |
 
+### Design decisions carried into these phases
+
+These are settled in `docs/content-addressed-pond-design.md` Section 11 and
+are assumed by the phase detail below:
+
+- **D1** -- the tree-hash table is keyed `(pond_id, node_id, version)` at rest
+  (a per-node index, lifecycle identical to existing versioning, no GC);
+  content-addressing happens **on the wire** because the row values are
+  hashes. True at-rest CAS is deferred.
+- **D2** -- the tree wire format and the dynamic-node config bytes start with
+  the simplest reasonable encoding and are **not frozen**: a clean reset is
+  allowed (no legacy ponds), so formats can be improved by a coordinated reset
+  of all syncing ponds. Config bytes are hashed **as-is**, no canonicalization.
+- **D3** -- tree hashes are **persisted at commit**, not recomputed at compare.
+  This is forced by the log unification: the commit's `root_tree_hash` is the
+  transparency-log leaf and must exist at commit time.
+- **D4** -- dynamic / read-time-computed nodes hash `blake3(stored config
+  bytes)` (the recipe); tree equality means recipe equality, not output
+  equality; generated children are not folded.
+- **D5** (open, deferred) -- checkpoint cadence and the SHA-256 publish format,
+  deferred with signing. Not on the CA1-CA4 path.
+
+The **commit record is simultaneously the top of the content tree and the leaf
+of the transparency log** (design Sections 5.3, 7). CA1-CA4 deliver the SPACE
+layer and content-addressed sync; the TIME layer (the SHA-256 tile log over
+the same commit spine) is a later, separate arc that needs no change to the
+spine CA1 writes.
+
+### Phase detail
+
+**CA1 -- content objects at commit time.** Compute, during each write
+transaction: `blob = blake3(version bytes)`; `tree = blake3(sorted (name,
+entry_type, child_hash))` with the D4 `child_hash` rule table; and a `commit =
+(root_tree_hash, parent_commit_hash, provenance)`. Persist tree hashes into the
+single `pond_id`-partitioned tree-hash table, **one parquet file per
+transaction**, folding only the touched ancestor chain (D1, D3). The object
+layer is **additive**: existing per-partition checksums stay authoritative and
+nothing in sync depends on the objects yet.
+*Acceptance:* (a) recomputing `root_tree_hash` from scratch over a corpus
+equals the incrementally persisted value; (b) two ponds that ingest identical
+content produce identical `root_tree_hash` regardless of `pond_id`; (c) a deep
+write adds exactly one file to the tree-hash table and rewrites no ancestor
+partition.
+
+**CA2 -- provenance into the commit object.** Attach `pond_id, seq, time,
+author, CLI args` to the commit object, mirroring today's `pond_txn` blob in
+Delta `commitInfo`. The control table is unchanged this phase.
+*Touchpoints:* `crates/tlogfs/src/txn_metadata.rs`, the `persistence.rs`
+reconstruct path. *Acceptance:* commit provenance reconstructs byte-equal to
+the existing `pond_txn`-derived control records.
+
+**CA3 -- sync becomes commit-DAG fetch.** Compare tip commit hashes; equal
+`root_tree_hash` means identical, else descend by `child_hash` to the divergent
+subtrees in O(difference). Transfer the objects the peer lacks by hash (blobs
+directly; trees reconstructed from the tree-hash table joined with the
+directory snapshot), deduped on the wire (D1). The frontier becomes a **single
+commit hash per ref**; the per-pond `seq` frontier role and the per-partition
+checksum list are no longer needed for sync but remain until CA4.
+*Touchpoints:* `crates/sync-remote/src/remote.rs` push/pull,
+`remote_adapter.rs` `apply_pulled_bundle`. *Parity gate (the safety
+property):* run object-graph `verify` next to `verify_against_remote` and
+require agreement on **both** the identical/divergent verdict **and** the set
+of transferred objects, across the full replication testsuite, before any CA4
+removal. *Acceptance:* object-graph sync yields byte-identical replicas to the
+bundle path on every existing replication test, and its divergence
+localization matches the bundle path's divergence boundary.
+
+**CA4 -- retire bundle/frontier.** Once CA3 parity holds: drop
+`partition_checksums` from the bundle, retire the per-pond `seq` allocator's
+frontier role, remove `Ship::compact`'s checksum-invariance assertions, and
+make `fsck` the **CAS-invariant scrub** -- re-hash each object reachable from a
+ref, verify `name == hash`, verify large-blob byte-range chains, and check
+reachability (design Section 6.1). Compaction becomes an honestly recorded
+**rewrite commit** with no invariance assertion. Per the pure-reset decision
+there is **no on-disk migration**: new ponds use the object model from genesis
+and the bundle path is hard-removed. *Touchpoints:* `remote_adapter.rs`,
+`persistence.rs` seq allocator, `ship.rs`, `fsck.rs`. *Acceptance:* the bundle
+path is gone, all replication/verify tests pass on the object path alone, and
+the `fsck` scrub detects injected single-byte corruption.
+
 ### Relationship to "CRDT-style symmetric ponds" (Out of scope, below)
 
 The commit DAG delivered in CA3 is the prerequisite that item was waiting

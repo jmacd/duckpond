@@ -6,7 +6,7 @@
 
 use crate::{
     PondTxnMetadata, StewardError,
-    control_table::{ControlTable, TransactionType},
+    control_table::{CommitSpine, ControlTable, TransactionType},
     write_lock::WriteLockGuard,
 };
 use log::{debug, error, info};
@@ -17,6 +17,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tinyfs::FS;
 use tlogfs::transaction_guard::TransactionGuard;
+
+/// Reserved directory-entry name of the pond's node-manifest index node under
+/// the root.  Paired with the reserved [`tinyfs::INDEX_NODE_UUID`]; excluded
+/// from the content-tree fold and node manifest (design
+/// `docs/incremental-content-tree-design.md` Section 3).
+const INDEX_NODE_NAME: &str = ".pond-node-index";
+
+/// Reserved directory-entry name of the pond's authoritative commit-log node
+/// under the root.  Paired with the reserved [`tinyfs::LOG_NODE_UUID`]; each
+/// version is one transparency-log leaf (one encoded commit object).  Excluded
+/// from the content-tree fold and hidden from enumeration (design
+/// `docs/incremental-content-tree-design.md` Section 10, Decision D9).
+const LOG_NODE_NAME: &str = ".pond-commit-log";
 
 /// Configuration for a post-commit factory to be executed
 struct PostCommitFactoryConfig {
@@ -296,6 +309,25 @@ impl<'a> StewardTransactionGuard<'a> {
             )))
         })?;
 
+        // Incremental content tree (Phase 2, Approach A): persist the pond's
+        // node manifest into the reserved index node as part of this same
+        // transaction, before it is finalized.  Only write transactions that
+        // actually changed something get an index-node version; a read
+        // transaction (or a no-op write) leaves it untouched.
+        let mut in_txn_spine: Option<CommitSpine> = None;
+        if self.transaction_type == TransactionType::Write {
+            let (pending_records, modified_dirs) = data_tx.state()?.pending_operation_counts();
+            if pending_records > 0 || modified_dirs > 0 {
+                in_txn_spine = self
+                    .write_reserved_nodes(
+                        &data_tx,
+                        self.txn_meta.txn_seq,
+                        self.txn_meta.user.args.join(" "),
+                    )
+                    .await?;
+            }
+        }
+
         let commit_result = data_tx.commit().await;
 
         // Step 3: Record transaction lifecycle in control table based on result
@@ -312,25 +344,28 @@ impl<'a> StewardTransactionGuard<'a> {
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
 
-                // D5.7a: snapshot the post-commit partition checksums for
-                // the local pond_id so that DataCommitted records the
-                // exact value `verify_against_remote` will later expect
-                // as `live`.  Reading the post-commit Delta state goes
-                // through a fresh DataFusion SessionContext, so it does
-                // not require an active transaction on `persistence`.
+                // The post-commit path records a `DataCommitted` control row.
+                // Under Decision D9 the authoritative content roots are stamped
+                // in-transaction into the commit-log node (by
+                // `write_reserved_nodes`), so this path no longer folds the
+                // content tree -- step 4b retired that second O(n) fold, leaving
+                // the incremental in-transaction fold as the sole content-root
+                // computation.  Step 5b then retired the per-partition
+                // checksums entirely: the per-directory tree hashes in the
+                // content tree subsume them.
                 let pond_id = self.control_table.pond_id_uuid();
-                let post_commit_table = persistence.table().clone();
-                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-                    post_commit_table,
-                    pond_id,
-                )
-                .await
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to snapshot partition checksums after commit: {}",
-                        e
-                    ))
-                })?;
+
+                // Content-graph spine (Decision D9): the authoritative spine was
+                // already stamped into the pond-resident commit-log node, in the
+                // same Delta transaction as the data, by `write_reserved_nodes`.
+                // The control-table copy recorded below is a disposable,
+                // rebuildable cache -- not the source of truth.
+                let commit_spine = in_txn_spine;
+
+                // The leaf appended to the transparency log is the commit
+                // object of this commit; a spine is present exactly when the
+                // reserved commit-log node got a new leaf this transaction.
+                let has_leaf = commit_spine.is_some();
 
                 self.control_table
                     .record_data_committed(
@@ -338,7 +373,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         self.transaction_type,
                         new_version,
                         duration_ms,
-                        partition_checksums,
+                        commit_spine,
                     )
                     .await
                     .map_err(|e| {
@@ -348,6 +383,19 @@ impl<'a> StewardTransactionGuard<'a> {
                     "Steward transaction {} committed (seq={}, version={})",
                     &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
+
+                // Materialize/reconcile the transparency-log tiles for this
+                // commit (Decision D5/D9).  This is a best-effort publishing
+                // step after the authoritative Delta commit: a failure here is
+                // logged but never unwinds the commit, matching the post-commit
+                // factory/remote model below.  It reconciles the tile export
+                // against the pond-resident commit-log node, so a previously
+                // dropped append (crash, I/O error, unwritable `{POND}/tlog`)
+                // self-heals on the next commit.
+                if has_leaf {
+                    self.materialize_tlog(persistence.table().clone(), pond_id)
+                        .await;
+                }
 
                 // Mark as committed
                 self.committed = true;
@@ -411,6 +459,157 @@ impl<'a> StewardTransactionGuard<'a> {
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
         }
+    }
+
+    /// Reconcile this pond's transparency-log tiles with the committed leaf
+    /// sequence and re-emit the checkpoint (design Decision D5).
+    ///
+    /// The authoritative leaf sequence is the ordered `commit_object` bytes of
+    /// the spine-bearing `DataCommitted` records in the control table; the tile
+    /// log is a derived, re-materializable export of that sequence.  Rather than
+    /// trusting `checkpoint.size`, the writer drives its next leaf position from
+    /// the committed leaf count: it replays every committed leaf the export is
+    /// missing, in commit order, so the export leaf position ends equal to the
+    /// commit count.  A dropped append therefore self-heals on the next commit
+    /// (a crash between the control record and this call, an I/O error, or an
+    /// unwritable `{POND}/tlog` leaves the export lagging until it is replayed).
+    /// Tiles ahead of the committed count are harmless and deterministically
+    /// re-derived, so the reconciliation only ever extends a lagging export.
+    ///
+    /// Failures are logged and swallowed: the transparency log is a derived
+    /// publishing artifact and must not unwind an already-committed transaction.
+    async fn materialize_tlog(&self, table: deltalake::DeltaTable, pond_id: uuid::Uuid) {
+        crate::content_tree::materialize_tlog(&self.pond_path, table, pond_id).await
+    }
+
+    /// Persist the pond's node manifest into the reserved index node as part of
+    /// this write transaction, before it is finalized (design
+    /// `docs/incremental-content-tree-design.md` Phase 2, Approach A).
+    ///
+    /// Write the pond's two reserved nodes -- the derived node-manifest INDEX
+    /// node and the authoritative commit-LOG node -- as part of this
+    /// transaction, and return the commit spine stamped into the log.
+    ///
+    /// A single in-transaction fold of the live state (committed rows plus this
+    /// transaction's pending records and modified directories) yields the node
+    /// manifest and the two content roots at once.  The manifest is written as
+    /// a new (collapsing) version of the INDEX node; the commit object -- built
+    /// from those roots and chained to the LOG node's current tip -- is appended
+    /// as a new version of the LOG node.  Both reserved nodes are excluded from
+    /// the fold, so writing them never changes `root_tree_hash`.
+    ///
+    /// Because the LOG node lands in the same Delta transaction as the data
+    /// rows, the pond is self-describing at every committed version: the
+    /// authoritative spine lives in the pond, not the disposable control table
+    /// (Decision D9).
+    async fn write_reserved_nodes(
+        &self,
+        data_tx: &TransactionGuard<'_>,
+        txn_seq: i64,
+        commit_args: String,
+    ) -> Result<Option<CommitSpine>, StewardError> {
+        use tokio::io::AsyncWriteExt;
+
+        let pond_id = self.control_table.pond_id_uuid();
+        let pond_id_str = pond_id.to_string();
+        let uncommitted = data_tx.state()?.uncommitted_live_rows().await?;
+        let committed_table = data_tx.persistence().table().clone();
+
+        let root = data_tx.root().await?;
+
+        // The prior committed manifest is the incremental fold's baseline; it is
+        // absent only at genesis, before the first content-changing commit wrote
+        // the index node.  Reading it through the working directory transparently
+        // reassembles an externalized (large) manifest.
+        let prior_manifest_bytes = if root.exists(INDEX_NODE_NAME).await {
+            Some(root.read_file_path_to_vec(INDEX_NODE_NAME).await?)
+        } else {
+            None
+        };
+
+        let inputs = crate::content_tree::incremental_spine_inputs(
+            committed_table.clone(),
+            prior_manifest_bytes,
+            uncommitted.clone(),
+            &pond_id_str,
+        )
+        .await?;
+
+        // Design step 4b oracle: the incremental roots must match a full fold of
+        // the same live state.  Always on in debug builds; in release builds it
+        // is opt-in via POND_VERIFY_FOLD (see `fold_verification_enabled`) so a
+        // high-value pond can validate every commit while other deployments pay
+        // just the O(change) incremental fold.
+        if crate::content_tree::fold_verification_enabled() {
+            let oracle = crate::content_tree::in_txn_spine_inputs(
+                committed_table.clone(),
+                uncommitted,
+                &pond_id_str,
+            )
+            .await?;
+            assert_eq!(
+                inputs.root_tree_hash, oracle.root_tree_hash,
+                "incremental root_tree_hash diverged from full fold"
+            );
+            assert_eq!(
+                inputs.node_manifest_hash, oracle.node_manifest_hash,
+                "incremental node_manifest_hash diverged from full fold"
+            );
+            assert_eq!(
+                inputs.node_manifest_root, oracle.node_manifest_root,
+                "incremental node_manifest_root diverged from full fold"
+            );
+            assert_eq!(
+                inputs.manifest_bytes, oracle.manifest_bytes,
+                "incremental manifest bytes diverged from full fold"
+            );
+        }
+
+        // Index node: one full manifest per version, collapsing so it stays at a
+        // single live version (Phase 2).
+        let mut index_writer = if root.exists(INDEX_NODE_NAME).await {
+            root.async_writer_path_collapsing_with_type(
+                INDEX_NODE_NAME,
+                tinyfs::EntryType::FilePhysicalSeries,
+            )
+            .await?
+        } else {
+            let node_id = tinyfs::NodeID::from_hex_string(tinyfs::INDEX_NODE_UUID)
+                .map_err(|e| StewardError::Content(format!("reserved index node id: {e}")))?;
+            root.create_file_with_id(INDEX_NODE_NAME, node_id).await?
+        };
+        index_writer.write_all(&inputs.manifest_bytes).await?;
+        index_writer.shutdown().await?;
+
+        // Commit-log node: the parent is the current log tip read from the
+        // committed table (this transaction's leaf is not written yet), so the
+        // new leaf chains onto the previous commit.  Each version is a distinct,
+        // permanent leaf, so this is a plain (non-collapsing) append.
+        let parent_commit_hash =
+            crate::content_tree::log_tip_commit_hash(committed_table, &pond_id_str).await?;
+        let spine = crate::content_tree::build_commit_spine(
+            parent_commit_hash,
+            inputs.root_tree_hash,
+            inputs.node_manifest_hash,
+            inputs.node_manifest_root,
+            &pond_id_str,
+            txn_seq,
+            commit_args,
+        );
+        let commit_object = hex::decode(&spine.commit_object)
+            .map_err(|e| StewardError::Content(format!("encode commit-log leaf: {e}")))?;
+        let mut log_writer = if root.exists(LOG_NODE_NAME).await {
+            root.async_writer_path_with_type(LOG_NODE_NAME, tinyfs::EntryType::FilePhysicalSeries)
+                .await?
+        } else {
+            let node_id = tinyfs::NodeID::from_hex_string(tinyfs::LOG_NODE_UUID)
+                .map_err(|e| StewardError::Content(format!("reserved log node id: {e}")))?;
+            root.create_file_with_id(LOG_NODE_NAME, node_id).await?
+        };
+        log_writer.write_all(&commit_object).await?;
+        log_writer.shutdown().await?;
+
+        Ok(Some(spine))
     }
 
     /// Run post-commit factories after a successful write transaction
@@ -848,6 +1047,28 @@ impl<'a> StewardTransactionGuard<'a> {
         )
         .await;
 
+        // Decision D9: every content-changing guarded commit must update the
+        // reserved index and commit-log nodes so the pond's node manifest and
+        // authoritative spine stay consistent with the data written in the same
+        // Delta transaction.  A post-commit factory that produced content is
+        // such a commit, so fold its reserved nodes here -- before the commit --
+        // exactly as the primary `commit()` path does.  Skipping this left the
+        // manifest stale (missing the factory's nodes), which the next ordinary
+        // commit's incremental fold detected as a divergence from the full fold.
+        let factory_spine = {
+            let (pending_records, modified_dirs) = factory_tx.state()?.pending_operation_counts();
+            if pending_records > 0 || modified_dirs > 0 {
+                self.write_reserved_nodes(
+                    &factory_tx,
+                    factory_txn_seq,
+                    metadata.user.args.join(" "),
+                )
+                .await?
+            } else {
+                None
+            }
+        };
+
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
         let commit_result = factory_tx.commit().await;
@@ -861,24 +1082,13 @@ impl<'a> StewardTransactionGuard<'a> {
 
         match commit_result {
             Ok((Some(new_version), persistence)) => {
-                // Snapshot partition checksums for the local pond_id so
-                // replication's bundle Checksum rows match what
-                // `verify_against_remote` will later expect.  Reading the
-                // post-commit Delta state goes through a fresh
-                // SessionContext, so no active transaction is required.
-                let pond_id_uuid = self.control_table.pond_id_uuid();
-                let post_commit_table = persistence.table().clone();
-                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-                    post_commit_table,
-                    pond_id_uuid,
-                )
-                .await
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to snapshot partition checksums for post-commit factory: {}",
-                        e
-                    ))
-                })?;
+                // Partition checksums are retired (Decision D9, step 5b): the
+                // per-directory tree hashes in the content tree subsume them.
+                //
+                // The factory commit appended a commit-log leaf exactly when it
+                // wrote reserved nodes (content changed).  Record its spine into
+                // the disposable control-table cache and reconcile the tlog.
+                let has_leaf = factory_spine.is_some();
 
                 // DataCommitted + Completed (factory txn) + PostPush* (parent)
                 // in a single batched control-table commit.
@@ -889,7 +1099,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         execution_seq,
                         Some(new_version),
                         duration_ms,
-                        partition_checksums,
+                        factory_spine,
                         outcome,
                     )
                     .await
@@ -899,6 +1109,11 @@ impl<'a> StewardTransactionGuard<'a> {
                             e
                         ))
                     })?;
+                if has_leaf {
+                    let pond_id = self.control_table.pond_id_uuid();
+                    self.materialize_tlog(persistence.table().clone(), pond_id)
+                        .await;
+                }
                 debug!(
                     "Post-commit factory transaction {} committed (seq={}, version={})",
                     &metadata.user.txn_id, factory_txn_seq, new_version
@@ -915,7 +1130,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         execution_seq,
                         None,
                         duration_ms,
-                        Default::default(),
+                        None,
                         outcome,
                     )
                     .await
@@ -1049,16 +1264,48 @@ impl<'a> StewardTransactionGuard<'a> {
 
         for (name, attachment) in to_push {
             info!("post-commit auto-push: {} -> {}", name, attachment.url);
-            match crate::push_pending_to_remote(ship, &attachment).await {
+            if attachment.url.starts_with("s3://") {
+                sync_store::register_s3_handlers();
+            }
+            let storage_options = match attachment.to_storage_options() {
+                Ok(o) => o,
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} bad storage options: {}", name, e);
+                    continue;
+                }
+            };
+            let mut remote = match sync_store::ContentRemote::open_at_url(
+                &attachment.url,
+                storage_options,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} open failed: {}", name, e);
+                    continue;
+                }
+            };
+            match crate::push_content_to_remote(ship, &mut remote, "main").await {
                 Ok(outcome) => {
+                    let tip_hex = outcome.tip.to_hex();
                     info!(
-                        "post-commit auto-push: {} done (pushed={}, skipped={}, range={}..={})",
-                        name,
-                        outcome.pushed,
-                        outcome.skipped,
-                        outcome.previous_last_pushed + 1,
-                        outcome.upper_seq
+                        "post-commit auto-push: {} done (objects_pushed={}, tip={})",
+                        name, outcome.objects_pushed, tip_hex
                     );
+                    // Record the per-ref frontier we last pushed (CA3 tip hash,
+                    // replacing the retired per-pond seq watermark).
+                    if let Err(e) = ship
+                        .control_table_mut()
+                        .raw_config_set(&format!("last_pushed_tip:{}", attachment.url), &tip_hex)
+                        .await
+                    {
+                        log::warn!(
+                            "post-commit auto-push: {} pushed but failed to record last_pushed_tip: {}",
+                            name,
+                            e
+                        );
+                    }
                 }
                 Err(e) => {
                     log::error!("post-commit auto-push: {} failed: {}", name, e);

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control Table - thin wrapper around [`sync_steward::ControlTable`].
+//! Control Table - thin wrapper around [`crate::inner_control::ControlTable`].
 //!
 //! Built during the remote-redesign D2 substantive phase.  The rich
 //! append-only `TransactionRecord` schema previously living here has been
@@ -28,14 +28,14 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::inner_control::{
+    CommitKind, ControlRecord, ControlTable as InnerControlTable, DataCommittedMetadata,
+    RecordKind, new_txn_id,
+};
 use chrono::{DateTime, Utc};
 use datafusion::execution::context::SessionContext;
 use deltalake::DeltaTable;
 use serde::{Deserialize, Serialize};
-use sync_steward::{
-    CommitKind, ControlRecord, ControlTable as InnerControlTable, DataCommittedMetadata,
-    PartitionChecksums, RecordKind, new_txn_id,
-};
 use uuid::Uuid as StdUuid;
 
 use crate::StewardError;
@@ -83,9 +83,28 @@ struct PostCommitMetadata {
     error_message: Option<String>,
 }
 
-/// Thin wrapper over [`sync_steward::ControlTable`] exposing the
+/// Thin wrapper over [`crate::inner_control::ControlTable`] exposing the
 /// duckpond-flavored `record_*` API and caching pond identity, factory
 /// modes and settings on top of the lean `config_*` primitives.
+/// The content-graph spine recorded alongside a `DataCommitted` control
+/// record: the root tree hash this commit produced, the previous commit on
+/// the pond's linear chain (`None` at genesis), and this commit object's own
+/// hash.  Computed by [`crate::compute_content_tree_for_table`] plus a
+/// [`sync_store::content::Commit`] fold in the commit path.  See
+/// `docs/content-addressed-pond-design.md` Section 5.3.
+#[derive(Debug, Clone)]
+pub struct CommitSpine {
+    /// Hex BLAKE3 of the commit's root directory tree.
+    pub root_tree_hash: String,
+    /// Hex BLAKE3 of the parent commit, or `None` for the genesis commit.
+    pub parent_commit_hash: Option<String>,
+    /// Hex BLAKE3 of this commit object (the TIME-log leaf identity).
+    pub commit_hash: String,
+    /// Hex of the encoded commit object bytes (`Commit::encode`), retained so
+    /// the commit object can be reproduced verbatim for content-addressed push.
+    pub commit_object: String,
+}
+
 pub struct ControlTable {
     inner: InnerControlTable,
     pond_metadata: PondMetadata,
@@ -168,7 +187,7 @@ impl ControlTable {
     }
 
     /// Shared DataFusion session context with the control table
-    /// registered under [`sync_steward::TABLE_NAME`] (`"control"`).
+    /// registered under [`crate::inner_control::TABLE_NAME`] (`"control"`).
     /// JSON helper functions are registered so callers can query
     /// `metadata_json` via `json_get_str` and friends.  A fresh
     /// context is built on every call so callers always see the
@@ -183,7 +202,7 @@ impl ControlTable {
             );
         }
         if let Err(e) = ctx.register_table(
-            sync_steward::TABLE_NAME,
+            crate::inner_control::TABLE_NAME,
             Arc::new(self.inner.delta_table().clone()),
         ) {
             log::warn!(
@@ -285,58 +304,40 @@ impl ControlTable {
     }
 
     /// Record successful data filesystem commit.
-    ///
-    /// `partition_checksums` must be a snapshot of every part_id under
-    /// the local pond_id taken AFTER the data Delta commit has landed
-    /// (see [`crate::remote_adapter::compute_live_checksums_for_table`]).
-    /// The values are folded into `DataCommittedMetadata` so that
-    /// `remote-push` serializes them into the bundle's Checksum rows
-    /// and a consumer's `verify_against_remote` can match `live`
-    /// against `recorded` for native writes.  Passing an empty map
-    /// would reproduce the pre-D5.7a bug where verify spuriously
-    /// reports drift on every native write.
     pub async fn record_data_committed(
         &mut self,
         txn_meta: &PondTxnMetadata,
         _transaction_type: TransactionType,
         data_fs_version: i64,
         duration_ms: i64,
-        partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> Result<(), StewardError> {
         self.record_committed_inner(
             txn_meta,
             CommitKind::Write,
             data_fs_version,
             duration_ms,
-            partition_checksums,
+            commit_spine,
         )
         .await
     }
 
     /// Record a successful producer-side compaction commit (see
     /// [`crate::Ship::compact`]).  Identical to [`Self::record_data_committed`]
-    /// except the `commit_kind` is [`CommitKind::Compact`], so
-    /// `Remote::push` serializes the bundle's manifest as a Compact
-    /// bundle (a restart baseline) rather than an incremental Write.
-    ///
-    /// `partition_checksums` must be the post-compaction snapshot of every
-    /// part_id under the local pond_id.  Because compaction does not change
-    /// logical content, these MUST equal the pre-compaction checksums (the
-    /// caller asserts this invariant); they are folded into the bundle so a
-    /// consumer's `verify_against_remote` matches `live` against `recorded`.
+    /// except the `commit_kind` is [`CommitKind::Compact`].
     pub async fn record_compact_committed(
         &mut self,
         txn_meta: &PondTxnMetadata,
         data_fs_version: i64,
         duration_ms: i64,
-        partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> Result<(), StewardError> {
         self.record_committed_inner(
             txn_meta,
             CommitKind::Compact,
             data_fs_version,
             duration_ms,
-            partition_checksums,
+            commit_spine,
         )
         .await
     }
@@ -347,14 +348,14 @@ impl ControlTable {
         commit_kind: CommitKind,
         data_fs_version: i64,
         duration_ms: i64,
-        partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> Result<(), StewardError> {
         let record = self.data_committed_record(
             txn_meta,
             commit_kind,
             data_fs_version,
             duration_ms,
-            partition_checksums,
+            commit_spine,
         );
         self.inner.write_record(record).await.map_err(map_err)
     }
@@ -368,14 +369,23 @@ impl ControlTable {
         commit_kind: CommitKind,
         data_fs_version: i64,
         duration_ms: i64,
-        partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
     ) -> ControlRecord {
+        let (root_tree_hash, parent_commit_hash, commit_hash, commit_object) = match commit_spine {
+            Some(spine) => (
+                Some(spine.root_tree_hash),
+                spine.parent_commit_hash,
+                Some(spine.commit_hash),
+                Some(spine.commit_object),
+            ),
+            None => (None, None, None, None),
+        };
         let metadata = DataCommittedMetadata {
-            partition_checksums: partition_checksums
-                .iter()
-                .map(|(k, v)| (k.clone(), sync_steward::ChecksumValue::from(v)))
-                .collect(),
             data_delta_version: data_fs_version,
+            root_tree_hash,
+            parent_commit_hash,
+            commit_hash,
+            commit_object,
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut record = self.base_record(RecordKind::DataCommitted, txn_meta);
@@ -434,14 +444,18 @@ impl ControlTable {
         ts_micros: i64,
         data_delta_version: i64,
         include_completed: bool,
+        spine: Option<&CommitSpine>,
     ) -> Result<(), StewardError> {
         let mut begin = self.base_record(RecordKind::Begin, txn_meta);
         begin.ts_micros = ts_micros;
         self.inner.write_record(begin).await.map_err(map_err)?;
 
         let metadata = DataCommittedMetadata {
-            partition_checksums: HashMap::new(),
             data_delta_version,
+            root_tree_hash: spine.map(|s| s.root_tree_hash.clone()),
+            parent_commit_hash: spine.and_then(|s| s.parent_commit_hash.clone()),
+            commit_hash: spine.map(|s| s.commit_hash.clone()),
+            commit_object: spine.map(|s| s.commit_object.clone()),
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut committed = self.base_record(RecordKind::DataCommitted, txn_meta);
@@ -529,7 +543,7 @@ impl ControlTable {
         execution_seq: i64,
         data_fs_version: Option<i64>,
         duration_ms: i64,
-        partition_checksums: PartitionChecksums,
+        commit_spine: Option<CommitSpine>,
         outcome: Result<(), String>,
     ) -> Result<(), StewardError> {
         let mut records = Vec::with_capacity(3);
@@ -539,7 +553,7 @@ impl ControlTable {
                 CommitKind::Write,
                 version,
                 duration_ms,
-                partition_checksums,
+                commit_spine,
             ));
         }
         let mut completed = self.base_record(RecordKind::Completed, factory_meta);
@@ -617,7 +631,7 @@ impl ControlTable {
     //
     // The methods below are used by the D4 sync-remote adapter
     // (`crate::remote_adapter::ShipRemoteSteward`) and mirror the
-    // native sync_steward::Steward API exactly (raw txn_ids, no
+    // native crate::inner_control::Steward API exactly (raw txn_ids, no
     // factory_name/execution_seq attached, no key-prefix munging).
     // They are also useful for any other consumer that needs the
     // unprefixed config namespace and direct PostPush lifecycle.
@@ -630,17 +644,84 @@ impl ControlTable {
         pond_id_to_std(&self.pond_metadata.pond_id)
     }
 
-    /// Borrow the underlying `sync_steward::ControlTable` for
+    /// Borrow the underlying `crate::inner_control::ControlTable` for
     /// adapters that need to call its native API directly (e.g.
     /// `data_committed_record(pond_id, txn_seq)` from the
     /// sync-remote adapter).
     #[must_use]
-    pub fn inner(&self) -> &sync_steward::ControlTable {
+    pub fn inner(&self) -> &crate::inner_control::ControlTable {
         &self.inner
     }
 
-    /// Mutable view of the underlying `sync_steward::ControlTable`.
-    pub fn inner_mut(&mut self) -> &mut sync_steward::ControlTable {
+    /// Resolve the content-graph commit hash recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn commit_hash_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .commit_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the content-graph root tree hash recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn root_tree_hash_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .root_tree_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the content-graph parent commit hash recorded at the local
+    /// pond's `txn_seq`.  Returns `None` for the genesis commit, an unstamped
+    /// record, or when no `DataCommitted` record exists at that seq.
+    pub async fn parent_commit_hash_at(
+        &self,
+        txn_seq: i64,
+    ) -> Result<Option<String>, StewardError> {
+        self.inner
+            .parent_commit_hash_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Resolve the encoded commit object bytes recorded at the local pond's
+    /// `txn_seq`.  Returns `None` if no `DataCommitted` record exists at that
+    /// seq or it predates / skipped the content-graph spine.
+    pub async fn commit_object_at(&self, txn_seq: i64) -> Result<Option<String>, StewardError> {
+        self.inner
+            .commit_object_at(self.pond_id_uuid(), txn_seq)
+            .await
+            .map_err(map_err)
+    }
+
+    /// The authoritative transparency-log leaf sequence for the local pond: the
+    /// encoded commit-object bytes (hex) of every spine-bearing `DataCommitted`
+    /// record, in commit order.  The tile export is reconciled against this
+    /// sequence (design Decision D5); see [`crate::StewardTransactionGuard`]'s
+    /// `materialize_tlog`.
+    pub async fn commit_objects_in_order(&self) -> Result<Vec<String>, StewardError> {
+        self.inner
+            .commit_objects_in_order(self.pond_id_uuid())
+            .await
+            .map_err(map_err)
+    }
+
+    /// The highest local `txn_seq` that stamped a content-graph commit spine:
+    /// the pond's content tip.  Content-preserving transactions (compaction)
+    /// record no spine, so their seq is skipped; push and verify resolve the
+    /// tip through this method so a compaction seq never mis-resolves as the
+    /// tip.  Returns `None` if the pond has no spine-bearing commit.
+    pub async fn latest_spine_seq(&self) -> Result<Option<i64>, StewardError> {
+        self.inner
+            .latest_spine_seq(self.pond_id_uuid())
+            .await
+            .map_err(map_err)
+    }
+
+    /// Mutable view of the underlying `crate::inner_control::ControlTable`.
+    pub fn inner_mut(&mut self) -> &mut crate::inner_control::ControlTable {
         &mut self.inner
     }
 
@@ -729,7 +810,7 @@ impl ControlTable {
 
     /// Prune local-pond lifecycle history at or below `horizon_seq`,
     /// leaving `Setting` rows intact.  Thin wrapper over
-    /// [`sync_steward::ControlTable::prune_below`] scoped to the local
+    /// [`crate::inner_control::ControlTable::prune_below`] scoped to the local
     /// pond_id.  Returns the number of rows deleted.  The caller must
     /// run a checkpoint + vacuum afterwards to reclaim disk space.
     pub async fn prune_below(&mut self, horizon_seq: i64) -> Result<usize, StewardError> {
@@ -837,7 +918,7 @@ fn pond_id_to_std(id: &uuid7::Uuid) -> StdUuid {
     StdUuid::from_bytes(*id.as_bytes())
 }
 
-fn map_err(e: sync_steward::StewardError) -> StewardError {
+fn map_err(e: crate::inner_control::StewardError) -> StewardError {
     StewardError::ControlTable(format!("{}", e))
 }
 
@@ -1026,13 +1107,7 @@ mod tests {
         assert_eq!(table.get_last_write_sequence().await.unwrap(), 0);
 
         table
-            .record_data_committed(
-                &txn_meta,
-                TransactionType::Write,
-                7,
-                12,
-                PartitionChecksums::new(),
-            )
+            .record_data_committed(&txn_meta, TransactionType::Write, 7, 12, None)
             .await
             .unwrap();
         assert_eq!(table.get_last_write_sequence().await.unwrap(), 1);

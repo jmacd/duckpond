@@ -398,7 +398,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -440,7 +440,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -480,7 +480,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -538,7 +538,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -588,7 +588,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -714,7 +714,7 @@ impl OplogEntry {
             factory: Some(factory_type.to_string()), // Factory type identifier
             format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }
@@ -910,7 +910,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::FullDir, // Full directory snapshot
             txn_seq,
-            pond_id: String::new(),
+            pond_id: id.pond_id().to_string(),
             bao_outboard: None,
             collapsed_through: None,
         }

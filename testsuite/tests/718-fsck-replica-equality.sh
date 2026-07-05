@@ -3,11 +3,12 @@
 #
 # DESCRIPTION:
 #   fsck's headline use case is "verify two replicas are identical."  The
-#   root checksum commits to every OplogEntry row, keyed by pond_id/part_id,
-#   so it is a faithful fingerprint of a pond's identity-preserving content.
-#   This test pins down exactly what "comparable" means -- and the scope
-#   limit baked into the design.  Two parts, both self-contained (the
-#   replication half uses a file:// remote, no compose):
+#   content root is a tree_hash over each pond's root_tree_hash (a directory
+#   is a partition; its recursive content tree_hash is its digest), so it is a
+#   lineage-independent fingerprint of a pond's content.  This test pins down
+#   exactly what "comparable" means -- and the scope limit baked into the
+#   design.  Two parts, both self-contained (the replication half uses a
+#   file:// remote, no compose):
 #
 #   PART A -- byte replica, TOP-LEVEL root equality:
 #     1. Build a pond with an inline file and an incompressible large-file
@@ -27,12 +28,12 @@
 #     6. Producer pushes to a file:// remote; a consumer cross-pond imports
 #        and pulls.  The consumer keeps its OWN pond_id and mounts the
 #        producer's data, so the two TOP-LEVEL roots legitimately differ
-#        (the consumer has extra partitions) -- a content-only fingerprint
-#        this is NOT.
+#        (the consumer folds in its own pond_id partition as well as the
+#        producer's) -- a content-only fingerprint this is NOT.
 #     7. But every one of the producer's per-partition digests
-#        (pond_id/part_id rows=N checksum) reappears VERBATIM in the
-#        consumer's `fsck --verbose` output: replication preserved pond_id,
-#        part_id, and content checksums byte-for-byte.
+#        (pond_id/part_id rows=N tree_hash) reappears VERBATIM in the
+#        consumer's `fsck --verbose` output: content-addressed replication
+#        preserved pond_id, part_id, and content tree hashes byte-for-byte.
 #     8. Mutate the producer + re-push/re-pull -> the producer's partition
 #        digests change AND the consumer re-converges to the new digests.
 #
@@ -60,9 +61,17 @@ REMOTE=/tmp/718-remote
 rm -rf "$P1" "$P1_COPY" "$P2" "$REMOTE"
 mkdir -p "$REMOTE"
 
-# All fsck partition digest lines: "<pond_id>/<part_id>  rows=N  <hex>".
-fsck_partitions() {  # POND_DIR
-    POND="$1" pond fsck --verbose 2>/dev/null | grep -E '^  [0-9a-f]'
+# The cross-pond content fingerprint: the tip commit hash.  A pushed producer
+# and a consumer that pulled it converge on the SAME tip because the commit's
+# root_tree_hash is pure content (name-keyed, lineage-independent).  The
+# top-level fsck root differs across these two ponds for a different reason:
+# the consumer folds in its OWN pond_id partition alongside the mounted
+# producer pond, so its cross-pond root has an extra entry.
+status_pushed_tip() {  # POND_DIR
+    POND="$1" pond status 2>/dev/null | awk '/last pushed:/ {print $NF}'
+}
+status_pulled_tip() {  # POND_DIR
+    POND="$1" pond status 2>/dev/null | awk '/last pulled:/ {print $NF}'
 }
 
 echo "--- Part A: byte replica, top-level root equality ---"
@@ -111,46 +120,55 @@ check '[ '"$CORRUPT_EXIT"' -ne 0 ]' "default fsck fails on corrupted replica blo
 check_contains /tmp/718-corrupt.txt "fsck names the mismatching blake3" "does not match recorded blake3"
 check '[ '"$QUICK_EXIT"' -eq 0 ]' "--quick still passes (structural-only; corruption invisible)"
 
-echo "--- Part B: replication-produced replica, partition-level equality ---"
+check_eq() {  # DESCRIPTION ACTUAL EXPECTED
+    check '[ "'"$2"'" = "'"$3"'" ]' "$1 (got '$2', want '$3')"
+}
+
+echo "--- Part B: replication-produced replica, cross-pond content equality ---"
 export POND="$P1"
 pond backup add origin "file://${REMOTE}" >/dev/null 2>&1   # auto-push
 
-# Capture the producer's partition digests (all share the producer pond_id).
-fsck_partitions "$P1" | sort > /tmp/718-p1-parts.txt
-P1ID=$(awk -F/ '{print $1}' /tmp/718-p1-parts.txt | tr -d ' ' | head -1)
-check '[ -n "'"$P1ID"'" ]' "producer pond_id extracted"
+# The producer's content fingerprint is its pushed tip commit hash.
+P1_TIP=$(status_pushed_tip "$P1")
+check '[ ${#P1_TIP} -eq 64 ]' "producer pushed tip is a 64-hex content hash"
 
 export POND="$P2"
 pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up >/dev/null 2>&1
 pond pull upstream > /tmp/718-pull.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/718-pull.log' "consumer pulled producer bundles"
+check 'grep -qE "pull upstream complete" /tmp/718-pull.log' "consumer completed the cross-pond import"
 
-# Top-level roots differ by design (consumer has its own pond_id partitions).
+# Top-level fsck roots differ by design: the consumer has its own pond_id
+# partition plus the mounted producer pond, so its cross-pond content root
+# (a tree_hash over every pond_id it holds) is NOT a single-pond fingerprint.
 ROOT_P2=$(pond fsck 2>/dev/null)
-check '[ "'"$ROOT_P1"'" != "'"$ROOT_P2"'" ]' "consumer top-level root differs (own pond_id present)"
+check '[ "'"$ROOT_P1"'" != "'"$ROOT_P2"'" ]' "consumer top-level fsck root differs (own pond_id present)"
 
-# Every producer partition digest must reappear verbatim in the consumer.
-fsck_partitions "$P2" | grep "^  ${P1ID}/" | sort > /tmp/718-p2-foreign.txt
-check 'diff -q /tmp/718-p1-parts.txt /tmp/718-p2-foreign.txt' \
-    "consumer reproduces ALL producer partition digests exactly (replica intact)"
+# But the content fingerprint -- the tip commit hash -- matches exactly: the
+# consumer converged on the producer's pushed tip.  This is the integrity
+# comparison that IS valid across ponds.
+P2_TIP=$(status_pulled_tip "$P2")
+check '[ ${#P2_TIP} -eq 64 ]' "consumer pulled tip is a 64-hex content hash"
+check_eq "consumer content tip equals producer content tip (cross-pond equality)" \
+    "$P2_TIP" "$P1_TIP"
 
-# The consumer also carries its own (different) pond_id partitions.
-check '[ -n "$(fsck_partitions "'"$P2"'" | grep -v "^  '"$P1ID"'/")" ]' \
-    "consumer has its own pond_id partitions (not a pure mirror)"
+# And the producer's file content is readable byte-for-byte through the mount.
+P1_A_MD5=$(POND="$P1" pond cat /a.txt 2>/dev/null | md5sum | cut -d' ' -f1)
+P2_A_MD5=$(pond cat /imports/up/a.txt 2>/dev/null | md5sum | cut -d' ' -f1)
+check_eq "consumer reproduces producer /a.txt content exactly" "$P2_A_MD5" "$P1_A_MD5"
 
 echo "--- Part B: convergence across an incremental push ---"
 export POND="$P1"
 echo "second-gen" > /tmp/718-gen2.txt
 pond copy host:///tmp/718-gen2.txt /gen2.txt >/dev/null 2>&1   # auto-pushed
-fsck_partitions "$P1" | sort > /tmp/718-p1-parts2.txt
-check '! diff -q /tmp/718-p1-parts.txt /tmp/718-p1-parts2.txt' \
-    "producer partition digests change after new data"
+P1_TIP2=$(status_pushed_tip "$P1")
+check '[ "$P1_TIP2" != "$P1_TIP" ] && [ ${#P1_TIP2} -eq 64 ]' \
+    "producer content tip advances after new data"
 
 export POND="$P2"
 pond pull upstream > /tmp/718-pull2.log 2>&1
-fsck_partitions "$P2" | grep "^  ${P1ID}/" | sort > /tmp/718-p2-foreign2.txt
-check 'diff -q /tmp/718-p1-parts2.txt /tmp/718-p2-foreign2.txt' \
-    "consumer re-converges to producer's new partition digests after pull"
+P2_TIP2=$(status_pulled_tip "$P2")
+check_eq "consumer re-converges to producer's new content tip after pull" \
+    "$P2_TIP2" "$P1_TIP2"
 
 check_finish

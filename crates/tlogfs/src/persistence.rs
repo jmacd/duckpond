@@ -927,6 +927,61 @@ impl OpLogPersistence {
         &self.path
     }
 
+    /// Read the full content of an externalized large file by its BLAKE3 hash.
+    ///
+    /// Returns the reconstructed bytes from `_large_files/`. Errors if no
+    /// externalized blob with the given hash exists or if it cannot be read.
+    pub async fn read_large_file_bytes(&self, blake3: &str) -> Result<Vec<u8>, TLogFSError> {
+        use tokio::io::AsyncReadExt;
+        let path = crate::large_files::find_large_file_path(&self.path, blake3)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("locate large file {blake3}: {e}")))?
+            .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: format!("_large_files/blake3={blake3}"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "large file not found"),
+            })?;
+        let mut reader = crate::large_files::ParquetFileReader::new(path.clone())
+            .await
+            .map_err(|e| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        let mut buf = Vec::new();
+        let _ = reader
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("read large file {blake3}: {e}")))?;
+        Ok(buf)
+    }
+
+    /// Open a streaming reader for an externalized large file by BLAKE3 hash.
+    ///
+    /// Yields raw bytes (the file content, not the parquet wrapper) without
+    /// loading the whole blob into memory.  Errors if no externalized blob with
+    /// the given hash exists.
+    pub async fn open_large_file_reader_by_hash(
+        &self,
+        blake3: &str,
+    ) -> Result<crate::large_files::ParquetFileReader, TLogFSError> {
+        let path = crate::large_files::find_large_file_path(&self.path, blake3)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("locate large file {blake3}: {e}")))?
+            .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: format!("_large_files/blake3={blake3}"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "large file not found"),
+            })?;
+        crate::large_files::ParquetFileReader::new(path.clone())
+            .await
+            .map_err(|e| TLogFSError::LargeFileNotFound {
+                blake3: blake3.to_string(),
+                path: path.display().to_string(),
+                source: e,
+            })
+    }
+
     /// Query OpLog records by transaction sequence for testing
     ///
     /// Returns tuples of (node_id_hex, part_id_hex, version) for verification purposes.
@@ -1281,16 +1336,21 @@ impl State {
     ) -> Result<Vec<FileID>, TLogFSError> {
         let inner = self.inner.lock().await;
         let series = EntryType::FilePhysicalSeries.as_str();
+        // The reserved commit-log node is a series whose every version is a
+        // permanent transparency-log leaf (Decision D9); it must never be
+        // collapsed, so it is excluded from candidacy here.
+        let log_node = tinyfs::LOG_NODE_UUID;
         let sql = format!(
             "SELECT t.pond_id AS pond_id, t.part_id AS part_id, t.node_id AS node_id \
              FROM delta_table t \
              JOIN ( \
                  SELECT part_id, node_id, MAX(COALESCE(collapsed_through, -1)) AS k \
                  FROM delta_table \
-                 WHERE file_type = '{series}' \
+                 WHERE file_type = '{series}' AND node_id != '{log_node}' \
                  GROUP BY part_id, node_id \
              ) m ON t.part_id = m.part_id AND t.node_id = m.node_id \
              WHERE t.file_type = '{series}' AND t.size > 0 AND t.version > m.k \
+               AND t.node_id != '{log_node}' \
              GROUP BY t.pond_id, t.part_id, t.node_id \
              HAVING COUNT(*) > {threshold}"
         );
@@ -1399,6 +1459,39 @@ impl State {
         }
     }
 
+    /// Synthesize the uncommitted live rows of the current transaction: every
+    /// pending file/series record plus a full-snapshot row for each in-memory
+    /// directory modified this transaction.  Combined with the committed Delta
+    /// rows, this is exactly the post-commit live state, so the steward content
+    /// fold can run before the transaction is finalized (design
+    /// `docs/incremental-content-tree-design.md` Section 4, Approach A).
+    ///
+    /// Read-only: it neither flushes, allocates versions, nor mutates any
+    /// transaction state.  Synthesized directory rows carry `version = i64::MAX`
+    /// so a latest-wins fold prefers them over any committed row for the same
+    /// node; the value is otherwise unused because the fold hashes directory
+    /// content, not version numbers.
+    pub async fn uncommitted_live_rows(&self) -> Result<Vec<OplogEntry>, TLogFSError> {
+        let inner = self.inner.lock().await;
+        let mut rows: Vec<OplogEntry> = inner.records.clone();
+        let now = Utc::now().timestamp_micros();
+        for (dir_id, dir_state) in &inner.directories {
+            if !dir_state.modified {
+                continue;
+            }
+            let entries: Vec<DirectoryEntry> = dir_state.mapping.values().cloned().collect();
+            let content = inner.serialize_directory_entries(&entries)?;
+            rows.push(OplogEntry::new_directory_full_snapshot(
+                *dir_id,
+                now,
+                i64::MAX,
+                content,
+                inner.txn_seq,
+            ));
+        }
+        Ok(rows)
+    }
+
     /// Get the factory name for a specific node from the oplog
     /// Returns None if the node has no associated factory (static files/directories)
     pub async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {
@@ -1477,6 +1570,15 @@ impl PersistenceLayer for State {
             .await
             .create_directory_node(id, self.clone())
             .await
+    }
+
+    async fn initialize_foreign_root(&self, pond_id: uuid7::Uuid) -> TinyFSResult<()> {
+        self.inner
+            .lock()
+            .await
+            .initialize_root_directory(pond_id)
+            .await
+            .map_err(error_utils::to_tinyfs_error)
     }
 
     async fn create_symlink_node(&self, id: FileID, target: &Path) -> TinyFSResult<Node> {
@@ -1631,6 +1733,7 @@ impl State {
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
         bao_outboard: Option<Vec<u8>>,
+        collapsed_through: Option<i64>,
     ) -> Result<(), TLogFSError> {
         self.inner
             .lock()
@@ -1641,6 +1744,7 @@ impl State {
                 metadata,
                 pre_allocated_version,
                 bao_outboard,
+                collapsed_through,
             )
             .await
     }
@@ -2594,7 +2698,9 @@ impl InnerState {
 
         if has_records {
             for record in &mut records {
-                record.pond_id = pond_id.clone();
+                if record.pond_id.is_empty() {
+                    record.pond_id = pond_id.clone();
+                }
             }
         }
 
@@ -2810,6 +2916,7 @@ impl InnerState {
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
         bao_outboard: Option<Vec<u8>>,
+        collapsed_through: Option<i64>,
     ) -> Result<(), TLogFSError> {
         debug!("store_file_content_ref_transactional called for node_id={id}");
 
@@ -3010,6 +3117,11 @@ impl InnerState {
         if let Some(outboard) = bao_outboard {
             entry.set_bao_outboard(outboard);
         }
+        // A pull replicating a source-side collapse stamps the merged version so
+        // the read path and content fold both drop the superseded predecessors.
+        if let Some(sentinel) = collapsed_through {
+            entry.collapsed_through = Some(sentinel);
+        }
 
         self.records.push(entry);
 
@@ -3140,14 +3252,17 @@ impl InnerState {
 
             // Create full snapshot OplogEntry
             let now = Utc::now().timestamp_micros();
-            let record = OplogEntry::new_directory_full_snapshot(
+            let mut record = OplogEntry::new_directory_full_snapshot(
                 dir_id,
                 now,
                 next_version,
                 content_bytes,
                 self.txn_seq,
             );
-
+            // Stamp the row's pond_id from the directory's own FileID so a
+            // cross-pond import's foreign-rooted rows persist under the foreign
+            // pond_id partition rather than the local committing pond.
+            record.pond_id = dir_id.pond_id().to_string();
             debug!(
                 "[NOTE] FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}",
                 record.part_id,
@@ -3168,7 +3283,6 @@ impl InnerState {
 
         Ok(())
     }
-
     /// Create a dynamic directory node with factory configuration
     /// Create a dynamic node with factory configuration (used by `mknod` command)
     ///

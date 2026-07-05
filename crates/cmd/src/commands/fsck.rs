@@ -86,7 +86,7 @@ fn print_verbose(report: &FsckReport, quick: bool) {
             p.pond_id,
             p.part_id,
             p.rows,
-            p.checksum.hex()
+            p.tree_hash.to_hex()
         );
     }
     println!();

@@ -12,9 +12,6 @@ members = [
 "crates/gitpond",
 "crates/billing",
 "crates/sync-store",
-"crates/sync-steward",
-"crates/sync-remote",
-"crates/sync-tests",
 ]
 
 [workspace.package]
@@ -40,8 +37,6 @@ utilities = { path = "crates/utilities" }
 sitegen = { path = "crates/sitegen" }
 billing = { path = "crates/billing" }
 sync-store = { path = "crates/sync-store" }
-sync-steward = { path = "crates/sync-steward" }
-sync-remote = { path = "crates/sync-remote" }
 
 anyhow = "1.0.82"
 arrow = { version = "57", default-features = false, features = ["prettyprint", "ipc"] }
@@ -97,6 +92,7 @@ serde_json = "1.0.116"
 serde_qs = "0.15"
 serde_repr = "0.1.19"
 serde_yaml = "0.9.34-deprecated"
+sha2 = "0.10"
 tempfile = "3.8"
 
 thiserror = "2.0.12"

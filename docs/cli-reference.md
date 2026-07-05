@@ -24,12 +24,13 @@
 | `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
+| `pond restore` | Bootstrap a whole-pond replica from a backup (disaster recovery) | `pond restore origin file:///mnt/backups/origin` |
 | `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
-| `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
+| `pond fsck` | Local integrity check: content checksums + content-tree root fingerprint | `pond fsck --verbose` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
+| `pond tlog verify` | Verify the transparency log (inclusion, append-only, faithfulness) (D5) | `pond tlog verify` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
-| `pond restart-from-compact` | Recover a consumer past the retention horizon (D6.4) | `pond restart-from-compact origin` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -461,9 +462,11 @@ pond remote add upstream s3://prod-bucket /imports/upstream \
     --region us-east-1 \
     --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
-# Attach a pull-mode remote as a mirror restart (after `pond init` on a
-# blank machine; the remote was created earlier with `pond backup add`
-# from the source pond).
+# Attach a pull-mode remote as a mirror restart of an EXISTING replica
+# (a pond that already carries the source pond_id).  To bootstrap a
+# replica from a blank machine, use `pond restore` instead (it stamps the
+# source pond_id first); a bare `pond remote add ... /` on a freshly
+# `pond init`-ed pond is refused on a pond_id mismatch.
 pond remote add origin file:///mnt/backups/origin /
 
 # List all remotes (both pull and backup)
@@ -555,16 +558,62 @@ pond pull upstream
 > and its `store_id` differs from the local `pond_id`, the first
 > `pond pull` automatically materializes the mount entry under the
 > configured path.  No manual seeding is required.  Mirror restarts
-> (`PATH = /`, same `store_id`) still need the
-> `ShipContext::create_pond_for_restoration` path; a CLI surface for
-> mirror restart bootstrap is tracked separately.
+> (`PATH = /`, same `store_id`) require a pond that already carries the
+> source `pond_id`; use **`pond restore`** (below) to bootstrap one from
+> a blank machine.
+
+---
+
+### pond restore
+
+Bootstrap a whole-pond replica from a backup published to a remote --
+the operator entry point for disaster recovery.
+
+`pond init` always mints a FRESH `pond_id`, so a freshly-inited pond can
+never attach its own backup as a mirror (`pond remote add ... /` refuses
+on a `pond_id` mismatch).  `pond restore` closes that gap: it discovers
+the SOURCE pond's id by opening the remote read-only, stamps a replica
+shell carrying that id, attaches the remote as a pull-mode mirror at `/`,
+and pulls the full content graph to rebuild the pond by node_id.
+
+```bash
+# Restore a whole pond from a file:// backup into the current pond dir
+pond restore origin file:///mnt/backups/origin
+
+# Restore from S3 (same credential flags as `pond backup add`)
+pond restore origin s3://my-bucket \
+    --region us-east-1 \
+    --access-key-id AKIA... \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
+```
+
+- **Refuses to run over an existing pond** -- restore bootstraps a fresh
+  replica; remove the target directory (or choose an empty one) first.
+  On any failure it removes the partially-created shell so a retry starts
+  clean.
+- After a successful restore the local pond IS the source: same
+  `pond_id` and the same content **tip commit hash** (the canonical
+  cross-replica fingerprint).  Byte-for-byte content -- including
+  external `>64KB` blobs -- is reproduced.
+- The `NAME` attachment is left configured as a mirror, so a later
+  `pond pull NAME` tracks the upstream incrementally.
+
+> The `pond fsck` content root matches across identity-preserving mirrors
+> (a byte copy, or a `pond pull` mirror that keeps the producer's `pond_id`),
+> because it hashes content, not local transaction history.  A cross-pond
+> consumer keeps its own `pond_id`, so its top-level root differs by design;
+> the tip commit hash is the canonical cross-pond fingerprint.  See
+> `pond verify`.
 
 ---
 
 ### pond verify (D6.1)
 
-Compare this pond's CURRENT live data against one or more remotes'
-recorded partition checksums.
+Compare this pond's CURRENT content tip against one or more remotes'
+published tip.  The content-addressed remote holds a single object
+closure and one tip ref per pond -- there is no `(pond_id, seq)`
+frontier -- so verify reports the commit-graph relationship between the
+local tip and the remote's published tip.
 
 ```bash
 # Verify against every attached remote
@@ -575,22 +624,24 @@ pond verify origin
 ```
 
 Output (per remote):
-- `[OK] verify <name>: live data matches remote at seq=<N>` -- consumer
-  agrees with the remote's latest bundle.
-- `[OK] verify <name>: remote has no bundles (vacuous match)` -- remote
-  is empty and so is the consumer.
-- `[MISMATCH] verify <name>: <K> partition(s) diverge from remote at seq=<N>`
-  followed by one line per mismatching partition.  If the consumer
-  agrees with a prior bundle in the remote's history, the
-  `divergence boundary: ... seq=<B>` line identifies when drift began.
+- `[OK] verify <name>: live data matches remote tip at seq=<N>` -- the
+  remote's published tip equals the local tip (up to date).
+- `[OK] verify <name>: remote tip at seq=<N> is behind local by <K> commit(s); push to catch up`
+  -- the remote's tip is an ancestor of the local tip; the producer has
+  unpushed local commits (lag, not drift).
+- `[OK] verify <name>: remote has no published tip yet (nothing pushed)`
+  -- the remote holds no ref under `main`.
+- `[OK] verify <name>: no local commits and remote is empty` -- both
+  sides are empty.
+- `[MISMATCH] verify <name>: remote tip at seq=<N> is not in this pond's history (diverged)`
+  -- the remote published a commit this pond does not have.
 
-Exit code is non-zero if any remote reports a mismatch or fails to load.
+Each line is followed by the local and remote tip commit hashes.  Exit
+code is non-zero if any remote diverges or fails to load.
 
 > Verify is symmetric: a replica bootstrapped from a remote (via
-> `pond pull` or `restart-from-compact`) verifies cleanly against that
-> remote, because the producer's `pond_init` transaction is replicated as
-> a normal bundle so the replica is byte-identical (P2-VERIFY-BOOTSTRAP-DRIFT,
-> fixed).
+> `pond pull`) verifies cleanly against that remote, because it rebuilds
+> the same content closure and tip the producer published.
 
 ---
 
@@ -598,12 +649,11 @@ Exit code is non-zero if any remote reports a mismatch or fails to load.
 
 Local, **offline** filesystem-check.  Unlike `pond verify` (which compares
 against a *remote*), `fsck` validates the pond against itself and prints a
-single deterministic **root checksum** that exhaustively fingerprints every
-row in the data table -- across every `pond_id`, including cross-pond
-imports.
+single deterministic **content root** that fingerprints the live content of
+every `pond_id` in the data table -- including cross-pond imports.
 
 ```bash
-# Print the root checksum (one line, 64 hex chars)
+# Print the content root (one line, 64 hex chars)
 pond fsck
 
 # Skip the content-rehash pass; compute only the structural root (fast)
@@ -613,49 +663,56 @@ pond fsck --quick
 pond fsck --verbose
 ```
 
-The root is a Merkle tree of Merkle trees:
+The root is a content tree of content trees.  A directory *is* a partition,
+and its recursive `tree_hash` (fold-excluding the reserved INDEX/LOG nodes)
+is its checksum; the top-level root is a `tree_hash` over the per-pond
+`root_tree_hash`es, keyed by `pond_id`:
 
 ```text
-root                                  <- fold of all partition checksums
-|- partition (pond_id, part_id) -> per-partition Merkle checksum
-|  |- row leaf = blake3(serde_json(OplogEntry))
+root                                  <- tree_hash over per-pond roots
+|- pond_id -> root_tree_hash          (that pond's content tree)
+|  |- directory (part_id) -> tree_hash
+|  |  |- child_hash of each entry (recursive)
+|  |  +- ...
 |  +- ...
 +- ...
 ```
 
-It is **layout- and compaction-independent** (it hashes row content, not
-parquet file layout), so two true replicas of the same pond produce the
-**same root hex**.  Comparing two replicas is therefore a string compare:
+It is **layout-, compaction-, and lineage-independent** (it hashes content,
+not parquet file layout or local transaction history), so two replicas of
+the same pond -- a byte copy, or a *mirror* rebuilt independently by
+`pond pull` -- produce the **same root hex**.  Comparing two replicas is
+therefore a string compare:
 
 ```bash
 pond fsck            # on replica A  ->  a1b2c3...
 pond fsck            # on replica B  ->  a1b2c3...   (identical iff in sync)
 ```
 
-> **What "replica" means here.**  The root is keyed by `pond_id`/`part_id`,
-> so equal-root comparison applies to **identity-preserving** replicas: a
-> byte copy of the pond directory, or a *mirror* restart that keeps the
-> producer's `pond_id`.  It is **not** a content-only fingerprint: two ponds
-> created independently with the same files get different random
-> `pond_id`/`part_id` UUIDs and therefore different roots.  A **cross-pond
+> **What "replica" means here.**  The top-level root folds the per-pond
+> content trees keyed by `pond_id`, so equal-root comparison applies to
+> **identity-preserving** replicas: a byte copy of the pond directory, or a
+> *mirror* that keeps the producer's `pond_id`.  It is **not** a content-only
+> fingerprint: two ponds created independently with the same files get
+> different random `pond_id`s and therefore different roots.  A **cross-pond
 > consumer** (`pond remote add ... /imports/<name>`) keeps its own `pond_id`
 > and mounts the producer's partitions, so its root differs by design --
-> compare such a consumer at the **partition** level instead: every
-> producer partition line in `pond fsck --verbose`
-> (`<pond_id>/<part_id>  rows=N  <checksum>`) reappears verbatim in the
+> compare such a consumer at the **partition** level instead: every producer
+> partition line in `pond fsck --verbose`
+> (`<pond_id>/<part_id>  rows=N  <tree_hash>`) reappears verbatim in the
 > consumer's `--verbose` output once it has pulled.
 
-**Content-checksum pass** (default; skipped with `--quick`): the row Merkle
-commits to each file's *recorded* `blake3`, but not to the bytes it points
-at.  By default `fsck` also re-hashes inline file content and re-reads every
-external `_large_files/blake3=<hash>.parquet` blob, confirming the bytes
-match their recorded `blake3`.  This catches bit-rot / blob corruption that
-the structural root alone cannot see.
+**Content-checksum pass** (default; skipped with `--quick`): the structural
+root commits to each file's *recorded* `blake3`, but not to the bytes it
+points at.  By default `fsck` also re-hashes inline file content and re-reads
+every external `_large_files/blake3=<hash>.parquet` blob, confirming the
+bytes match their recorded `blake3`.  This catches bit-rot / blob corruption
+that the structural root alone cannot see.
 
 Output:
-- Default: the root checksum on one line.
+- Default: the content root on one line.
 - `--verbose`: `Root checksum`, a per-partition digest list, and counts of
-  rows / inline content / blobs verified, ending in `Result: OK` or
+  live entries / inline content / blobs verified, ending in `Result: OK` or
   `Result: FAILED`.
 
 Exit code is non-zero if any content check fails; each failure is logged
@@ -695,6 +752,46 @@ Output sections:
 
 ---
 
+### pond tlog (D5)
+
+Inspect and verify the pond's **transparency log**: an append-only RFC 6962
+SHA-256 Merkle tree over the linear commit spine, published as C2SP
+`tlog-tiles` under `{POND}/tlog`.  Every write transaction appends one leaf
+(its commit object).  These are read-only, **offline** commands.
+
+Signing (the log's trust root) is deferred, but the log's *key-free*
+properties are fully verifiable today: `pond tlog verify` proves
+tamper-evidence and append-only growth without any key.
+
+```bash
+pond tlog show      # checkpoint, checkpoint history, tree size
+pond tlog verify    # verify the log; exit non-zero if any check fails
+```
+
+**`pond tlog show`** prints the current checkpoint (origin, tree size, root),
+the log directory, and the append-only checkpoint history (`{POND}/tlog/checkpoints`),
+one line per checkpoint ever published.
+
+**`pond tlog verify`** runs four checks and prints a `[PASS]`/`[FAIL]` line for
+each, exiting non-zero if any fails:
+- **Checkpoint reproduced** -- the level-0 tiles re-fold to the checkpoint's
+  size and root.
+- **Inclusion** -- every published leaf proves inclusion against the checkpoint
+  root (RFC 6962 inclusion proof).
+- **Append-only consistency** -- every checkpoint in the history is an
+  append-only prefix of the current tree (RFC 6962 consistency proof).
+- **Faithfulness** -- the published leaves equal `hash_leaf(commit_object)` for
+  every spine-bearing `DataCommitted` record in the control table, leaf for
+  leaf, tying the published log back to the authoritative source of truth.
+
+The published tiles are a **derived, re-materializable export** of the
+control-table commit spine.  If the export is ever dropped or lags (a crash, an
+I/O error, an unwritable `{POND}/tlog`), it self-heals on the next commit: the
+writer replays every missing leaf from the control table, so verification
+returns clean.
+
+---
+
 ### pond rebuild-control (D6.3)
 
 Reconstruct the control table from the data Delta table.  This is a
@@ -721,15 +818,22 @@ pond rebuild-control --force
   again.  The original `txn_seq`, `txn_id`, CLI args, Delta version, and
   commit timestamp are all recovered from the `pond_txn` commit
   metadata.
+- **Commit spine** -- the `commit_hash` / `root_tree_hash` /
+  `commit_object` of every content-changing commit are replayed from the
+  authoritative, pond-resident LOG node, so tip lookups and
+  content-addressed `pond push` work against a rebuilt control table.
 
 **Does NOT recover (operator follow-up required):**
 - **Remote attachments' settings** -- remote modes and
   `last_pushed_seq` / `last_pulled_seq` watermarks live only in the
   control table.  Re-attach remotes with `pond remote add` /
   `pond backup add` after a rebuild.
-- **Per-transaction partition checksums** -- not recoverable from data
-  alone, so reconstructed `DataCommitted` records carry empty checksums
-  and `pond verify` must be re-baselined.
+
+Per-transaction partition checksums are no longer recorded (retired in
+favour of the pond-resident content tree, Decision D9 step 5b), so a
+rebuilt control table is byte-equivalent to a normally committed one for
+integrity purposes -- `pond fsck` and `pond verify` both work against a
+rebuilt control table without re-baselining.
 
 > **Safety:** if a real control table already exists, the rebuild is
 > refused unless `--force` is given.  With `--force`, the existing
@@ -761,57 +865,12 @@ pond maintain --compact
 
 `--compact` compacts the pond's own-`pond_id` partitions as a **recorded,
 pushable transaction**: the merge is written to the control table as a
-`Compact` commit, so a subsequent `pond push` emits a **Compact bundle**.
-That bundle is the restart baseline used by
-[`pond restart-from-compact`](#pond-restart-from-compact-d64), and it lets
-`pond maintain --remote=<name>` retention prune the superseded `Write`
-bundles.
+`Compact` commit, so a subsequent `pond push` publishes the compacted
+content closure.
 
 Compaction never changes logical content -- duckpond snapshots each
 partition's checksum before and after the merge and aborts if they
 differ.  A run with nothing to merge is a clean no-op.
-
-> **Tip:** push before compacting (or push the compact baseline) -- the
-> Compact bundle is a full snapshot of the pond at the compacted version,
-> so consumers can restart from it alone.
-
----
-
-### pond restart-from-compact (D6.4)
-
-Recover a consumer that has fallen below a remote's retention horizon.
-
-When `pond pull` fails with `consumer is below retention horizon`
-([`BehindRetention`]), the bundles the consumer still needs have been
-pruned by retention.  The only recovery is to drop the affected pond's
-local footprint and re-apply the remote's oldest surviving **compact
-baseline**, then catch up to the latest bundle.
-
-```bash
-pond restart-from-compact <name>
-```
-
-Behavior depends on whether the remote is a mirror or a cross-pond
-import:
-
-- **Mirror** (`remote.store_id == local pond_id`): drops ALL local data
-  for the pond and rebuilds from the compact baseline.  Because the
-  `/sys/remotes/<name>` attachment and its mode/mount settings live
-  under the local pond_id, they are dropped too -- the command
-  re-persists them automatically afterwards so the remote stays usable.
-- **Cross-pond import** (`remote.store_id != local pond_id`): drops only
-  the foreign pond's footprint on the consumer; the consumer's own data
-  and any sibling imports are untouched.
-
-If the remote has no compact bundle, the command refuses with a clear
-error (nothing is dropped -- the safety check runs before any delete).
-
-> **Producing a compact baseline:** run `pond maintain --compact` on the
-> producer and then `pond push`.  Compaction is recorded as a Compact
-> transaction, so the next push emits a Compact bundle that becomes the
-> remote's restart baseline (and lets `pond maintain --remote` retention
-> prune the superseded Write bundles).  Cross-pond sources can also
-> supply a compact baseline.
 
 ---
 
@@ -1691,49 +1750,6 @@ Cross-pond import is available via `pond remote add NAME URL PATH`
 where `PATH != /` (D5.7b).  The legacy `import:` config block remains
 unused; cross-pond data is reached through the mount path rather than
 through factory-level imports.
-
-#### Emergency Recovery (duckpond-emergency)
-
-A standalone shell script for disaster recovery when the pond binary is unavailable.
-Uses only DuckDB to read backup data directly from parquet files.
-
-**Location:** `crates/cmd/scripts/duckpond-emergency`
-
-**Requirements:**
-- DuckDB CLI
-- b3sum (optional, for BLAKE3 verification)
-
-**Usage:**
-```bash
-# List all files in backup
-duckpond-emergency /path/to/backup list
-
-# Show backup metadata
-duckpond-emergency /path/to/backup info
-
-# Extract files matching pattern (SQL LIKE syntax: % = wildcard)
-duckpond-emergency /path/to/backup extract "_delta_log%" ./delta_logs/
-
-# Verify BLAKE3 checksums
-duckpond-emergency /path/to/backup verify
-
-# Export all files
-duckpond-emergency /path/to/backup export-all ./full_restore/
-```
-
-**S3/MinIO:**
-```bash
-export AWS_ENDPOINT_URL="http://localhost:9000"
-export AWS_REGION="us-east-1"
-export AWS_ACCESS_KEY_ID="minioadmin"
-export AWS_SECRET_ACCESS_KEY="minioadmin"
-duckpond-emergency s3://bucket/backup list
-```
-
-> **Note:** `duckpond-emergency` predates the D4 bundle-format change.
-> It currently assumes the legacy chunked-parquet bundle layout; it will
-> need a rewrite (or replacement) for ponds whose bundles were produced
-> by `sync_remote::Remote`.
 
 ### hydrovu
 

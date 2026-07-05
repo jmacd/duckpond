@@ -2,28 +2,25 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `pond verify [<name>]` -- compare this pond's CURRENT live data against
-//! one or more remotes' recorded partition checksums via
-//! [`sync_remote::verify_against_remote`].
+//! `pond verify [<name>]` -- compare this pond's CURRENT content tip against
+//! one or more remotes' published tip via
+//! [`steward::verify_content_against_remote`].
 //!
-//! Works for both attachment modes:
-//! * **Backup (push)**: the local pond is the producer; verify compares
-//!   the local data for the local pond_id against the backup's latest
-//!   bundle.
-//! * **Remote (pull)**: the local pond mirrors a foreign pond's data;
-//!   verify compares the foreign-pond data held locally against the
-//!   foreign remote's latest bundle.
+//! The content-addressed remote (Decision D6) holds a single object closure
+//! and one tip ref per pond -- there is no `(pond_id, seq)` frontier.  Verify
+//! therefore reports the commit-graph relationship between the local tip and
+//! the remote's published tip: up to date, the remote lagging behind unpushed
+//! local commits, an empty remote, or a real divergence.
 //!
-//! When invoked without `name`, every attached remote is verified.
-//! Each remote is processed independently; one failure does not halt
-//! the others.
+//! When invoked without `name`, every attached remote is verified.  Each
+//! remote is processed independently; one failure does not halt the others.
 #![allow(clippy::print_stdout)]
 
 use crate::commands::remote::{list_remote_names, load_remote_attachment};
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
-use steward::ShipRemoteSteward;
-use sync_remote::{Remote, RemoteVerifyReport, verify_against_remote};
+use steward::{ContentVerifyReport, ContentVerifyState, verify_content_against_remote};
+use sync_store::ContentRemote;
 
 /// Verify against `name`, or against every attached remote when `name` is
 /// `None`.
@@ -69,77 +66,64 @@ pub async fn verify_command(ship_context: &ShipContext, name: Option<String>) ->
     }
 }
 
-async fn verify_one(ship: &mut steward::Steward, name: &str) -> Result<RemoteVerifyReport> {
+async fn verify_one(ship: &mut steward::Steward, name: &str) -> Result<ContentVerifyReport> {
     let attachment = load_remote_attachment(ship, name).await?;
 
     if attachment.url.starts_with("s3://") {
-        sync_remote::register_s3_handlers();
+        sync_store::register_s3_handlers();
     }
 
     let storage_options = attachment.to_storage_options()?;
-    let remote = Remote::open_at_url(&attachment.url, storage_options)
+    let remote = ContentRemote::open_at_url(&attachment.url, storage_options)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
 
     let ship_ref = ship
-        .as_pond_mut()
+        .as_pond()
         .ok_or_else(|| anyhow!("verify requires a pond steward (not a host steward)"))?;
 
-    let adapter = ShipRemoteSteward::new(ship_ref);
-    let report = verify_against_remote(&remote, &adapter)
+    let report = verify_content_against_remote(ship_ref, &remote, "main")
         .await
         .map_err(|e| anyhow!("verify against `{}` ({}): {}", name, attachment.url, e))?;
 
     Ok(report)
 }
 
-fn print_report(name: &str, report: &RemoteVerifyReport) {
-    let header = match (report.ok, report.remote_latest_seq) {
-        (true, None) => format!(
-            "[OK] verify {}: remote has no bundles (vacuous match)",
+fn print_report(name: &str, report: &ContentVerifyReport) {
+    let seq = report
+        .remote_seq
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let header = match &report.state {
+        ContentVerifyState::BothEmpty => {
+            format!("[OK] verify {}: no local commits and remote is empty", name)
+        }
+        ContentVerifyState::RemoteEmpty => format!(
+            "[OK] verify {}: remote has no published tip yet (nothing pushed)",
             name
         ),
-        (true, Some(seq)) => format!(
-            "[OK] verify {}: live data matches remote at seq={}",
+        ContentVerifyState::UpToDate => format!(
+            "[OK] verify {}: live data matches remote tip at seq={}",
             name, seq
         ),
-        (false, None) => format!(
-            "[MISMATCH] verify {}: remote has no bundles but consumer has data",
-            name
+        ContentVerifyState::RemoteBehind { local_unpushed } => format!(
+            "[OK] verify {}: remote tip at seq={} is behind local by {} commit(s); push to catch up",
+            name, seq, local_unpushed
         ),
-        (false, Some(seq)) => format!(
-            "[MISMATCH] verify {}: {} partition(s) diverge from remote at seq={}",
-            name,
-            report.mismatches.len(),
-            seq
+        ContentVerifyState::Diverged => format!(
+            "[MISMATCH] verify {}: remote tip at seq={} is not in this pond's history (diverged)",
+            name, seq
         ),
     };
     println!("{}", header);
 
-    for m in &report.mismatches {
-        match (&m.consumer_live, &m.remote_recorded) {
-            (Some(_), None) => println!(
-                "  partition `{}`: present locally, absent on remote",
-                m.partition
-            ),
-            (None, Some(_)) => println!(
-                "  partition `{}`: present on remote, absent locally",
-                m.partition
-            ),
-            (Some(_), Some(_)) => println!(
-                "  partition `{}`: checksums differ between local and remote",
-                m.partition
-            ),
-            (None, None) => unreachable!("a mismatch must have at least one side present"),
-        }
+    if let Some(local) = report.local_tip {
+        println!("    local tip:  {}", local.to_hex());
+    } else {
+        println!("    local tip:  - (no local commits)");
     }
-
-    if let Some(boundary) = report.divergence_boundary {
-        println!(
-            "  divergence boundary: consumer last agreed with remote at seq={} (drift began after)",
-            boundary
-        );
-    } else if !report.ok && report.remote_latest_seq.is_some() {
-        println!("  divergence boundary: no prior bundle in remote history agrees with consumer");
+    match report.remote_tip {
+        Some(rt) => println!("    remote tip: {}", rt.to_hex()),
+        None => println!("    remote tip: - (no published ref)"),
     }
 }

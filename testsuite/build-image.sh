@@ -135,9 +135,6 @@ ls -lh "${BINARY_PATH}"
 # Copy binary to experiments directory for Docker build
 cp "${BINARY_PATH}" "${SCRIPT_DIR}/pond"
 
-# Copy emergency recovery script
-cp "${REPO_ROOT}/crates/cmd/scripts/duckpond-emergency" "${SCRIPT_DIR}/duckpond-emergency"
-
 # Copy vendor download script for Docker build (downloaded inside Docker, not from host)
 cp "${REPO_ROOT}/crates/sitegen/vendor/download.sh" "${SCRIPT_DIR}/vendor-download.sh"
 
@@ -158,7 +155,6 @@ ${CONTAINER_RT} build \
 
 # Clean up copied binary and scripts
 rm -f "${SCRIPT_DIR}/pond"
-rm -f "${SCRIPT_DIR}/duckpond-emergency"
 rm -f "${SCRIPT_DIR}/vendor-download.sh"
 
 echo ""

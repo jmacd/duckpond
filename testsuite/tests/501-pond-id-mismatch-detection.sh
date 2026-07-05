@@ -115,7 +115,7 @@ OUTPUT=$(attach_remote 2>&1 || true)
 echo "${OUTPUT}"
 
 if echo "${OUTPUT}" | grep -qi "does not match" \
-   && echo "${OUTPUT}" | grep -qi "foreign pond"; then
+   && echo "${OUTPUT}" | grep -qi "same pond"; then
     echo "[OK] Attach correctly refused with mismatch error"
 else
     echo "[FAIL] Expected store_id-mismatch / foreign-pond error"

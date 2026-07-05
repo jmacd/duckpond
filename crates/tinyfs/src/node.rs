@@ -23,6 +23,45 @@ pub fn root_uuid() -> Uuid {
         .expect("ROOT_UUID should be a valid UUID7")
 }
 
+/// Reserved node id for the pond's persisted node-manifest index
+/// (design `docs/incremental-content-tree-design.md` Section 3).
+///
+/// Like [`ROOT_UUID`] it is a fixed UUID7 whose entry-type nibble
+/// (byte 6 low nibble) is `7` = [`EntryType::FilePhysicalSeries`], so the
+/// reserved node is a raw multi-version byte series holding one full manifest
+/// per commit.  It lives under the root directory but is excluded from the
+/// content-tree fold and node manifest, so it never attests to itself.
+pub const INDEX_NODE_UUID: &str = "00000000-0000-7700-8000-000000000000";
+
+#[must_use]
+pub fn index_node_uuid() -> Uuid {
+    INDEX_NODE_UUID
+        .parse::<Uuid>()
+        .expect("INDEX_NODE_UUID should be a valid UUID7")
+}
+
+/// Reserved node id for the pond's authoritative commit log
+/// (design `docs/incremental-content-tree-design.md` Section 10, Decision D9).
+///
+/// Like [`INDEX_NODE_UUID`] it is a fixed UUID7 whose entry-type nibble
+/// (byte 6 low nibble) is `7` = [`EntryType::FilePhysicalSeries`], so the
+/// reserved node is a raw multi-version byte series.  Unlike the index node,
+/// each version is a distinct, permanent transparency-log leaf: it holds one
+/// encoded `commit_object` per commit and is never collapsed or compacted.
+///
+/// It is the pond-resident source of truth for the commit spine, so it is
+/// excluded from the content-tree fold and node manifest (it never attests to
+/// itself).  It lives under the root directory but is hidden from directory
+/// enumeration.
+pub const LOG_NODE_UUID: &str = "00000000-0000-7700-8000-000000000001";
+
+#[must_use]
+pub fn log_node_uuid() -> Uuid {
+    LOG_NODE_UUID
+        .parse::<Uuid>()
+        .expect("LOG_NODE_UUID should be a valid UUID7")
+}
+
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeID(Uuid);
@@ -72,6 +111,25 @@ impl NodeID {
     #[must_use]
     pub fn is_root(&self) -> bool {
         self.0 == root_uuid()
+    }
+
+    /// Whether this is the reserved node-manifest index node
+    /// ([`INDEX_NODE_UUID`]).  The index node is internal, auto-managed
+    /// infrastructure; it is filtered out of directory enumeration so it never
+    /// appears in user-facing listings (design
+    /// `docs/incremental-content-tree-design.md` Section 3).
+    #[must_use]
+    pub fn is_index(&self) -> bool {
+        self.0 == index_node_uuid()
+    }
+
+    /// Whether this is the reserved commit-log node ([`LOG_NODE_UUID`]).  Like
+    /// the index node it is internal, auto-managed infrastructure and is
+    /// filtered out of directory enumeration so it never appears in user-facing
+    /// listings (design `docs/incremental-content-tree-design.md` Section 10).
+    #[must_use]
+    pub fn is_log(&self) -> bool {
+        self.0 == log_node_uuid()
     }
 
     /// Generate a new UUID7-based NodeID

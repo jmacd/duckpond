@@ -314,23 +314,17 @@ full recovery semantics.
 
 ### Consumer fell below the retention horizon
 
-If `pond pull` fails with "consumer is below retention horizon", the
-bundles you still need were pruned by retention.  Recover by
-re-bootstrapping from the remote's oldest compact baseline:
+Under content-addressed sync there is no per-transaction bundle to prune,
+so a consumer can always recover by re-fetching the objects reachable
+from the remote's current tip:
 
 ```
-$ pond restart-from-compact upstream
+$ pond pull upstream
 ```
 
-A mirror restart drops all local data and rebuilds (the attachment is
-re-persisted automatically); a cross-pond restart drops only the foreign
-pond's footprint.
-
-> Producing a baseline: run `pond maintain --compact` on the producer and
-> `pond push`.  The compaction is pushed as a Compact bundle that becomes
-> the remote's restart baseline.  A pure duckpond mirror with no compacted
-> push (and no compacting upstream) has no baseline yet, and the command
-> reports "no compact bundle".
+A mirror re-fetch rebuilds the local content closure from the remote's
+published tip; a cross-pond pull refreshes only the foreign pond's
+footprint.
 
 ### Destructive recovery
 
@@ -407,7 +401,7 @@ $ pond status
 ### "Replica pull says 'below retention horizon'"
 
 ```
-$ pond restart-from-compact upstream
+$ pond pull upstream
 ```
 
 ### "Control table is corrupt / pond won't open"
@@ -463,7 +457,6 @@ MONITORING
 RECOVERY
   pond recover                                Resolve incomplete transactions
   pond rebuild-control [--force]              Rebuild control table from data
-  pond restart-from-compact <name>            Recover past the retention horizon
   pond emergency ...                          Destructive recovery
 ```
 
@@ -472,3 +465,70 @@ S3 options for `pond backup add` / `pond remote add`: `--region`,
 `--secret-access-key` must be a `${env:VAR}` reference (single-quoted),
 not a literal secret.  See [cli-reference.md](cli-reference.md) for the
 complete list.
+
+---
+
+## 10. Future direction: content-addressed sync
+
+> This section is **forward-looking**.  It describes the operator-visible
+> end-state of the content-addressed (CA) migration, not current behavior.
+> Nothing here ships until the parity gate in the migration plan passes.  The
+> design is in [content-addressed-pond-design.md](content-addressed-pond-design.md);
+> the phased plan and its acceptance gates are in
+> [remote-redesign.md](remote-redesign.md) (the CA1-CA4 arc).  Until then, the
+> sections above remain authoritative.
+
+Today a pond replicates as a stream of per-transaction **bundles**
+(manifest + checksums + data), and each remote tracks a `(pond_id, seq)`
+**frontier**.  Under content-addressed sync the pond becomes a store of
+immutable, hash-named objects -- blobs (file/series bytes), trees
+(directories), and commits (one per transaction, carrying provenance) -- and
+replication transfers only the objects a peer is missing.  The shipped command
+surface (`pond push` / `pull` / `verify` / `status` / `maintain`) is preserved;
+what changes is the meaning behind it.
+
+### What changes for you
+
+- **Frontier becomes a commit hash.**  "last pushed seq" in `pond status` and
+  the per-remote watermark become a single **tip commit hash** per ref.  Two
+  ponds are identical exactly when their tip commit hashes (equivalently, their
+  root tree hashes) match -- a single comparison instead of a per-partition
+  checksum list.
+
+- **Sync transfers objects, not bundles.**  Push/pull compare tip commits and
+  exchange only the blobs and trees the other side lacks, addressed by hash.
+  Identical content that already exists on the remote (even from a different
+  pond or transaction) is not re-sent.  There is no per-transaction bundle to
+  retain or prune; retention becomes "objects reachable from the commits you
+  keep."
+
+- **Verify localizes divergence.**  `pond verify` compares root tree hashes and,
+  on mismatch, descends the tree to report the **specific divergent subtree**
+  rather than a flat per-partition checksum diff.  A clean match is one hash
+  comparison.
+
+- **`fsck` / integrity becomes a CAS scrub.**  Integrity checking re-hashes each
+  reachable object and confirms `name == hash` (plus byte-range chains for
+  large blobs and reachability from a ref), replacing the two-level partition
+  checksum Merkle.  Corruption is reported as the offending object hash.
+
+- **Compaction is an ordinary rewrite commit.**  `pond maintain --compact` no
+  longer emits a special "Compact bundle restart baseline"; it records a
+  rewrite commit like any other write.  Recovering a replica that fell behind
+  becomes "fetch from any commit the producer still retains," so
+  `restart-from-compact` is subsumed by normal commit-DAG fetch.
+
+- **Cross-pond import is a graft.**  Mounting a foreign pond attaches its commit
+  chain by reference and pulls the reachable objects, instead of importing
+  per-partition bundles.  Provenance (which pond/seq/author produced a commit)
+  lives in the commit object and is still surfaced by `pond log`.
+
+### What stays the same
+
+- Single-writer-per-pond, so each pond is still a **linear commit chain** and
+  push/pull are still fast-forward (no merge).
+- The **data is canonical, the control table is disposable** -- you can still
+  rebuild local bookkeeping from the data history.
+- Credentials handling, attachment model (backup vs. remote), and the cron /
+  systemd patterns in [§7](#7-cron--systemd) are unaffected.
+

@@ -100,6 +100,34 @@ impl File for OpLogFile {
     }
 
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
+        self.build_writer(false).await
+    }
+
+    async fn async_writer_collapsing(&self) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
+        self.build_writer(true).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
+}
+
+impl OpLogFile {
+    /// Shared writer construction for [`File::async_writer`] and
+    /// [`File::async_writer_collapsing`].
+    ///
+    /// When `collapse_prior` is set the writer starts a fresh content/bao
+    /// baseline (no resume from the previous version) and, at shutdown, stamps a
+    /// `collapsed_through` sentinel so every earlier version is superseded --
+    /// used to replicate a source-side series compaction during content pull.
+    async fn build_writer(
+        &self,
+        collapse_prior: bool,
+    ) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
         // Acquire write lock and check for recursive writes
         // The main threat model here is preventing recursive scenarios where
         // a dynamically synthesized file evaluation tries to write a file
@@ -146,8 +174,11 @@ impl File for OpLogFile {
         let options = persistence.large_file_options().clone();
 
         // For FilePhysicalSeries appends, resume bao-tree state from previous version
-        // so that cumulative_blake3 is correct for all file sizes.
-        let storage = if entry_type == tinyfs::EntryType::FilePhysicalSeries
+        // so that cumulative_blake3 is correct for all file sizes. A collapsing
+        // write instead starts a fresh baseline: it replaces the prior versions
+        // rather than continuing them.
+        let storage = if !collapse_prior
+            && entry_type == tinyfs::EntryType::FilePhysicalSeries
             && allocated_version > 1
         {
             let prev_outboard = metadata.bao_outboard.as_ref().and_then(|bao_bytes| {
@@ -195,15 +226,8 @@ impl File for OpLogFile {
             entry_type,
             storage,
             allocated_version,
+            collapse_prior,
         )))
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
-        Some(self)
     }
 }
 
@@ -284,6 +308,10 @@ pub struct OpLogFileWriter {
     precomputed_metadata: Option<crate::file_writer::FileMetadata>,
     /// Pre-allocated version number for this write (allocated at writer creation)
     allocated_version: i64,
+    /// When set, the persisted row carries a `collapsed_through` sentinel equal
+    /// to `allocated_version - 1`, superseding every earlier version of this
+    /// node (see [`FileMetadataWriter::set_collapse_prior`]).
+    collapse_prior: bool,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -297,6 +325,7 @@ impl OpLogFileWriter {
         entry_type: tinyfs::EntryType,
         storage: crate::large_files::HybridWriter,
         allocated_version: i64,
+        collapse_prior: bool,
     ) -> Self {
         Self {
             storage,
@@ -308,6 +337,7 @@ impl OpLogFileWriter {
             entry_type,
             precomputed_metadata: None,
             allocated_version,
+            collapse_prior,
         }
     }
 }
@@ -463,6 +493,7 @@ impl AsyncWrite for OpLogFileWriter {
             let entry_type = this.entry_type;
             let precomputed_metadata = this.precomputed_metadata.clone();
             let allocated_version = this.allocated_version;
+            let collapse_prior = this.collapse_prior;
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -503,10 +534,12 @@ impl AsyncWrite for OpLogFileWriter {
                                 0
                             };
 
-                            let prev_bao = if prev_version > 0 {
+                            let prev_bao = if prev_version > 0 && !collapse_prior {
                                 // Get bao_outboard from metadata instead of separate method
                                 state.metadata(file_id).await.ok().and_then(|meta| meta.bao_outboard)
                             } else {
+                                // First version, or a collapsing write that starts a
+                                // fresh baseline replacing all prior versions.
                                 None
                             };
 
@@ -599,7 +632,11 @@ impl AsyncWrite for OpLogFileWriter {
                         _ => crate::file_writer::FileMetadata::Data,
                     };
 
-                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard).await
+                    // A pull replicating a source-side collapse marks the merged
+                    // version as superseding every earlier one it wrote.
+                    let collapsed_through = collapse_prior.then(|| allocated_version - 1);
+
+                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard, collapsed_through).await
                         .map_other_context("Failed to store file")
                 }.await;
 

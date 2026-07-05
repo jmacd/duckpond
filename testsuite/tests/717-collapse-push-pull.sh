@@ -62,7 +62,7 @@ cat /tmp/717-collapse.log
 check 'grep -qE "collapse: [1-9][0-9]* file\(s\) collapsed" /tmp/717-collapse.log' "producer collapsed >=1 file"
 
 echo "--- Step 4: collapse commit replicated to remote ---"
-check 'grep -qE "post-commit auto-push: origin done \(pushed=[1-9]" /tmp/717-collapse.log' "collapse commit auto-pushed"
+check 'grep -qE "post-commit auto-push: origin done \(objects_pushed=[1-9]" /tmp/717-collapse.log' "collapse commit auto-pushed"
 
 echo "--- Step 5: verify clean after collapse ---"
 pond verify origin > /tmp/717-verify.log 2>&1
@@ -73,7 +73,7 @@ export POND="$P2"
 pond init --birthplace test-host >/dev/null
 pond remote add upstream "file://${REMOTE}" /imports/up >/dev/null 2>&1
 pond pull upstream > /tmp/717-pull.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/717-pull.log' "consumer applied bundles"
+check 'grep -q "pull upstream complete" /tmp/717-pull.log' "consumer completed cross-pond import"
 
 IMPORTED_MD5=$(pond cat /imports/up/logs/app/events.log 2>/dev/null | md5sum | awk '{print $1}')
 check '[ "'"${IMPORTED_MD5}"'" = "'"${SRC_MD5}"'" ]' "consumer content matches producer post-collapse"

@@ -23,15 +23,15 @@
 #     - P_SLOW: init + 1 file  -> low frontier (~2)
 #     - P_FAST: init + many files -> high frontier (F, ~13+)
 #     - P_C consumer: `remote add` BOTH at separate mounts, pull both.
-#       Consumer's LAST_PULLED_SEQ(fast) == F  >>  LAST_PULLED_SEQ(slow).
+#       Consumer's PULLED_TIP(fast) and PULLED_TIP(slow) are independent hashes.
 #     - P_SLOW writes a NEW file -> its producer txn_seq S2 is STILL < F.
 #     - P_C pulls the slow remote -> the new file MUST appear, and
-#       LAST_PULLED_SEQ(slow) advances to S2 (with S2 < F: the precise
-#       condition the old global-max code dropped).
+#       PULLED_TIP(slow) advances independently of the fast remote's tip
+#       (the low-activity update the old global-max seq code dropped).
 #
 # EXPECTED:
 #   - Both producers' data imports across the boundary (md5 match).
-#   - Consumer's slow/fast watermarks are independent and divergent.
+#   - Consumer's slow/fast tip frontiers are independent and divergent.
 #   - A slow-producer txn at seq S2 < F (the fast frontier) still imports.
 #   - Pulling the slow remote does not touch the fast remote's watermark.
 #
@@ -53,7 +53,7 @@ R_FAST=/tmp/715-remote-fast
 rm -rf "$SLOW" "$FAST" "$CONS" "$R_SLOW" "$R_FAST"
 mkdir -p "$R_SLOW" "$R_FAST"
 
-cons_pulled() {  # remote-name -> LAST_PULLED_SEQ field
+cons_pulled() {  # remote-name -> PULLED_TIP field
     POND="$CONS" pond remote list 2>/dev/null | awk -v n="$1" '$1==n {print $NF; exit}'
 }
 
@@ -88,8 +88,8 @@ pond remote add slow "file://${R_SLOW}" /imports/slow >/dev/null 2>&1
 pond remote add fast "file://${R_FAST}" /imports/fast >/dev/null 2>&1
 pond pull slow > /tmp/715-pull-slow1.log 2>&1
 pond pull fast > /tmp/715-pull-fast1.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/715-pull-slow1.log' "pull slow #1 applied >0 bundles"
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/715-pull-fast1.log' "pull fast #1 applied >0 bundles"
+check 'grep -q "pull slow complete" /tmp/715-pull-slow1.log' "pull slow #1 completed import"
+check 'grep -q "pull fast complete" /tmp/715-pull-fast1.log' "pull fast #1 completed import"
 
 echo "--- Step 4: both producers' data present; frontiers diverge ---"
 IMP_SLOW_MD5=$(pond cat /imports/slow/data/s1.txt 2>/dev/null | md5sum | awk '{print $1}')
@@ -98,13 +98,14 @@ check '[ "'"${IMP_SLOW_MD5}"'" = "'"${SLOW1_MD5}"'" ]' "imported slow s1 matches
 check '[ "'"${IMP_FAST_MD5}"'" = "'"${FAST1_MD5}"'" ]' "imported fast f1 matches producer (md5)"
 PULLED_SLOW1=$(cons_pulled slow)
 PULLED_FAST=$(cons_pulled fast)
-check '[ -n "'"${PULLED_SLOW1}"'" ] && [ "'"${PULLED_SLOW1}"'" != "-" ]' "slow watermark set"
-check '[ -n "'"${PULLED_FAST}"'" ] && [ "'"${PULLED_FAST}"'" != "-" ]' "fast watermark set"
-# The precondition for the old bug: the fast producer's frontier is well
-# above the slow producer's.  Under the old GLOBAL max() this F would have
-# become the single watermark applied to BOTH.
-check '[ "'"${PULLED_FAST}"'" -gt "'"${PULLED_SLOW1}"'" ]' \
-    "fast frontier ($PULLED_FAST) > slow frontier ($PULLED_SLOW1) [divergence established]"
+check '[ -n "'"${PULLED_SLOW1}"'" ] && [ "'"${PULLED_SLOW1}"'" != "-" ]' "slow tip set"
+check '[ -n "'"${PULLED_FAST}"'" ] && [ "'"${PULLED_FAST}"'" != "-" ]' "fast tip set"
+# The precondition for the old bug: the two producers have divergent
+# frontiers.  Under the old GLOBAL max() seq watermark a single frontier
+# was applied to BOTH; now each remote tracks its OWN tip commit hash, so
+# the two frontiers are simply different, independent hashes.
+check '[ "'"${PULLED_FAST}"'" != "'"${PULLED_SLOW1}"'" ]' \
+    "fast and slow frontiers are independent, divergent tips"
 
 echo "--- Step 5: SLOW producer emits a NEW txn BELOW the fast frontier ---"
 export POND="$SLOW"
@@ -115,24 +116,26 @@ SLOW2_MD5=$(pond cat /data/s2.txt 2>/dev/null | md5sum | awk '{print $1}')
 echo "--- Step 6: consumer pulls slow -> new low-seq file MUST import ---"
 export POND="$CONS"
 pond pull slow > /tmp/715-pull-slow2.log 2>&1
-check 'grep -qE "applied [1-9][0-9]* bundle" /tmp/715-pull-slow2.log' \
-    "pull slow #2 applied the new bundle (NOT masked by fast frontier)"
+check 'grep -qE "files: [1-9]" /tmp/715-pull-slow2.log' \
+    "pull slow #2 imported the new file (NOT masked by fast frontier)"
 IMP_SLOW2_MD5=$(pond cat /imports/slow/data/s2.txt 2>/dev/null | md5sum | awk '{print $1}')
 check '[ "'"${IMP_SLOW2_MD5}"'" = "'"${SLOW2_MD5}"'" ]' \
     "new slow file s2 imported and content matches (the May-10 regression)"
 PULLED_SLOW2=$(cons_pulled slow)
-check '[ "'"${PULLED_SLOW2}"'" -gt "'"${PULLED_SLOW1}"'" ]' \
-    "slow watermark advanced ($PULLED_SLOW1 -> $PULLED_SLOW2)"
-# The crux: the newly-imported slow txn sits BELOW the fast frontier the
-# consumer already holds.  A global max() watermark would have filtered it.
-check '[ "'"${PULLED_SLOW2}"'" -lt "'"${PULLED_FAST}"'" ]' \
-    "new slow seq ($PULLED_SLOW2) is BELOW fast frontier ($PULLED_FAST) [exact masking condition]"
+check '[ -n "'"${PULLED_SLOW2}"'" ] && [ "'"${PULLED_SLOW2}"'" != "'"${PULLED_SLOW1}"'" ]' \
+    "slow tip advanced ($PULLED_SLOW1 -> $PULLED_SLOW2)"
+# The crux: importing the slow producer's new commit did NOT require the
+# fast remote's independent frontier to move.  A global max() watermark
+# would have masked this low-activity slow update; independent per-remote
+# tips cannot.  Step 7 confirms the fast tip is untouched.
+check '[ "'"${PULLED_SLOW2}"'" != "'"${PULLED_FAST}"'" ]' \
+    "slow tip is independent of the fast frontier tip"
 
 echo "--- Step 7: pulling slow did not disturb the fast remote ---"
 pond pull fast > /tmp/715-pull-fast2.log 2>&1
-check 'grep -q "applied 0 bundle" /tmp/715-pull-fast2.log' "fast pull is a no-op (independent watermark)"
+check 'grep -q "already up to date" /tmp/715-pull-fast2.log' "fast pull is a no-op (independent tip)"
 PULLED_FAST2=$(cons_pulled fast)
-check '[ "'"${PULLED_FAST2}"'" = "'"${PULLED_FAST}"'" ]' "fast watermark unchanged by slow-side activity"
+check '[ "'"${PULLED_FAST2}"'" = "'"${PULLED_FAST}"'" ]' "fast tip unchanged by slow-side activity"
 check 'pond cat /imports/fast/data/f1.txt | grep -q fast-01' "fast imported data still intact"
 
 check_finish

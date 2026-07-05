@@ -10,9 +10,10 @@
 //! table and `/sys/remotes/*` attachments.  It never opens a remote or
 //! touches the network, so it is safe to run frequently and on a pond
 //! whose remotes are unreachable.  Push "lag" is computed purely from
-//! local watermarks (`last_write_seq` vs `last_pushed_seq:<url>`); to
-//! cross-check against what a remote actually recorded, use
-//! `pond verify`.
+//! whose remotes are unreachable.  Push/pull state is reported as the
+//! per-ref tip commit hash last pushed/pulled (`last_pushed_tip:<url>` /
+//! `last_pulled_tip:<url>`); to cross-check against what a remote actually
+//! recorded, use `pond verify`.
 #![allow(clippy::print_stdout)]
 
 use crate::commands::remote::{list_remote_names, load_remote_attachment};
@@ -108,8 +109,8 @@ pub async fn status_command(ship_context: &ShipContext) -> Result<()> {
             .unwrap_or_default()
             .filter(|s| !s.is_empty());
 
-        let last_pushed = read_seq(&ship, &format!("last_pushed_seq:{}", attachment.url)).await;
-        let last_pulled = read_seq(&ship, &format!("last_pulled_seq:{}", attachment.url)).await;
+        let last_pushed_tip = read_tip(&ship, &format!("last_pushed_tip:{}", attachment.url)).await;
+        let last_pulled_tip = read_tip(&ship, &format!("last_pulled_tip:{}", attachment.url)).await;
 
         println!("  {}  [{}]", name, mode_str);
         println!("    url:          {}", attachment.url);
@@ -119,25 +120,15 @@ pub async fn status_command(ship_context: &ShipContext) -> Result<()> {
         }
 
         if mode.pushes() {
-            match last_pushed {
-                Some(seq) => {
-                    let lag = last_write_seq - seq;
-                    if lag <= 0 {
-                        println!("    last pushed:  {} (up to date)", seq);
-                    } else {
-                        println!("    last pushed:  {} (behind local by {} txn)", seq, lag);
-                    }
-                }
-                None => println!(
-                    "    last pushed:  - (never pushed; {} local txn pending)",
-                    last_write_seq
-                ),
+            match last_pushed_tip {
+                Some(tip) => println!("    last pushed:  {}", tip),
+                None => println!("    last pushed:  - (never pushed)"),
             }
         }
 
         if mode.pulls() {
-            match last_pulled {
-                Some(seq) => println!("    last pulled:  {}", seq),
+            match last_pulled_tip {
+                Some(tip) => println!("    last pulled:  {}", tip),
                 None => println!("    last pulled:  - (never pulled)"),
             }
         }
@@ -146,15 +137,15 @@ pub async fn status_command(ship_context: &ShipContext) -> Result<()> {
     Ok(())
 }
 
-/// Read a watermark setting and parse it as an `i64` sequence.
-/// Returns `None` if the key is unset or unparsable.
-async fn read_seq(ship: &steward::Steward, key: &str) -> Option<i64> {
+/// Read a per-ref tip commit hash setting.  Returns `None` if the key is unset
+/// or empty (the ref has never been pushed/pulled).
+async fn read_tip(ship: &steward::Steward, key: &str) -> Option<String> {
     ship.control_table()
         .raw_config_get(key)
         .await
         .ok()
         .flatten()
-        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| !v.is_empty())
 }
 
 /// Format a microsecond timestamp as a human-readable UTC string.

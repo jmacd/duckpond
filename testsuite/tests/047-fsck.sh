@@ -1,9 +1,12 @@
 #!/bin/bash
 # EXPERIMENT: `pond fsck` -- local filesystem-check.
-# DESCRIPTION: fsck computes a single deterministic root checksum over every
-#   row in the pond and re-validates content checksums (inline + external
-#   large-file blobs).  This test verifies:
-#     1. fsck prints a stable 64-hex root checksum on a clean pond.
+# DESCRIPTION: fsck computes a single deterministic content root over the
+#   pond's live content -- a directory is a partition, and its recursive
+#   content `tree_hash` (fold-excluding the reserved INDEX/LOG nodes) is its
+#   checksum; the root is a tree_hash over the per-pond root_tree_hashes.  It
+#   also re-validates content checksums (inline + external large-file blobs).
+#   This test verifies:
+#     1. fsck prints a stable 64-hex content root on a clean pond.
 #     2. The root is deterministic (re-running yields the same value) and
 #        independent of the content-rehash pass (--quick matches default).
 #     3. The root CHANGES when data changes.
@@ -70,6 +73,6 @@ set -e
 
 check "[ $CORRUPT_EXIT -ne 0 ]" "fsck fails (non-zero exit) on corrupted blob"
 check_contains /tmp/fsck_corrupt.txt "fsck reports content error" "does not match recorded blake3"
-check "[ $QUICK_EXIT -eq 0 ]" "--quick still passes (structural-only; corruption invisible to row Merkle)"
+check "[ $QUICK_EXIT -eq 0 ]" "--quick still passes (structural-only; corruption invisible to the content root)"
 
 check_finish

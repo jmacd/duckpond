@@ -31,7 +31,8 @@ pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
 pub use file::{AsyncReadSeek, File, FileMetadataWriter, Handle as FileHandle, QueryableFile};
 pub use fs::FS;
 pub use node::{
-    FileID, Node, NodeID, NodePath, NodeType, PartID, local_pond_uuid, set_local_pond_uuid,
+    FileID, INDEX_NODE_UUID, LOG_NODE_UUID, Node, NodeID, NodePath, NodeType, PartID, ROOT_UUID,
+    index_node_uuid, local_pond_uuid, log_node_uuid, set_local_pond_uuid,
 };
 pub use wd::{CopyDestination, Lookup, Visitor, WD};
 

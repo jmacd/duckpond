@@ -75,6 +75,17 @@ impl Ship {
         pond_path: P,
         birthplace: impl Into<String>,
     ) -> Result<Self, StewardError> {
+        Self::init_pond(pond_path, birthplace.into(), None).await
+    }
+
+    /// Shared root-initialization path for fresh ponds and replicas.  When
+    /// `preserve_metadata` is `Some`, the pond adopts that identity (replica
+    /// of a source pond); otherwise a fresh pond_id is minted.
+    async fn init_pond<P: AsRef<Path>>(
+        pond_path: P,
+        birthplace: String,
+        preserve_metadata: Option<PondMetadata>,
+    ) -> Result<Self, StewardError> {
         let meta = PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]);
 
         // Create infrastructure (includes root directory initialization with txn_seq=1)
@@ -83,8 +94,8 @@ impl Ship {
             pond_path,
             true,
             Some(meta.clone()),
-            None, // No preserved metadata for fresh pond
-            Some(birthplace.into()),
+            preserve_metadata,
+            Some(birthplace),
         )
         .await?;
 
@@ -119,20 +130,15 @@ impl Ship {
         // replica holds the root-dir v1 row and `pond verify` matches
         // (P2-VERIFY-BOOTSTRAP-DRIFT).
         let root_version = ship.data_persistence.table().version().unwrap_or(0);
-        let root_pond_id = ship.control_table.pond_id_uuid();
-        let root_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-            ship.data_persistence.table().clone(),
-            root_pond_id,
-        )
-        .await
-        .map_err(|e| StewardError::ControlTable(format!("compute root-init checksums: {}", e)))?;
+        // Partition checksums are retired (Decision D9, step 5b): the content
+        // root recorded in the commit-log node subsumes them.
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
                 root_version,
-                0, // Duration unknown/not tracked
-                root_checksums,
+                0,    // Duration unknown/not tracked
+                None, // genesis: the first content-changing commit writes the first commit-log leaf (Decision D9)
             )
             .await?;
 
@@ -229,17 +235,18 @@ impl Ship {
 
     /// Create a fresh pond as a replica with the given `pond_id`.
     ///
-    /// Convenience wrapper around [`Ship::create_pond_for_restoration`]
-    /// that synthesizes default birth metadata (timestamp = now,
-    /// hostname = `"unknown"`, username from `$USER`/`$USERNAME` or
-    /// `"unknown"`).  Birth metadata on a replica is informational
-    /// only -- the canonical replica identity is the `pond_id`, which
-    /// must match the source pond it replicates.
+    /// Convenience wrapper around [`Ship::init_pond`] that synthesizes
+    /// default birth metadata (timestamp = now, hostname = `"unknown"`,
+    /// username from `$USER`/`$USERNAME` or `"unknown"`).  Birth metadata on
+    /// a replica is informational only -- the canonical replica identity is
+    /// the `pond_id`, which must match the source pond it replicates.
     ///
-    /// The resulting pond has an empty data table awaiting
-    /// `apply_pulled_bundle` calls (e.g., via
-    /// [`sync_remote::Remote::bootstrap_consumer`] then
-    /// [`sync_remote::Remote::pull`]).
+    /// Since D6 the resulting pond is initialized with a minimal root v1 under
+    /// the source `pond_id` so the content-addressed mirror pull
+    /// ([`crate::rebuild_pond`]) has a root to diff onto.  It is NOT suitable
+    /// for a bootstrap path that requires an empty data table so a source's
+    /// replicated seq=1 root does not collide with a local root; use
+    /// [`Ship::create_pond_for_restoration`] for that.
     pub async fn create_replica<P: AsRef<Path>>(
         pond_path: P,
         pond_id: uuid::Uuid,
@@ -251,7 +258,9 @@ impl Ship {
             pond_id: pond_id_uuid7,
             ..PondMetadata::default()
         };
-        Self::create_pond_for_restoration(pond_path, metadata).await
+        // Initialize a minimal root v1 under the source pond_id so the
+        // content mirror pull (rebuild_pond) has a root to diff onto.
+        Self::init_pond(pond_path, String::new(), Some(metadata)).await
     }
 
     /// Open an existing, pre-initialized pond.
@@ -301,13 +310,15 @@ impl Ship {
         // but on disagreement the data table wins and the control table
         // cache is auto-healed to match.
         let (pond_id, control_table) = if create_new {
-            // Creating new pond - mint fresh identity and persist it to both
-            // the control table (cache) and, implicitly via the upcoming root
-            // initialization, the data table (canonical).
-            assert!(preserve_metadata.is_none());
-            let metadata = PondMetadata {
-                birthplace: birthplace.unwrap_or_default(),
-                ..PondMetadata::default()
+            // Creating new pond - use the preserved pond_id if restoring as a
+            // replica, otherwise mint a fresh identity.  Either way the root
+            // initialization below stamps it into the data table (canonical).
+            let metadata = match preserve_metadata {
+                Some(m) => m,
+                None => PondMetadata {
+                    birthplace: birthplace.unwrap_or_default(),
+                    ..PondMetadata::default()
+                },
             };
             let pond_id = metadata.pond_id.to_string();
             debug!(
@@ -930,13 +941,17 @@ impl Ship {
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record begin: {}", e)))?;
 
-        // 2. Pre-compaction checksum snapshot.
-        let pre = crate::remote_adapter::compute_live_checksums_for_table(
+        // 2. Pre-compaction content root.  Compaction must be
+        //    content-preserving, so the pond's `root_tree_hash` must be
+        //    byte-identical before and after the optimize (Decision D9, step
+        //    5b: the content root subsumes the retired partition checksums).
+        let pre = crate::content_tree::compute_content_tree_for_table(
             self.data_persistence.table().clone(),
-            pond_id,
+            &pond_id.to_string(),
         )
         .await
-        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?;
+        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?
+        .root_tree_hash;
 
         // 3. Run the Delta optimize, scoped to our own pond_id partitions.
         //    Stamp the compaction's txn_seq into the commit's `pond_txn`
@@ -999,14 +1014,16 @@ impl Ship {
             });
         }
 
-        // 5. Post-compaction snapshot + invariant: content must be unchanged.
-        let post = crate::remote_adapter::compute_live_checksums_for_table(
+        // 5. Post-compaction content root + invariant: content must be
+        //    unchanged.
+        let post = crate::content_tree::compute_content_tree_for_table(
             self.data_persistence.table().clone(),
-            pond_id,
+            &pond_id.to_string(),
         )
         .await
-        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?;
-        if let Err(e) = assert_compaction_invariant(&pre, &post) {
+        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?
+        .root_tree_hash;
+        if let Err(e) = assert_compaction_invariant(pre, post) {
             let reason = format!("{}", e);
             self.record_compact_failed(&txn_meta, started, reason).await;
             return Err(e);
@@ -1022,11 +1039,30 @@ impl Ship {
         // process validates against the right sequence.
         self.data_persistence
             .sync_last_txn_seq(&pond_id.to_string(), txn_seq);
+        // Content-graph spine (Decision D9): compaction is content-preserving
+        // (the invariant above asserts `root_tree_hash` is unchanged), so it is
+        // transparent to the content graph and appends NO commit-log leaf --
+        // like `git gc`/repack adding no commits.  Push/pull resolve the tip
+        // from the last content-changing commit, whose root already matches, so
+        // a compaction seq needs no spine of its own.
+        let commit_spine = None;
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+        // Partition checksums are retired (step 5b); the content invariant
+        // above is the compaction integrity check.
         self.control_table
-            .record_compact_committed(&txn_meta, new_version, duration_ms, post)
+            .record_compact_committed(&txn_meta, new_version, duration_ms, commit_spine)
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
+
+        // Reconcile the transparency log against the pond-resident commit-log
+        // node.  Compaction added no leaf, so this is a no-op unless a prior
+        // commit's tile export was left lagging.
+        crate::content_tree::materialize_tlog(
+            &self.pond_path,
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await;
 
         info!(
             "Compaction committed (seq={}, version={}, +{}/-{} files)",
@@ -1179,15 +1215,8 @@ impl Ship {
         .await?;
 
         ship.control_table
-            // D5.7a: bootstrap data_delta_version=0 record is never pushed,
-            // so partition_checksums are unobservable — pass empty.
-            .record_data_committed(
-                &txn_meta,
-                TransactionType::Write,
-                0,
-                0,
-                sync_steward::PartitionChecksums::new(),
-            )
+            // D5.7a: bootstrap data_delta_version=0 record is never pushed.
+            .record_data_committed(&txn_meta, TransactionType::Write, 0, 0, None)
             .await?;
 
         ship.control_table
@@ -1231,41 +1260,23 @@ impl std::fmt::Debug for Ship {
     }
 }
 
-/// Verify that `pre` and `post` describe the same logical content: the
-/// same set of partition keys AND identical checksum bytes per key.
-/// Producer-side compaction ([`Ship::compact`]) merges parquet files
-/// without changing any row, so this MUST hold; a violation indicates a
-/// bug (e.g. optimize touched foreign rows or dropped data) and aborts
-/// the compaction transaction.
+/// Verify that `pre` and `post` describe the same logical content: the pond's
+/// `root_tree_hash` must be byte-identical.  Producer-side compaction
+/// ([`Ship::compact`]) merges parquet files without changing any logical
+/// entry, so this MUST hold; a violation indicates a bug (e.g. optimize
+/// touched foreign rows or dropped data) and aborts the compaction
+/// transaction.  Because the content root is lineage-independent, this is the
+/// same guarantee replication relies on (Decision D9, step 5b).
 fn assert_compaction_invariant(
-    pre: &sync_steward::PartitionChecksums,
-    post: &sync_steward::PartitionChecksums,
+    pre: sync_store::ObjectHash,
+    post: sync_store::ObjectHash,
 ) -> Result<(), StewardError> {
-    if pre.len() != post.len() {
+    if pre != post {
         return Err(StewardError::ControlTable(format!(
-            "compaction changed partition count: pre={} post={}",
-            pre.len(),
-            post.len(),
+            "compaction altered content root: pre={} post={}",
+            pre.to_hex(),
+            post.to_hex(),
         )));
-    }
-    for (partition, pre_cs) in pre {
-        match post.get(partition) {
-            Some(post_cs) if post_cs == pre_cs => {}
-            Some(post_cs) => {
-                return Err(StewardError::ControlTable(format!(
-                    "compaction altered partition {} checksum: pre={} post={}",
-                    partition,
-                    pre_cs.hex(),
-                    post_cs.hex(),
-                )));
-            }
-            None => {
-                return Err(StewardError::ControlTable(format!(
-                    "compaction dropped partition {}",
-                    partition,
-                )));
-            }
-        }
     }
     Ok(())
 }
@@ -2025,10 +2036,27 @@ mod tests {
 
             // Verify version numbers: root gets v2, new nodes get v1
             // Node IDs are stored in full UUID format, but root is identified by starting with "00000000"
-            if node_id.starts_with("00000000") {
+            if node_id == tinyfs::ROOT_UUID {
                 assert_eq!(
                     versions[0], 2,
                     "Root directory ({}) should have v2 in second transaction",
+                    node_id
+                );
+            } else if node_id == tinyfs::INDEX_NODE_UUID {
+                // The reserved node-manifest index node is created on this first
+                // write transaction, so it carries v1 (design
+                // `docs/incremental-content-tree-design.md` Phase 2).
+                assert_eq!(
+                    versions[0], 1,
+                    "Index node ({}) should have v1 when first created",
+                    node_id
+                );
+            } else if node_id == tinyfs::LOG_NODE_UUID {
+                // The reserved commit-log node is created on this first
+                // content-changing write, so it carries v1 (Decision D9).
+                assert_eq!(
+                    versions[0], 1,
+                    "Log node ({}) should have v1 when first created",
                     node_id
                 );
             } else {
@@ -2041,16 +2069,122 @@ mod tests {
         }
 
         // Verify we created the expected number of directories
-        // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes total
+        // Root (updated) + /a + /a/b + /a/b/c + /a/d + /a/d/e = 6 nodes, plus
+        // the reserved node-manifest index node and the reserved commit-log
+        // node, both created on this first write = 8.
         assert_eq!(
             node_versions.len(),
-            6,
-            "Should have 6 nodes in txn_seq=2 (root + 5 new dirs), got: {:?}",
+            8,
+            "Should have 8 nodes in txn_seq=2 (root + 5 new dirs + index node + log node), got: {:?}",
             node_versions.keys().collect::<Vec<_>>()
         );
 
         debug!(
             "[OK] Directory tree creation produces exactly one version per node with correct numbering"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_node_phase2() {
+        // Phase 2 (docs/incremental-content-tree-design.md): the reserved
+        // node-manifest index node is created on the first write, updated as a
+        // single collapsed live version thereafter, carries the full node
+        // manifest, is excluded from the fold, and is hidden from listings.
+        use sync_store::content::decode_manifest;
+
+        const INDEX_NAME: &str = ".pond-node-index";
+
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let pond_path = temp_dir.path().join("test_index_node");
+        let mut ship = Ship::create_pond(&pond_path, "test-host")
+            .await
+            .expect("Failed to create pond");
+
+        // First write: create two directories.
+        let meta = PondUserMetadata::new(vec!["w1".to_string()]);
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = root.create_dir_path("/a").await?;
+            _ = root.create_dir_path("/b").await?;
+            Ok(())
+        })
+        .await
+        .expect("first write");
+
+        // Second write: add a nested directory.
+        let meta = PondUserMetadata::new(vec!["w2".to_string()]);
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = root.create_dir_path("/a/c").await?;
+            Ok(())
+        })
+        .await
+        .expect("second write");
+
+        // Read the index node and the current content-tree report.
+        let report = crate::content_tree::compute_content_tree(&ship)
+            .await
+            .expect("content tree");
+
+        let meta = PondUserMetadata::new(vec!["read".to_string()]);
+        let tx = ship.begin_read(&meta).await.expect("begin read");
+        let root = tx.root().await.expect("root");
+
+        // The index node is addressable by name for the write path...
+        let index_bytes = root
+            .read_file_path_to_vec(INDEX_NAME)
+            .await
+            .expect("index node exists and is readable");
+
+        // ...but hidden from user-facing enumeration.
+        let matches = root.collect_matches("/*").await.expect("list root");
+        let names: Vec<String> = matches.iter().map(|(np, _)| np.basename()).collect();
+        assert!(
+            !names.iter().any(|n| n == INDEX_NAME),
+            "index node must not appear in directory listings, got: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "a"));
+        assert!(names.iter().any(|n| n == "b"));
+        _ = tx.commit().await.expect("commit read");
+
+        // The manifest carries every real node exactly once, and never itself.
+        let manifest = decode_manifest(&index_bytes).expect("decode manifest");
+        assert!(
+            !manifest
+                .iter()
+                .any(|e| e.node_id == tinyfs::INDEX_NODE_UUID),
+            "index node must be excluded from its own manifest (fold exclusion)"
+        );
+        // root + a + b + a/c = 4 real nodes; the index node is excluded.
+        assert_eq!(
+            manifest.len(),
+            4,
+            "manifest lists exactly the four real nodes, got: {:?}",
+            manifest.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        assert!(manifest.iter().any(|e| e.name == "a"));
+        assert!(manifest.iter().any(|e| e.name == "b"));
+        assert!(manifest.iter().any(|e| e.name == "c"));
+
+        // The manifest's root entry equals the fold's root_tree_hash: writing
+        // the index node never perturbs the excluded-from-fold root hash.
+        let root_entry = manifest
+            .iter()
+            .find(|e| e.parent_node_id.is_empty())
+            .expect("root manifest entry");
+        assert_eq!(
+            root_entry.child_hash, report.root_tree_hash,
+            "manifest root hash matches the content-tree root_tree_hash"
+        );
+
+        // The index node stays at a single live version: a collapse sweep that
+        // targets anything with more than one live version finds no candidate
+        // (the directories are single-version, and the index node collapses on
+        // every write), so it is never a user-visible compaction candidate.
+        let report = ship.collapse_versions(1).await.expect("collapse sweep");
+        assert_eq!(
+            report.files_collapsed, 0,
+            "index node self-collapses and is not a collapse candidate"
         );
     }
 

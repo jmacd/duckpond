@@ -89,14 +89,9 @@ check_eq() {
     fi
 }
 
-remote_last_pulled_seq() {
+remote_last_pulled_tip() {
     local name="$1"
     pond remote list 2>/dev/null | awk -v n="${name}" '$1 == n {print $NF; exit}'
-}
-
-applied_bundles() {
-    local logfile="$1"
-    grep -oE "applied [0-9]+ bundle" "${logfile}" | awk '{print $2}' | head -1
 }
 
 #############################
@@ -169,15 +164,13 @@ pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --overwrite >/dev/null
 
 pond pull upstream 2>&1 | tee /tmp/p1pull1.log
-W_INITIAL=$(remote_last_pulled_seq upstream)
-APPLIED_INITIAL=$(applied_bundles /tmp/p1pull1.log)
-echo "Original consumer LAST_PULLED_SEQ: ${W_INITIAL}"
-echo "Original consumer applied:         ${APPLIED_INITIAL}"
+W_INITIAL=$(remote_last_pulled_tip upstream)
+echo "Original consumer PULLED_TIP: ${W_INITIAL}"
 
-check "original consumer: pull #1 LAST_PULLED_SEQ is positive integer" \
-    "[[ \"${W_INITIAL}\" =~ ^[0-9]+$ ]] && [ \"${W_INITIAL}\" -gt 0 ]"
-check "original consumer: pull #1 applied > 0 bundles" \
-    "[[ \"${APPLIED_INITIAL}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED_INITIAL}\" -gt 0 ]"
+check "original consumer: pull #1 PULLED_TIP is a non-empty short hash" \
+    "[ -n \"${W_INITIAL}\" ] && [ \"${W_INITIAL}\" != \"-\" ]"
+check "original consumer: pull #1 ran the cross-pond import" \
+    "grep -qE 'pull upstream complete' /tmp/p1pull1.log"
 
 #############################
 # DESTROY POND B — terraform-destroy analog
@@ -204,9 +197,9 @@ pond remote add upstream "s3://${BUCKET_NAME}" /imports/A \
     --allow-http \
     --overwrite >/dev/null
 
-W_PRE=$(remote_last_pulled_seq upstream)
-echo "Fresh consumer LAST_PULLED_SEQ before any pull: '${W_PRE}'"
-check_eq "fresh consumer: LAST_PULLED_SEQ is unset before first pull" \
+W_PRE=$(remote_last_pulled_tip upstream)
+echo "Fresh consumer PULLED_TIP before any pull: '${W_PRE}'"
+check_eq "fresh consumer: PULLED_TIP is unset before first pull" \
     "${W_PRE}" "-"
 
 #############################
@@ -216,17 +209,13 @@ check_eq "fresh consumer: LAST_PULLED_SEQ is unset before first pull" \
 echo ""
 echo "=== Phase 5: Fresh consumer pull #1 (bootstrap reconstruction) ==="
 pond pull upstream 2>&1 | tee /tmp/p2pull1.log
-W_REBUILT=$(remote_last_pulled_seq upstream)
-APPLIED_REBUILT=$(applied_bundles /tmp/p2pull1.log)
-echo "Fresh consumer LAST_PULLED_SEQ after bootstrap: ${W_REBUILT}"
-echo "Fresh consumer applied:                         ${APPLIED_REBUILT}"
+W_REBUILT=$(remote_last_pulled_tip upstream)
+echo "Fresh consumer PULLED_TIP after bootstrap: ${W_REBUILT}"
 
-check "fresh consumer: pull #1 applied > 0 bundles" \
-    "[[ \"${APPLIED_REBUILT}\" =~ ^[0-9]+$ ]] && [ \"${APPLIED_REBUILT}\" -gt 0 ]"
-check_eq "fresh consumer: bootstrap LAST_PULLED_SEQ matches original (same producer state)" \
+check "fresh consumer: pull #1 ran the cross-pond import" \
+    "grep -qE 'pull upstream complete' /tmp/p2pull1.log"
+check_eq "fresh consumer: bootstrap PULLED_TIP matches original (deterministic tip from same producer state)" \
     "${W_REBUILT}" "${W_INITIAL}"
-check_eq "fresh consumer: bootstrap applied count matches original" \
-    "${APPLIED_REBUILT}" "${APPLIED_INITIAL}"
 
 # Sanity: all foreign data is queryable on the rebuilt consumer.
 TEMPS_HASH=$(pond cat /imports/A/data/sensors/temps.csv 2>/dev/null | md5sum | cut -d' ' -f1)
@@ -246,13 +235,12 @@ check_eq "fresh consumer: /imports/A/data/sensors/extra.csv content correct" \
 echo ""
 echo "=== Phase 6: Fresh consumer pull #2 (no-op; the regression guard) ==="
 pond pull upstream 2>&1 | tee /tmp/p2pull2.log
-W_REBUILT2=$(remote_last_pulled_seq upstream)
-APPLIED_REBUILT2=$(applied_bundles /tmp/p2pull2.log)
-echo "Fresh consumer pull #2: applied=${APPLIED_REBUILT2}  LAST_PULLED_SEQ=${W_REBUILT2}"
+W_REBUILT2=$(remote_last_pulled_tip upstream)
+echo "Fresh consumer pull #2: PULLED_TIP=${W_REBUILT2}"
 
-check_eq "fresh consumer: pull #2 reports 0 applied bundles (no re-walk)" \
-    "${APPLIED_REBUILT2}" "0"
-check_eq "fresh consumer: pull #2 LAST_PULLED_SEQ unchanged from bootstrap" \
+check "fresh consumer: pull #2 short-circuits as already up to date (no re-walk)" \
+    "grep -qE 'already up to date' /tmp/p2pull2.log"
+check_eq "fresh consumer: pull #2 PULLED_TIP unchanged from bootstrap" \
     "${W_REBUILT2}" "${W_REBUILT}"
 
 #############################

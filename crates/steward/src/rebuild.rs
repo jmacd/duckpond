@@ -27,13 +27,19 @@
 //!   `last_pulled_seq` watermarks live only in the control table.  After
 //!   a rebuild the operator must re-attach remotes (`pond remote add` /
 //!   `pond backup add`).
-//! * **Per-transaction partition checksums** -- not recoverable from
-//!   data alone, so the reconstructed `DataCommitted` records carry
-//!   empty checksums and `pond verify` must be re-baselined.
+//!
+//! The commit spine (`commit_hash` / `root_tree_hash` / `commit_object`)
+//! IS recovered: it is replayed from the authoritative, pond-resident log
+//! node, so `pond log`, tip lookups, and content-addressed push work after
+//! a rebuild.  Per-transaction partition checksums are no longer recorded
+//! at all (retired in favour of the content tree, Decision D9 step 5b), so
+//! the reconstructed `DataCommitted` records carry empty checksums -- the
+//! same as a normal commit.
 
 use std::path::{Path, PathBuf};
 
 use tlogfs::OpLogPersistence;
+use url::Url;
 use uuid::Uuid as StdUuid;
 
 use crate::{ControlTable, PondMetadata, StewardError, get_control_path, get_data_path};
@@ -124,6 +130,23 @@ pub async fn rebuild_control_table(
                 .unwrap_or_default()
         });
 
+    // 2b) Recover the commit spine from the authoritative, pond-resident log
+    //     node so the rebuilt control table's spine cache is not left empty.
+    //     Keyed by transaction seq; only the local pond stamps log leaves, so
+    //     foreign cross-pond txns get no spine (matching the live commit path).
+    let data_url = Url::from_directory_path(&data_path)
+        .or_else(|_| Url::from_file_path(&data_path))
+        .map_err(|_| {
+            StewardError::Aborted(format!(
+                "cannot form a URL from data path {}",
+                data_path.display()
+            ))
+        })?;
+    let data_table = deltalake::open_table(data_url)
+        .await
+        .map_err(|e| StewardError::Aborted(format!("open data table for spine replay: {e}")))?;
+    let spines = crate::content_tree::read_log_spines(data_table, &pond_id_str).await?;
+
     let metadata = PondMetadata {
         pond_id: pond_id_uuid7,
         birth_timestamp,
@@ -171,12 +194,21 @@ pub async fn rebuild_control_table(
             txn.delta_version
         };
         let include_completed = txn.meta.txn_seq == bootstrap_seq;
+        // The spine is stamped only by the local pond's content-changing
+        // commits, so look it up only for local txns; foreign txns and
+        // no-op/compaction commits legitimately have no leaf.
+        let spine = if txn.meta.pond_id == pond_id_str {
+            spines.get(&txn.meta.txn_seq)
+        } else {
+            None
+        };
         control
             .reconstruct_write_txn(
                 &txn.meta,
                 txn.timestamp_micros,
                 data_delta_version,
                 include_completed,
+                spine,
             )
             .await?;
         // Only the LOCAL pond's txns advance the reported `last_txn_seq`

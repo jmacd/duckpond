@@ -24,9 +24,24 @@
 #![warn(missing_docs)]
 
 pub mod checksum;
+pub mod content;
+pub mod content_remote;
 mod error;
+mod s3_registration;
 pub mod schema;
 mod store;
+pub mod tlog;
 
+pub use s3_registration::register_s3_handlers;
+
+pub use content::{
+    Commit, ManifestEntry, NodeMerkle, ObjectHash, Provenance, TreeEntry, decode_series,
+    decode_tree, node_merkle_rebuild_root, series_hash, tree_hash,
+};
+pub use content_remote::ContentRemote;
 pub use error::{Result, StoreError};
 pub use store::{AddPath, CompactMetrics, Op, RemovePath, Store};
+pub use tlog::{
+    Checkpoint, CheckpointError, LogHash, TileLog, TransparencyLog, checkpoint_history_path,
+    commit_leaf_hash, verify_consistency, verify_inclusion,
+};

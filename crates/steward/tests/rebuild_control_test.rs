@@ -151,3 +151,109 @@ async fn rebuild_control_requires_force_when_control_exists() -> Result<()> {
 
     Ok(())
 }
+
+/// Phase 6 "rebuild from pond" validation: the pond's *content* is fully
+/// reconstructable from the data FS alone.  Build a pond with a mix of files,
+/// nested directories, an overwrite, and a delete; capture the local `fsck`
+/// content root and the `compute_content_tree` root; discard the control
+/// table; rebuild it from data; then confirm both roots are byte-identical.
+///
+/// The commit spine (`commit_hash` / `root_tree_hash` / `commit_object`) lives
+/// authoritatively in the data-FS LOG node.  This asserts both that the content
+/// roots survive and that the rebuild replays the spine from the log so the
+/// control-table spine cache is restored (tip commit hash + full spine order).
+#[tokio::test]
+async fn rebuild_control_preserves_content_roots() -> Result<()> {
+    use steward::FsckOptions;
+
+    let temp = tempdir()?;
+    let pond_path = temp.path().join("pond");
+
+    // 1) Build a pond with a variety of live content.
+    let (fsck_root_before, content_root_before, tip_before, seq_before, spine_before) = {
+        let mut ship = Ship::create_pond(&pond_path, "test-host").await?;
+        write_file(&mut ship, "/a.txt", b"alpha", vec!["copy", "a.txt"]).await?;
+        ship.write_transaction(
+            &PondUserMetadata::new(vec!["mkdir".into(), "sub".into()]),
+            async move |fs| {
+                let root = fs.root().await?;
+                let _ = root.create_dir_all("/sub").await?;
+                Ok(())
+            },
+        )
+        .await?;
+        write_file(&mut ship, "/sub/b.txt", b"beta", vec!["copy", "b.txt"]).await?;
+        write_file(&mut ship, "/sub/c.txt", b"gamma", vec!["copy", "c.txt"]).await?;
+        // Overwrite one file (new version) and delete another.
+        write_file(&mut ship, "/a.txt", b"alpha-2", vec!["copy", "a.txt"]).await?;
+        ship.write_transaction(
+            &PondUserMetadata::new(vec!["rm".into(), "c.txt".into()]),
+            async move |fs| {
+                let root = fs.root().await?;
+                let sub = root.open_dir_path("/sub").await?;
+                sub.remove_entry("c.txt").await?;
+                Ok(())
+            },
+        )
+        .await?;
+
+        let fsck = steward::fsck(&ship, FsckOptions::default()).await?;
+        let content = steward::compute_content_tree(&ship).await?;
+        let seq = ship.control_table().get_last_write_sequence().await?;
+        let tip = ship.control_table().commit_hash_at(seq).await?;
+        let spine = ship.control_table().commit_objects_in_order().await?;
+        (fsck.root_hex(), content.root_tree_hash, tip, seq, spine)
+    };
+    assert!(
+        tip_before.is_some(),
+        "the live pond must have a stamped tip commit hash"
+    );
+    assert!(
+        !spine_before.is_empty(),
+        "the live pond must have a non-empty commit spine"
+    );
+
+    // 2) Discard the control table entirely.
+    let control_path = get_control_path(&pond_path);
+    std::fs::remove_dir_all(&control_path)?;
+    assert!(!control_path.exists());
+
+    // 3) Rebuild the control table from the data table alone.
+    let _ = rebuild_control_table(&pond_path, false).await?;
+
+    // 4) Reopen and recompute both roots; they must be unchanged, proving the
+    //    content is reconstructable from the data FS without the control table.
+    let ship = Ship::open_pond(&pond_path).await?;
+    let fsck_root_after = steward::fsck(&ship, FsckOptions::default())
+        .await?
+        .root_hex();
+    let content_root_after = steward::compute_content_tree(&ship).await?.root_tree_hash;
+    let seq_after = ship.control_table().get_last_write_sequence().await?;
+    let tip_after = ship.control_table().commit_hash_at(seq_after).await?;
+    let spine_after = ship.control_table().commit_objects_in_order().await?;
+
+    assert_eq!(
+        fsck_root_before, fsck_root_after,
+        "fsck content root must survive a control-table discard + rebuild"
+    );
+    assert_eq!(
+        content_root_before, content_root_after,
+        "content-tree root must survive a control-table discard + rebuild"
+    );
+    // Spine replay: the tip commit hash and the full commit-object sequence
+    // must be recovered from the log node, not left empty.
+    assert_eq!(
+        seq_before, seq_after,
+        "last write seq must match after rebuild"
+    );
+    assert_eq!(
+        tip_before, tip_after,
+        "tip commit hash must be replayed from the log node after rebuild"
+    );
+    assert_eq!(
+        spine_before, spine_after,
+        "the full commit-object spine must be replayed from the log node"
+    );
+
+    Ok(())
+}

@@ -112,9 +112,63 @@ impl Store {
         })
     }
 
+    /// Create a fresh store at `url` with the given `storage_options` (e.g.,
+    /// S3 credentials).  Errors if a Delta table already exists there.
+    /// For S3 URLs, `deltalake_aws::register_handlers(None)` must have run
+    /// once at process startup.
+    pub async fn create_at_url(
+        url: &str,
+        storage_options: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
+        let parsed = Url::parse(url).map_err(|_| StoreError::InvalidPath(url.to_string()))?;
+        debug!("creating store at {}", parsed);
+        if parsed.scheme() == "file"
+            && let Ok(p) = parsed.to_file_path()
+        {
+            std::fs::create_dir_all(&p)?;
+        }
+        let table = DeltaTable::try_from_url_with_storage_options(parsed, storage_options)
+            .await?
+            .create()
+            .with_columns(schema::delta_columns())
+            .with_partition_columns(schema::partition_columns())
+            .with_save_mode(SaveMode::ErrorIfExists)
+            .await?;
+        let session_ctx = build_session_ctx(&table)?;
+        Ok(Self {
+            path: PathBuf::from(url),
+            table,
+            session_ctx,
+        })
+    }
+
+    /// Open an existing store at `url` with `storage_options`.
+    pub async fn open_at_url(
+        url: &str,
+        storage_options: std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
+        let parsed = Url::parse(url).map_err(|_| StoreError::InvalidPath(url.to_string()))?;
+        debug!("opening store at {}", parsed);
+        let table = deltalake::open_table_with_storage_options(parsed, storage_options).await?;
+        let session_ctx = build_session_ctx(&table)?;
+        Ok(Self {
+            path: PathBuf::from(url),
+            table,
+            session_ctx,
+        })
+    }
+
     /// On-disk path the store was opened/created from.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The backing object store rooted at the Delta table directory.  Used to
+    /// read and write sibling content under prefixes outside the Delta log
+    /// (e.g. a content-addressed large-blob store), keeping multi-gigabyte
+    /// values out of the Delta row table.
+    pub fn object_store(&self) -> Arc<dyn object_store::ObjectStore> {
+        self.table.object_store()
     }
 
     /// Current Delta table version (incremented on every successful

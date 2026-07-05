@@ -12,25 +12,43 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod content_diff;
+mod content_objects;
+mod content_pull;
+mod content_push;
+mod content_tree;
+mod content_verify;
 mod control_table;
 mod dispatch;
 pub mod fsck;
+mod graft;
 mod guard;
 mod host;
+mod inner_control;
 pub mod maintenance;
 mod rebuild;
-mod remote_adapter;
 mod remote_config;
 mod ship;
 mod write_lock;
 
-pub use control_table::ControlTable;
+pub use content_diff::{ContentComparison, ContentDiff, DiffKind, compare_content_trees};
+pub use content_objects::{ObjectInventory, ObjectKind, inventory_content_objects};
+pub use content_pull::{
+    FetchedGraph, FetchedObject, RebuildOutcome, fetch_object_graph, import_pond, rebuild_pond,
+};
+pub use content_push::{ContentPushOutcome, push_content_to_remote};
+pub use content_tree::{
+    ContentTreeReport, MaterializedObjects, compute_content_tree, compute_content_tree_for_table,
+    materialize_content_objects,
+};
+pub use content_verify::{ContentVerifyReport, ContentVerifyState, verify_content_against_remote};
+pub use control_table::{CommitSpine, ControlTable};
 pub use dispatch::{Steward, Transaction};
 pub use fsck::{FsckError, FsckOptions, FsckReport, PartitionDigest, fsck};
+pub use graft::{GraftPin, SYS_GRAFTS_DIR};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
 pub use rebuild::{RebuildReport, rebuild_control_table};
-pub use remote_adapter::{PushOutcome, ShipRemoteSteward, push_pending_to_remote};
 pub use remote_config::{RemoteAttachment, RemoteConfigError, RemoteMode};
 pub use ship::{CollapseReport, CompactOutcome, Ship};
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
@@ -94,6 +112,9 @@ pub enum StewardError {
     #[error("Delta Lake error: {0}")]
     DeltaLake(String),
 
+    #[error("Content-graph error: {0}")]
+    Content(String),
+
     #[error("Dynamic error: {0}")]
     Dyn(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -152,6 +173,15 @@ pub fn get_control_path(pond_path: &Path) -> PathBuf {
 #[must_use]
 pub fn get_git_path(pond_path: &Path) -> PathBuf {
     pond_path.join("git")
+}
+
+/// Get the transparency-log tile directory under the pond.
+///
+/// Holds the materialized C2SP `tlog-tiles` and the `tlog-checkpoint` note body
+/// over the pond's linear commit spine (design Decision D5).
+#[must_use]
+pub fn get_tlog_path(pond_path: &Path) -> PathBuf {
+    pond_path.join("tlog")
 }
 
 // ---------------------------------------------------------------------------

@@ -5,21 +5,14 @@
 //! D4 CLI integration test: `pond remote add` -> `pond push` -> `pond pull`
 //! roundtrip using a `file://` remote, exercised entirely through the
 //! library entry points (no spawned subprocesses).
-//!
-//! After D5.4, the destination pond is bootstrapped via the public
-//! [`steward::Ship::create_replica`] +
-//! [`sync_remote::Remote::bootstrap_consumer`] APIs (the
-//! sync_steward-only [`sync_remote::Remote::restart_from_compact`] is
-//! generic-equivalent via the shared [`sync_remote::Remote::restart_pond_from_compact`]).
 
 use cmd::commands::{
     add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
-    push_command, remote::remote_config_path, restart_from_compact_command, status_command,
-    verify_command,
+    push_command, remote::remote_config_path, status_command, verify_command,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
-use steward::{PondUserMetadata, REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX, ShipRemoteSteward};
+use steward::{PondUserMetadata, REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX};
 use tempfile::TempDir;
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
@@ -111,26 +104,13 @@ async fn pond_remote_push_pull_roundtrip() {
     .await
     .expect("write hello.txt");
 
-    // 2) Create the remote bucket as a fresh Delta table.  In production
-    // this is what `pond remote add` -> first `pond push` would set up;
-    // here we do it directly so the test stays focused on the CLI.
-    {
-        let store_id = {
-            let ship = src_ctx.open_pond().await.expect("open src");
-            ship.control_table().pond_id_uuid()
-        };
-        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-            .await
-            .expect("create remote");
-    }
-
-    // 3) `pond backup add origin file://...`
+    // 2) `pond backup add origin file://...` auto-initializes a fresh
+    // ContentRemote at the URL; first push sends the content closure.
     add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        false, // push-only
+        false,
         None,
         None,
         None,
@@ -140,59 +120,18 @@ async fn pond_remote_push_pull_roundtrip() {
     )
     .await
     .expect("remote add");
-
-    // Verify the YAML actually landed in /sys/remotes/origin.
-    {
-        let bytes = read_small_file(&src_ctx, &remote_config_path("origin"))
-            .await
-            .expect("read attachment yaml");
-        let s = String::from_utf8(bytes).unwrap();
-        assert!(
-            s.contains(&format!("url: {}", remote_url)),
-            "yaml should contain url; got:\n{}",
-            s
-        );
-    }
-
-    // Mode was persisted via raw_config.
-    {
-        let ship = src_ctx.open_pond().await.expect("open src");
-        let mode = ship
-            .control_table()
-            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}origin"))
-            .await
-            .expect("get mode")
-            .expect("mode set");
-        assert_eq!(mode, "push");
-    }
-
-    // 4) `pond push` -- pushes everything > last_pushed_seq.
     push_command(&src_ctx, Some("origin".to_string()))
         .await
         .expect("push");
 
-    // 5) Bootstrap dst pond as a replica of src + first-pull via the
-    //    public APIs (D5.4).  No more manual `create_pond_for_restoration
-    //    + raw_config_set("last_pulled_seq:<url>", "1")` workaround.
-    let remote_for_pull = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+    // 3) Empty replica (same pond_id, minimal root v1), pull -> mirror rebuild.
+    let src_pond_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    let _ = steward::Ship::create_replica(&dst_pond, src_pond_id)
         .await
-        .expect("open remote for bootstrap");
-    {
-        let mut dst = steward::Ship::create_replica(&dst_pond, remote_for_pull.store_id())
-            .await
-            .expect("create dst replica");
-        let mut adapter = ShipRemoteSteward::new(&mut dst);
-        remote_for_pull
-            .bootstrap_consumer(&mut adapter)
-            .await
-            .expect("bootstrap dst from remote");
-    }
-
-    // Re-attach origin on dst as a pull-mode remote.  The bootstrap
-    // inherited it as mode=push from src (because remote attachment YAML
-    // is portable and pushed with every commit); override here so the
-    // default-pull dispatcher finds it.  PATH=`/` because dst is a
-    // mirror of src (same pond_id, populated via `create_replica`).
+        .expect("create dst replica");
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
     add_remote_command(
         &dst_ctx,
@@ -204,26 +143,18 @@ async fn pond_remote_push_pull_roundtrip() {
         None,
         None,
         false,
-        true, // overwrite the inherited attachment
+        true,
     )
     .await
     .expect("re-attach origin on dst");
-
-    // 6) Pull once more via the production command path -- after
-    //    bootstrap_consumer this is a no-op (already caught up), but
-    //    exercises the wired CLI plumbing.
     pull_command(&dst_ctx, Some("origin".to_string()))
         .await
         .expect("pull origin on dst");
 
-    // 7) The file pushed from src should be readable in dst.
     let bytes = read_small_file(&dst_ctx, "/hello.txt")
         .await
         .expect("read /hello.txt on dst");
     assert_eq!(bytes, b"hello from source pond");
-
-    // 8) `pond remote list` on the SRC pond runs cleanly (prints to
-    // stdout; smoke check that the YAML-backed listing works).
     list_remotes_command(&src_ctx, None)
         .await
         .expect("list src");
@@ -272,19 +203,7 @@ async fn pond_remote_push_pull_large_file_roundtrip() {
         );
     }
 
-    // 2) Create the remote bucket as a fresh Delta table.
-    {
-        let store_id = {
-            let ship = src_ctx.open_pond().await.expect("open src");
-            ship.control_table().pond_id_uuid()
-        };
-        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-            .await
-            .expect("create remote");
-    }
-
-    // 3) Attach + push.
+    // 2) Attach (auto-init) + push content closure.
     add_backup_command(
         &src_ctx,
         "origin",
@@ -303,20 +222,35 @@ async fn pond_remote_push_pull_large_file_roundtrip() {
         .await
         .expect("push");
 
-    // 4) Bootstrap dst pond as a replica + pull.
-    let remote_for_pull = sync_remote::Remote::open_at_url(&remote_url, Default::default())
-        .await
-        .expect("open remote for bootstrap");
+    // D7 streaming: the large blob must transfer out-of-row -- present in the
+    // remote's sibling `_blobs/` store, absent from the Delta row table -- so a
+    // multi-gigabyte value never bloats the remote's parquet rows.
     {
-        let mut dst = steward::Ship::create_replica(&dst_pond, remote_for_pull.store_id())
-            .await
-            .expect("create dst replica");
-        let mut adapter = ShipRemoteSteward::new(&mut dst);
-        remote_for_pull
-            .bootstrap_consumer(&mut adapter)
-            .await
-            .expect("bootstrap dst from remote");
+        let blobs_dir = remote_path.join("_blobs");
+        assert!(
+            blobs_dir.exists(),
+            "remote should hold the large blob under _blobs/: {:?}",
+            blobs_dir
+        );
+        let n_blobs = std::fs::read_dir(&blobs_dir)
+            .expect("read _blobs")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("blob="))
+            .count();
+        assert!(
+            n_blobs >= 1,
+            "expected at least one external blob, got {n_blobs}"
+        );
     }
+
+    // 3) Replica + mirror pull.
+    let src_pond_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    let _ = steward::Ship::create_replica(&dst_pond, src_pond_id)
+        .await
+        .expect("create dst replica");
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
     add_remote_command(
         &dst_ctx,
@@ -408,7 +342,7 @@ async fn pond_verify_ok_after_push() {
             ship.control_table().pond_id_uuid()
         };
         std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
             .await
             .expect("create remote");
     }
@@ -437,6 +371,161 @@ async fn pond_verify_ok_after_push() {
 
     // All-targets form: must succeed too (single attachment, also OK).
     verify_command(&ctx, None).await.expect("verify all");
+}
+
+/// Content-native verify reports the exact commit-graph relationship: when the
+/// remote's published tip is an ancestor of the local tip (the producer has
+/// local commits it has not published), verify reports `RemoteBehind`, which is
+/// still `ok` -- lag, not drift.
+///
+/// A Push-mode backup in `/system/run/` auto-pushes after every write, so a
+/// normal local write can never stay unpushed.  To construct genuine lag we
+/// write two commits with no remote attached, then publish with the remote ref
+/// pointed at the *earlier* commit -- exactly the state a stalled or
+/// behind-by-one publisher leaves behind.
+#[tokio::test]
+async fn pond_verify_reports_remote_behind_after_local_write() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx, "test-host").await.expect("init");
+    // Two local commits, no remote attached: no auto-push fires.
+    write_small_file(&ctx, "/a.txt", b"first", vec!["copy", "a.txt"])
+        .await
+        .expect("write a.txt");
+    write_small_file(&ctx, "/b.txt", b"second", vec!["copy", "b.txt"])
+        .await
+        .expect("write b.txt");
+
+    let ship = ctx.open_pond().await.expect("open");
+    let local_seq = ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
+        .expect("seq");
+
+    // The previous commit (one before the local tip) becomes the remote's
+    // published tip: an ancestor the local pond is exactly one commit ahead of.
+    let earlier_seq = local_seq - 1;
+    let earlier_hash_hex = ship
+        .control_table()
+        .commit_hash_at(earlier_seq)
+        .await
+        .expect("commit hash")
+        .expect("earlier commit recorded");
+    let earlier_obj_hex = ship
+        .control_table()
+        .commit_object_at(earlier_seq)
+        .await
+        .expect("commit object")
+        .expect("earlier commit object recorded");
+    let earlier_tip =
+        sync_store::content::ObjectHash::from_hex(&earlier_hash_hex).expect("tip hash");
+    let earlier_obj: Vec<u8> = (0..earlier_obj_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&earlier_obj_hex[i..i + 2], 16).expect("hex byte"))
+        .collect();
+
+    let store_id = ship.control_table().pond_id_uuid();
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let mut remote =
+        sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    // Publish the earlier commit object and point "main" at it.  verify only
+    // reads the tip ref and that one commit object, so this faithfully models a
+    // remote that is behind by one commit.
+    let _published_seq = remote
+        .push_commit(&[(earlier_tip, earlier_obj)], "main", earlier_tip)
+        .await
+        .expect("publish earlier tip");
+
+    let report =
+        steward::verify_content_against_remote(ship.as_pond().expect("pond"), &remote, "main")
+            .await
+            .expect("verify content");
+    assert!(report.ok, "remote-behind is still ok (lag, not corruption)");
+    assert_eq!(
+        report.state,
+        steward::ContentVerifyState::RemoteBehind { local_unpushed: 1 },
+        "exactly one unpushed local commit"
+    );
+    assert_eq!(report.remote_tip, Some(earlier_tip));
+    assert_eq!(report.remote_seq, Some(earlier_seq));
+}
+
+/// A remote that serves bytes NOT hashing to the tip key it published under
+/// must make `pond verify` hard-error, not report the attacker-chosen seq those
+/// bytes decode to.  Models an untrusted/corrupt content remote.
+#[tokio::test]
+async fn pond_verify_rejects_tampered_remote_tip() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx, "test-host").await.expect("init");
+    write_small_file(&ctx, "/a.txt", b"first", vec!["copy", "a.txt"])
+        .await
+        .expect("write a.txt");
+    write_small_file(&ctx, "/b.txt", b"second", vec!["copy", "b.txt"])
+        .await
+        .expect("write b.txt");
+
+    let ship = ctx.open_pond().await.expect("open");
+    let local_seq = ship
+        .control_table()
+        .get_last_write_sequence()
+        .await
+        .expect("seq");
+
+    // Publish the tip UNDER an earlier commit's hash key, but store the LOCAL
+    // TIP's commit bytes there.  Those bytes decode to a valid commit with a
+    // different seq and do NOT hash to the key -- exactly a tampered remote.
+    let earlier_seq = local_seq - 1;
+    let earlier_hash_hex = ship
+        .control_table()
+        .commit_hash_at(earlier_seq)
+        .await
+        .expect("commit hash")
+        .expect("earlier commit recorded");
+    let tip_key = sync_store::content::ObjectHash::from_hex(&earlier_hash_hex).expect("tip hash");
+    let tampered_obj_hex = ship
+        .control_table()
+        .commit_object_at(local_seq)
+        .await
+        .expect("commit object")
+        .expect("local tip commit object recorded");
+    let tampered_bytes: Vec<u8> = (0..tampered_obj_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&tampered_obj_hex[i..i + 2], 16).expect("hex byte"))
+        .collect();
+
+    let store_id = ship.control_table().pond_id_uuid();
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let mut remote =
+        sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    let _ = remote
+        .push_commit(&[(tip_key, tampered_bytes)], "main", tip_key)
+        .await
+        .expect("publish tampered tip");
+
+    let err =
+        steward::verify_content_against_remote(ship.as_pond().expect("pond"), &remote, "main")
+            .await
+            .expect_err("tampered remote tip must be rejected");
+    assert!(
+        format!("{err}").contains("remote tip commit hashes to"),
+        "unexpected error: {err}"
+    );
 }
 
 /// `pond verify` with no remotes attached is a no-op success.
@@ -483,7 +572,7 @@ async fn pond_status_with_backup() {
             ship.control_table().pond_id_uuid()
         };
         std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        let _ = sync_store::ContentRemote::create_at_url(&remote_url, store_id, Default::default())
             .await
             .expect("create remote");
     }
@@ -506,71 +595,6 @@ async fn pond_status_with_backup() {
         .expect("push");
 
     status_command(&ctx).await.expect("status with backup");
-}
-
-/// D6.4: `pond restart-from-compact` reports a friendly error when the
-/// remote has no compact bundle to restart from.  This exercises the
-/// full command wiring (open pond, load attachment, open remote,
-/// mirror detection, capture attachment, delegate to
-/// `restart_pond_from_compact`) up to the `NoRestartPoint` mapping.
-#[tokio::test]
-async fn pond_restart_from_compact_no_restart_point() {
-    init_log();
-    let scratch = TempDir::new().expect("tempdir");
-    let pond_path = scratch.path().join("pond");
-    let remote_path = scratch.path().join("remote_bucket");
-    let remote_url = format!("file://{}", remote_path.display());
-
-    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx, "test-host").await.expect("init");
-    write_small_file(&ctx, "/r.txt", b"restart", vec!["copy", "r.txt"])
-        .await
-        .expect("write r.txt");
-    {
-        let store_id = {
-            let ship = ctx.open_pond().await.expect("open");
-            ship.control_table().pond_id_uuid()
-        };
-        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-            .await
-            .expect("create remote");
-    }
-    // Attach + push a Write bundle, but never create a Compact bundle.
-    add_backup_command(
-        &ctx,
-        "origin",
-        &remote_url,
-        false,
-        None,
-        None,
-        None,
-        None,
-        false,
-        false,
-    )
-    .await
-    .expect("backup add");
-    push_command(&ctx, Some("origin".to_string()))
-        .await
-        .expect("push");
-
-    let err = restart_from_compact_command(&ctx, "origin".to_string())
-        .await
-        .expect_err("restart must fail with no compact bundle");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("no compact bundle"),
-        "expected a no-compact-bundle error, got: {}",
-        msg
-    );
-
-    // The attachment must still be intact after the failed restart
-    // (a mirror restart captures it up-front but never drops it because
-    // the restart aborted before drop_pond_data).
-    list_remotes_command(&ctx, None)
-        .await
-        .expect("remote list still works after failed restart");
 }
 
 /// `pond remote add` rejects duplicate names without --overwrite.
@@ -634,17 +658,7 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
     init_command(&src_ctx, "test-host").await.expect("init src");
 
-    // 2) Create the remote bucket as a fresh Delta table.
-    let store_id = {
-        let ship = src_ctx.open_pond().await.expect("open src");
-        ship.control_table().pond_id_uuid()
-    };
-    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-        .await
-        .expect("create remote");
-
-    // 3) `pond backup add origin` (push-only).
+    // 2) `pond backup add origin` (push-only) auto-initializes the remote.
     add_backup_command(
         &src_ctx,
         "origin",
@@ -660,10 +674,7 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
     .await
     .expect("remote add");
 
-    // 4) Write a file -- this is the ONLY write that crosses the auto-push
-    // threshold; we never call `push_command` directly.  The
-    // StewardTransactionGuard::commit() path should trigger
-    // `run_post_commit_remotes` and forward seq -> remote.
+    // 3) Write a file -- the only write; post-commit dispatcher content-pushes.
     write_small_file(
         &src_ctx,
         "/auto.txt",
@@ -673,44 +684,33 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
     .await
     .expect("write auto.txt");
 
-    // Watermark on src should reflect that the write was pushed.
-    let upper_seq = {
-        let mut ship = src_ctx.open_pond().await.expect("reopen src");
-        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    // 4) Replica + mirror pull sees the auto-pushed file.
+    let store_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
     };
-    let last_pushed = {
-        let ship = src_ctx.open_pond().await.expect("reopen src");
-        ship.control_table()
-            .raw_config_get(&format!("last_pushed_seq:{}", remote_url))
-            .await
-            .expect("get watermark")
-            .expect("watermark set by auto-push")
-    };
-    assert_eq!(
-        last_pushed,
-        upper_seq.to_string(),
-        "auto-push should advance last_pushed_seq to last_write_seq"
-    );
-
-    // 5) Bootstrap dst as a replica of the remote via the D5.4 public
-    //    APIs (no more manual create_pond_for_restoration + raw_config_set
-    //    workaround).
-    {
-        let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
-            .await
-            .expect("open remote for bootstrap");
-        let mut dst = steward::Ship::create_replica(&dst_pond, remote.store_id())
-            .await
-            .expect("create dst replica");
-        let mut adapter = ShipRemoteSteward::new(&mut dst);
-        remote
-            .bootstrap_consumer(&mut adapter)
-            .await
-            .expect("bootstrap dst from remote");
-    }
-
-    // 6) The auto-pushed file should be visible on dst.
+    let _ = steward::Ship::create_replica(&dst_pond, store_id)
+        .await
+        .expect("create dst replica");
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
+    add_remote_command(
+        &dst_ctx,
+        "origin",
+        &remote_url,
+        "/",
+        None,
+        None,
+        None,
+        None,
+        false,
+        true,
+    )
+    .await
+    .expect("re-attach origin on dst");
+    pull_command(&dst_ctx, Some("origin".to_string()))
+        .await
+        .expect("pull on dst");
+
     let bytes = read_small_file(&dst_ctx, "/auto.txt")
         .await
         .expect("read /auto.txt on dst");
@@ -731,22 +731,16 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
     init_command(&src_ctx, "test-host").await.expect("init src");
 
-    // Create the bucket so any erroneous push would actually succeed
-    // and update the watermark; the test would catch that.
-    let store_id = {
-        let ship = src_ctx.open_pond().await.expect("open src");
-        ship.control_table().pond_id_uuid()
-    };
+    // A bare URL with pull mode at root; nothing has pushed yet, so no
+    // content remote exists.  Pull-add must not auto-create one.  We make
+    // the dir exist so add can attach the attachment YAML.
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
-        .await
-        .expect("create remote");
 
-    add_remote_command(
+    let _ = add_remote_command(
         &src_ctx,
         "origin",
         &remote_url,
-        "/", // pull-mode mirror at root -- store_id will match local
+        "/", // pull-mode mirror at root
         None,
         None,
         None,
@@ -755,7 +749,7 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
         false,
     )
     .await
-    .expect("remote add (pull)");
+    .expect_err("pull-mode add on empty remote must fail");
 
     write_small_file(
         &src_ctx,
@@ -766,17 +760,11 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
     .await
     .expect("write nopush.txt");
 
-    let watermark = {
-        let ship = src_ctx.open_pond().await.expect("reopen src");
-        ship.control_table()
-            .raw_config_get(&format!("last_pushed_seq:{}", remote_url))
-            .await
-            .expect("get watermark")
-    };
+    // No content remote was created, so a fetch finds nothing.
+    let remote = sync_store::ContentRemote::open_at_url(&remote_url, Default::default()).await;
     assert!(
-        watermark.is_none() || watermark.as_deref() == Some(""),
-        "pull-mode remote must not have last_pushed_seq set; got {:?}",
-        watermark
+        remote.is_err(),
+        "pull-mode add must not auto-create a content remote"
     );
 }
 
@@ -820,13 +808,13 @@ async fn pond_remote_add_auto_initializes_fresh_remote() {
         let ship = src_ctx.open_pond().await.expect("open src");
         ship.control_table().pond_id_uuid()
     };
-    let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+    let remote = sync_store::ContentRemote::open_at_url(&remote_url, Default::default())
         .await
         .expect("open auto-initialized remote");
     assert_eq!(
-        remote.store_id(),
+        remote.pond_id(),
         expected_pond_id,
-        "auto-initialized remote must carry our pond_id as store_id"
+        "auto-initialized remote must carry our pond_id"
     );
 
     // And a subsequent push (with no pre-init) must succeed.
@@ -853,12 +841,13 @@ async fn pond_remote_add_push_refuses_foreign_store_id() {
     let remote_url = format!("file://{}", remote_path.display());
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
-    // Pre-create the remote with a DIFFERENT store_id (simulating a
-    // foreign pond's remote).
+    // Pre-create the remote with a DIFFERENT pond_id (simulating a
+    // foreign pond's content remote).
     let foreign_store_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_store_id, Default::default())
-        .await
-        .expect("create foreign remote");
+    let _ =
+        sync_store::ContentRemote::create_at_url(&remote_url, foreign_store_id, Default::default())
+            .await
+            .expect("create foreign remote");
 
     let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&src_ctx, "test-host").await.expect("init src");
@@ -879,8 +868,8 @@ async fn pond_remote_add_push_refuses_foreign_store_id() {
     .expect_err("push-mode add against foreign store_id should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("does not match") && msg.contains("foreign pond"),
-        "expected store_id-mismatch error, got: {}",
+        msg.contains("does not match"),
+        "expected pond_id-mismatch error, got: {}",
         msg
     );
 }
@@ -916,7 +905,7 @@ async fn pond_remote_add_pull_refuses_empty_remote() {
     .expect_err("pull-mode add against empty remote should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("not a Delta table") && msg.contains("pull-mode"),
+        msg.contains("not a content remote") && msg.contains("pull-mode"),
         "expected empty-remote-refusal error, got: {}",
         msg
     );
@@ -943,7 +932,7 @@ async fn pond_remote_add_persists_mount_path() {
     // Initialize upstream remote with a foreign store_id so the pull
     // attach is allowed (any store_id is OK for pull).
     let foreign_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&upstream_url, foreign_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&upstream_url, foreign_id, Default::default())
         .await
         .expect("init upstream");
 
@@ -1110,7 +1099,7 @@ async fn pond_remote_remove_clears_mount_path_key() {
 
     // Pre-init the remote with a foreign store_id (pull attach).
     let foreign_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, foreign_id, Default::default())
         .await
         .expect("create foreign remote");
 
@@ -1162,7 +1151,7 @@ async fn pond_remote_add_root_path_refuses_foreign_store_id() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let foreign_id = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, foreign_id, Default::default())
         .await
         .expect("create foreign remote");
 
@@ -1185,8 +1174,8 @@ async fn pond_remote_add_root_path_refuses_foreign_store_id() {
     .expect_err("mirror attach against foreign store_id should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("mirror restart") && msg.contains("does not match"),
-        "expected mirror-restart-mismatch error, got: {}",
+        msg.contains("does not match"),
+        "expected mirror pond_id-mismatch error, got: {}",
         msg
     );
 }
@@ -1212,7 +1201,7 @@ async fn pond_remote_add_nonroot_path_refuses_matching_store_id() {
         let ship = ctx.open_pond().await.expect("open");
         ship.control_table().pond_id_uuid()
     };
-    let _ = sync_remote::Remote::create_at_url(&remote_url, local_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, local_id, Default::default())
         .await
         .expect("create remote with our pond_id");
 
@@ -1276,7 +1265,7 @@ async fn cross_pond_pull_materializes_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1420,7 +1409,7 @@ async fn cross_pond_pull_does_not_inflate_local_seq() {
 
     // 2) Pond A pushes to its remote.
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1535,7 +1524,7 @@ async fn foreign_mount_writes_are_refused() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1666,7 +1655,7 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1806,7 +1795,7 @@ async fn pond_remote_remove_detach_preserves_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -1920,7 +1909,7 @@ async fn pond_remote_remove_purge_drops_mount_entry() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -2021,7 +2010,7 @@ async fn pond_backup_remove_purge_is_no_op_for_mount() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
-    let _ = sync_remote::Remote::create_at_url(&remote_url, pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&remote_url, pond_id, Default::default())
         .await
         .expect("create remote");
     add_backup_command(
@@ -2079,10 +2068,10 @@ async fn pond_remote_add_refuses_duplicate_mount_path() {
     // Two distinct foreign upstreams.
     let foreign_a = uuid::Uuid::new_v4();
     let foreign_b = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_a, foreign_a, Default::default())
         .await
         .expect("create remote a");
-    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_b, foreign_b, Default::default())
         .await
         .expect("create remote b");
 
@@ -2142,10 +2131,10 @@ async fn pond_remote_add_refuses_duplicate_mount_path_trailing_slash() {
 
     let foreign_a = uuid::Uuid::new_v4();
     let foreign_b = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_a, foreign_a, Default::default())
         .await
         .expect("create remote a");
-    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url_b, foreign_b, Default::default())
         .await
         .expect("create remote b");
 
@@ -2200,7 +2189,7 @@ async fn pond_remote_add_refuses_duplicate_foreign_store_id() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let foreign = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url, foreign, Default::default())
         .await
         .expect("create remote");
 
@@ -2256,7 +2245,7 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
     std::fs::create_dir_all(&remote_path).expect("mkdir remote");
 
     let foreign = uuid::Uuid::new_v4();
-    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&url, foreign, Default::default())
         .await
         .expect("create remote");
 
@@ -2348,7 +2337,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         ship.control_table().pond_id_uuid()
     };
     std::fs::create_dir_all(&a_remote_path).expect("mkdir a_remote");
-    let _ = sync_remote::Remote::create_at_url(&a_url, a_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&a_url, a_pond_id, Default::default())
         .await
         .expect("create A's remote");
     add_backup_command(
@@ -2396,7 +2385,7 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         .await
         .expect("write b.txt on B");
     std::fs::create_dir_all(&b_remote_path).expect("mkdir b_remote");
-    let _ = sync_remote::Remote::create_at_url(&b_url, b_pond_id, Default::default())
+    let _ = sync_store::ContentRemote::create_at_url(&b_url, b_pond_id, Default::default())
         .await
         .expect("create B's remote");
     add_backup_command(
@@ -2540,4 +2529,40 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         .await
         .expect("B still reads A after C's pull");
     assert_eq!(b_view_of_a_after, b"from pond A");
+
+    // --- INVARIANT 5: the graft pin is a replicated content reference.
+    // B records `/sys/grafts/upstreamA` pinning A's tip; that file is
+    // B-owned content, so it is covered by B's commit and replicates to
+    // C.  C therefore holds a content-addressed reference to A's tip
+    // WITHOUT having fetched A's closure (invariants 2/3 still hold).
+    {
+        let a_tip = {
+            let a_remote = sync_store::ContentRemote::open_at_url(&a_url, Default::default())
+                .await
+                .expect("open A's remote");
+            a_remote
+                .get_tip("main")
+                .await
+                .expect("get A's tip")
+                .expect("A has a tip")
+        };
+
+        // B holds the pin it wrote.
+        let b_pin_bytes = read_small_file(&b_ctx, "/sys/grafts/upstreamA")
+            .await
+            .expect("B holds its graft pin for upstreamA");
+        let b_pin = steward::GraftPin::from_yaml_bytes(&b_pin_bytes).expect("parse B's graft pin");
+        assert_eq!(b_pin.foreign_pond_id, a_pond_id.to_string());
+        assert_eq!(b_pin.mount_path, "/imports/A");
+        assert_eq!(b_pin.pinned_tip, a_tip.to_hex());
+
+        // C, having imported B at /imports/B, sees B's graft pin under the
+        // mount -- a content reference revealing that B grafts A at tip T,
+        // learned WITHOUT C fetching A's content closure.
+        let c_pin_bytes = read_small_file(&c_ctx, "/imports/B/sys/grafts/upstreamA")
+            .await
+            .expect("C sees B's replicated graft pin under /imports/B");
+        let c_pin = steward::GraftPin::from_yaml_bytes(&c_pin_bytes).expect("parse C's graft pin");
+        assert_eq!(c_pin, b_pin, "C's replicated graft pin must equal B's");
+    }
 }
