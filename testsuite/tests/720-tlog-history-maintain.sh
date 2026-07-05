@@ -8,17 +8,16 @@
 #     2. Every write transaction -- not just `copy`, but `mkdir` too -- appends
 #        exactly one leaf.  The checkpoint history grows monotonically (1,2,3,4)
 #        and `tlog verify` passes all checks.
-#     3. `pond maintain --compact` IS a spine-bearing commit: it stamps a
-#        `DataCommitted(Compact)` on the content-graph chain (so a
-#        post-compaction `pond push` can reach the rewrite) and therefore
-#        appends exactly one transparency-log leaf.  The log still verifies
-#        clean afterward (the published leaves stay faithful to the
-#        control-table commit spine).
+#     3. `pond maintain --compact` is content-preserving (Decision D9): the
+#        rewrite leaves the pond's `root_tree_hash` unchanged, so it is
+#        transparent to the content graph and appends NO transparency-log
+#        leaf -- like `git gc`/repack adding no commits.  The log still
+#        verifies clean afterward and its size is unchanged.
 #
 # EXPECTED:
 #   - Empty pond: no {POND}/tlog, graceful show/verify, exit 0.
 #   - mkdir and copy each add one leaf; history is [1,2,3,4]; verify passes.
-#   - Compaction adds exactly one leaf (history [1..5]) and verify still passes.
+#   - Compaction adds no leaf (history stays [1..4]) and verify still passes.
 #
 # History:
 #   Added with `pond tlog` to cover the log's growth and maintenance behavior.
@@ -61,14 +60,19 @@ pond tlog verify > /tmp/720-verify.txt 2>/dev/null
 check "[ $? -eq 0 ]" "verify passes on the grown log"
 check "[ \$(grep -c '\[PASS\]' /tmp/720-verify.txt) -eq 4 ]" "all four checks PASS"
 
-echo "--- Step 3: maintain --compact is spine-bearing and adds one leaf ---"
+echo "--- Step 3: maintain --compact is content-preserving and adds NO leaf ---"
 pond maintain --compact > /tmp/720-maintain.txt 2>&1 || true
+check_contains /tmp/720-maintain.txt "compaction actually ran" "Compaction committed"
 pond tlog show > /tmp/720-show2.txt 2>/dev/null
-check_contains /tmp/720-show2.txt "compaction adds one leaf (size 5)" "Tree size:  5"
-check "[ \$(grep -c '^  size=' /tmp/720-show2.txt) -eq 5 ]" "history grew to five checkpoints after compaction"
-# The compaction leaf extends the monotonic history to [1..5].
+cat /tmp/720-show2.txt
+# Decision D9: compaction preserves the content graph (root_tree_hash is
+# unchanged), so it is transparent to the transparency log and appends no
+# leaf -- like `git gc`/repack adding no commits.  The tree stays at 4.
+check_contains /tmp/720-show2.txt "compaction adds no leaf (size stays 4)" "Tree size:  4"
+check "[ \$(grep -c '^  size=' /tmp/720-show2.txt) -eq 4 ]" "history unchanged at four checkpoints after compaction"
+# The monotonic history is unchanged by a content-preserving compaction.
 SIZES2=$(grep -oE 'size=[0-9]+' /tmp/720-show2.txt | grep -oE '[0-9]+' | tr '\n' ' ')
-check "[ \"$SIZES2\" = \"1 2 3 4 5 \" ]" "history sizes are monotonic 1..5 (got: $SIZES2)"
+check "[ \"$SIZES2\" = \"1 2 3 4 \" ]" "history sizes still monotonic 1..4 (got: $SIZES2)"
 
 pond tlog verify > /tmp/720-verify2.txt 2>/dev/null
 check "[ $? -eq 0 ]" "verify still passes after compaction"
