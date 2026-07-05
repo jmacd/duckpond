@@ -130,13 +130,11 @@ impl Ship {
         // replica holds the root-dir v1 row and `pond verify` matches
         // (P2-VERIFY-BOOTSTRAP-DRIFT).
         let root_version = ship.data_persistence.table().version().unwrap_or(0);
-        let root_pond_id = ship.control_table.pond_id_uuid();
-        let root_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-            ship.data_persistence.table().clone(),
-            root_pond_id,
-        )
-        .await
-        .map_err(|e| StewardError::ControlTable(format!("compute root-init checksums: {}", e)))?;
+        // Partition checksums are retired (Decision D9, step 5b): the content
+        // root recorded in the commit-log node subsumes them.  The vestigial
+        // `DataCommittedMetadata.partition_checksums` field is left empty for
+        // the legacy replication path.
+        let root_checksums = sync_steward::PartitionChecksums::new();
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
@@ -948,13 +946,17 @@ impl Ship {
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record begin: {}", e)))?;
 
-        // 2. Pre-compaction checksum snapshot.
-        let pre = crate::remote_adapter::compute_live_checksums_for_table(
+        // 2. Pre-compaction content root.  Compaction must be
+        //    content-preserving, so the pond's `root_tree_hash` must be
+        //    byte-identical before and after the optimize (Decision D9, step
+        //    5b: the content root subsumes the retired partition checksums).
+        let pre = crate::content_tree::compute_content_tree_for_table(
             self.data_persistence.table().clone(),
-            pond_id,
+            &pond_id.to_string(),
         )
         .await
-        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?;
+        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?
+        .root_tree_hash;
 
         // 3. Run the Delta optimize, scoped to our own pond_id partitions.
         //    Stamp the compaction's txn_seq into the commit's `pond_txn`
@@ -1017,14 +1019,16 @@ impl Ship {
             });
         }
 
-        // 5. Post-compaction snapshot + invariant: content must be unchanged.
-        let post = crate::remote_adapter::compute_live_checksums_for_table(
+        // 5. Post-compaction content root + invariant: content must be
+        //    unchanged.
+        let post = crate::content_tree::compute_content_tree_for_table(
             self.data_persistence.table().clone(),
-            pond_id,
+            &pond_id.to_string(),
         )
         .await
-        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?;
-        if let Err(e) = assert_compaction_invariant(&pre, &post) {
+        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?
+        .root_tree_hash;
+        if let Err(e) = assert_compaction_invariant(pre, post) {
             let reason = format!("{}", e);
             self.record_compact_failed(&txn_meta, started, reason).await;
             return Err(e);
@@ -1048,8 +1052,17 @@ impl Ship {
         // a compaction seq needs no spine of its own.
         let commit_spine = None;
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+        // Partition checksums are retired (step 5b); the content invariant
+        // above is the compaction integrity check.  The vestigial control
+        // field is left empty for the legacy replication path.
         self.control_table
-            .record_compact_committed(&txn_meta, new_version, duration_ms, post, commit_spine)
+            .record_compact_committed(
+                &txn_meta,
+                new_version,
+                duration_ms,
+                sync_steward::PartitionChecksums::new(),
+                commit_spine,
+            )
             .await
             .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
 
@@ -1267,41 +1280,23 @@ impl std::fmt::Debug for Ship {
     }
 }
 
-/// Verify that `pre` and `post` describe the same logical content: the
-/// same set of partition keys AND identical checksum bytes per key.
-/// Producer-side compaction ([`Ship::compact`]) merges parquet files
-/// without changing any row, so this MUST hold; a violation indicates a
-/// bug (e.g. optimize touched foreign rows or dropped data) and aborts
-/// the compaction transaction.
+/// Verify that `pre` and `post` describe the same logical content: the pond's
+/// `root_tree_hash` must be byte-identical.  Producer-side compaction
+/// ([`Ship::compact`]) merges parquet files without changing any logical
+/// entry, so this MUST hold; a violation indicates a bug (e.g. optimize
+/// touched foreign rows or dropped data) and aborts the compaction
+/// transaction.  Because the content root is lineage-independent, this is the
+/// same guarantee replication relies on (Decision D9, step 5b).
 fn assert_compaction_invariant(
-    pre: &sync_steward::PartitionChecksums,
-    post: &sync_steward::PartitionChecksums,
+    pre: sync_store::ObjectHash,
+    post: sync_store::ObjectHash,
 ) -> Result<(), StewardError> {
-    if pre.len() != post.len() {
+    if pre != post {
         return Err(StewardError::ControlTable(format!(
-            "compaction changed partition count: pre={} post={}",
-            pre.len(),
-            post.len(),
+            "compaction altered content root: pre={} post={}",
+            pre.to_hex(),
+            post.to_hex(),
         )));
-    }
-    for (partition, pre_cs) in pre {
-        match post.get(partition) {
-            Some(post_cs) if post_cs == pre_cs => {}
-            Some(post_cs) => {
-                return Err(StewardError::ControlTable(format!(
-                    "compaction altered partition {} checksum: pre={} post={}",
-                    partition,
-                    pre_cs.hex(),
-                    post_cs.hex(),
-                )));
-            }
-            None => {
-                return Err(StewardError::ControlTable(format!(
-                    "compaction dropped partition {}",
-                    partition,
-                )));
-            }
-        }
     }
     Ok(())
 }

@@ -338,37 +338,19 @@ impl<'a> StewardTransactionGuard<'a> {
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
 
-                // D5.7a: snapshot the post-commit partition checksums for
-                // the local pond_id so that DataCommitted records the
-                // exact value `verify_against_remote` will later expect
-                // as `live`.  Reading the post-commit Delta state goes
-                // through a fresh DataFusion SessionContext, so it does
-                // not require an active transaction on `persistence`.
-                //
-                // The post-commit path still needs the local pond's partition
-                // checksums for the control-table `DataCommitted` record.  Under
-                // Decision D9 the authoritative content roots are stamped
+                // The post-commit path records a `DataCommitted` control row.
+                // Under Decision D9 the authoritative content roots are stamped
                 // in-transaction into the commit-log node (by
-                // `write_reserved_nodes`), so this scan no longer folds the
+                // `write_reserved_nodes`), so this path no longer folds the
                 // content tree -- step 4b retired that second O(n) fold, leaving
                 // the incremental in-transaction fold as the sole content-root
-                // computation.  Reading the post-commit Delta state goes through
-                // a fresh DataFusion SessionContext, so it does not require an
-                // active transaction on `persistence`.  (Checksum subsumption by
-                // the per-directory tree hashes is a later step, 5b.)
+                // computation.  Step 5b then retired the per-partition
+                // checksums entirely: the per-directory tree hashes in the
+                // content tree subsume them, so the vestigial
+                // `DataCommittedMetadata.partition_checksums` field is left
+                // empty for the legacy replication path.
                 let pond_id = self.control_table.pond_id_uuid();
-                let post_commit_table = persistence.table().clone();
-                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-                    post_commit_table,
-                    pond_id,
-                )
-                .await
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to snapshot partition checksums after commit: {}",
-                        e
-                    ))
-                })?;
+                let partition_checksums = sync_steward::PartitionChecksums::new();
 
                 // Content-graph spine (Decision D9): the authoritative spine was
                 // already stamped into the pond-resident commit-log node, in the
@@ -1073,25 +1055,12 @@ impl<'a> StewardTransactionGuard<'a> {
         let outcome: Result<(), String> = result.as_ref().map(|_| ()).map_err(|e| format!("{}", e));
 
         match commit_result {
-            Ok((Some(new_version), persistence)) => {
-                // Snapshot partition checksums for the local pond_id so
-                // replication's bundle Checksum rows match what
-                // `verify_against_remote` will later expect.  Reading the
-                // post-commit Delta state goes through a fresh
-                // SessionContext, so no active transaction is required.
-                let pond_id_uuid = self.control_table.pond_id_uuid();
-                let post_commit_table = persistence.table().clone();
-                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
-                    post_commit_table,
-                    pond_id_uuid,
-                )
-                .await
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to snapshot partition checksums for post-commit factory: {}",
-                        e
-                    ))
-                })?;
+            Ok((Some(new_version), _persistence)) => {
+                // Partition checksums are retired (Decision D9, step 5b): the
+                // per-directory tree hashes in the content tree subsume them,
+                // so the vestigial `DataCommittedMetadata.partition_checksums`
+                // field is left empty for the legacy replication path.
+                let partition_checksums = sync_steward::PartitionChecksums::new();
 
                 // DataCommitted + Completed (factory txn) + PostPush* (parent)
                 // in a single batched control-table commit.

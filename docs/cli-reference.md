@@ -27,7 +27,7 @@
 | `pond restore` | Bootstrap a whole-pond replica from a backup (disaster recovery) | `pond restore origin file:///mnt/backups/origin` |
 | `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
-| `pond fsck` | Local integrity check: content checksums + Merkle root fingerprint | `pond fsck --verbose` |
+| `pond fsck` | Local integrity check: content checksums + content-tree root fingerprint | `pond fsck --verbose` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond tlog verify` | Verify the transparency log (inclusion, append-only, faithfulness) (D5) | `pond tlog verify` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
@@ -598,9 +598,12 @@ pond restore origin s3://my-bucket \
 - The `NAME` attachment is left configured as a mirror, so a later
   `pond pull NAME` tracks the upstream incrementally.
 
-> The node_id/version-keyed `pond fsck` root is **not** a cross-replica
-> invariant (a replica reaches the same content through a different local
-> transaction history); the tip commit hash is.  See `pond verify`.
+> The `pond fsck` content root matches across identity-preserving mirrors
+> (a byte copy, or a `pond pull` mirror that keeps the producer's `pond_id`),
+> because it hashes content, not local transaction history.  A cross-pond
+> consumer keeps its own `pond_id`, so its top-level root differs by design;
+> the tip commit hash is the canonical cross-pond fingerprint.  See
+> `pond verify`.
 
 ---
 
@@ -646,12 +649,11 @@ code is non-zero if any remote diverges or fails to load.
 
 Local, **offline** filesystem-check.  Unlike `pond verify` (which compares
 against a *remote*), `fsck` validates the pond against itself and prints a
-single deterministic **root checksum** that exhaustively fingerprints every
-row in the data table -- across every `pond_id`, including cross-pond
-imports.
+single deterministic **content root** that fingerprints the live content of
+every `pond_id` in the data table -- including cross-pond imports.
 
 ```bash
-# Print the root checksum (one line, 64 hex chars)
+# Print the content root (one line, 64 hex chars)
 pond fsck
 
 # Skip the content-rehash pass; compute only the structural root (fast)
@@ -661,49 +663,56 @@ pond fsck --quick
 pond fsck --verbose
 ```
 
-The root is a Merkle tree of Merkle trees:
+The root is a content tree of content trees.  A directory *is* a partition,
+and its recursive `tree_hash` (fold-excluding the reserved INDEX/LOG nodes)
+is its checksum; the top-level root is a `tree_hash` over the per-pond
+`root_tree_hash`es, keyed by `pond_id`:
 
 ```text
-root                                  <- fold of all partition checksums
-|- partition (pond_id, part_id) -> per-partition Merkle checksum
-|  |- row leaf = blake3(serde_json(OplogEntry))
+root                                  <- tree_hash over per-pond roots
+|- pond_id -> root_tree_hash          (that pond's content tree)
+|  |- directory (part_id) -> tree_hash
+|  |  |- child_hash of each entry (recursive)
+|  |  +- ...
 |  +- ...
 +- ...
 ```
 
-It is **layout- and compaction-independent** (it hashes row content, not
-parquet file layout), so two true replicas of the same pond produce the
-**same root hex**.  Comparing two replicas is therefore a string compare:
+It is **layout-, compaction-, and lineage-independent** (it hashes content,
+not parquet file layout or local transaction history), so two replicas of
+the same pond -- a byte copy, or a *mirror* rebuilt independently by
+`pond pull` -- produce the **same root hex**.  Comparing two replicas is
+therefore a string compare:
 
 ```bash
 pond fsck            # on replica A  ->  a1b2c3...
 pond fsck            # on replica B  ->  a1b2c3...   (identical iff in sync)
 ```
 
-> **What "replica" means here.**  The root is keyed by `pond_id`/`part_id`,
-> so equal-root comparison applies to **identity-preserving** replicas: a
-> byte copy of the pond directory, or a *mirror* restart that keeps the
-> producer's `pond_id`.  It is **not** a content-only fingerprint: two ponds
-> created independently with the same files get different random
-> `pond_id`/`part_id` UUIDs and therefore different roots.  A **cross-pond
+> **What "replica" means here.**  The top-level root folds the per-pond
+> content trees keyed by `pond_id`, so equal-root comparison applies to
+> **identity-preserving** replicas: a byte copy of the pond directory, or a
+> *mirror* that keeps the producer's `pond_id`.  It is **not** a content-only
+> fingerprint: two ponds created independently with the same files get
+> different random `pond_id`s and therefore different roots.  A **cross-pond
 > consumer** (`pond remote add ... /imports/<name>`) keeps its own `pond_id`
 > and mounts the producer's partitions, so its root differs by design --
-> compare such a consumer at the **partition** level instead: every
-> producer partition line in `pond fsck --verbose`
-> (`<pond_id>/<part_id>  rows=N  <checksum>`) reappears verbatim in the
+> compare such a consumer at the **partition** level instead: every producer
+> partition line in `pond fsck --verbose`
+> (`<pond_id>/<part_id>  rows=N  <tree_hash>`) reappears verbatim in the
 > consumer's `--verbose` output once it has pulled.
 
-**Content-checksum pass** (default; skipped with `--quick`): the row Merkle
-commits to each file's *recorded* `blake3`, but not to the bytes it points
-at.  By default `fsck` also re-hashes inline file content and re-reads every
-external `_large_files/blake3=<hash>.parquet` blob, confirming the bytes
-match their recorded `blake3`.  This catches bit-rot / blob corruption that
-the structural root alone cannot see.
+**Content-checksum pass** (default; skipped with `--quick`): the structural
+root commits to each file's *recorded* `blake3`, but not to the bytes it
+points at.  By default `fsck` also re-hashes inline file content and re-reads
+every external `_large_files/blake3=<hash>.parquet` blob, confirming the
+bytes match their recorded `blake3`.  This catches bit-rot / blob corruption
+that the structural root alone cannot see.
 
 Output:
-- Default: the root checksum on one line.
+- Default: the content root on one line.
 - `--verbose`: `Root checksum`, a per-partition digest list, and counts of
-  rows / inline content / blobs verified, ending in `Result: OK` or
+  live entries / inline content / blobs verified, ending in `Result: OK` or
   `Result: FAILED`.
 
 Exit code is non-zero if any content check fails; each failure is logged
@@ -815,9 +824,12 @@ pond rebuild-control --force
   `last_pushed_seq` / `last_pulled_seq` watermarks live only in the
   control table.  Re-attach remotes with `pond remote add` /
   `pond backup add` after a rebuild.
-- **Per-transaction partition checksums** -- not recoverable from data
-  alone, so reconstructed `DataCommitted` records carry empty checksums
-  and `pond verify` must be re-baselined.
+
+Per-transaction partition checksums are no longer recorded (retired in
+favour of the pond-resident content tree, Decision D9 step 5b), so a
+rebuilt control table is byte-equivalent to a normally committed one for
+integrity purposes -- `pond fsck` and `pond verify` both work against a
+rebuilt control table without re-baselining.
 
 > **Safety:** if a real control table already exists, the rebuild is
 > refused unless `--force` is given.  With `--force`, the existing

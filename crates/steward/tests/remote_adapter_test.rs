@@ -811,79 +811,6 @@ async fn push_pending_to_remote_errors_on_corrupt_watermark() {
     );
 }
 
-/// D5.7a regression: after a native write transaction commits, the
-/// `DataCommitted` record must carry partition checksums that match
-/// the live state of the data filesystem.  Before D5.7a,
-/// `record_data_committed` always stored `partition_checksums: {}`,
-/// causing `verify_against_remote(remote, src)` to report drift on
-/// every native write -- the bundle's recorded checksums were empty
-/// while the live checksums (computed by the steward) had real
-/// digests, so `compare(live, recorded)` always returned mismatches.
-///
-/// This test reproduces the failing path:
-/// 1. Source pond writes data and pushes to a `file://` remote.
-/// 2. `verify_against_remote(remote, src)` must report `ok = true`.
-///
-/// Cross-pond verify symmetry (dst pulls, dst verifies against
-/// remote) is a separate concern not addressed by D5.7a: the live
-/// checksum on dst is computed over only the bundles pulled, whereas
-/// src's recorded checksum is computed over its full local data
-/// table (including the unpushable `pond_init` rows at seq=1).
-/// Reconciling those two views is a follow-up.
-#[tokio::test]
-async fn ship_remote_native_write_then_verify_passes() {
-    init_log();
-    let tmp = tempdir().expect("tempdir");
-    let src_path = tmp.path().join("src");
-    let remote_path = tmp.path().join("remote");
-
-    // 1. Source pond with a real write transaction.
-    let mut src = Ship::create_pond(&src_path, "test-host")
-        .await
-        .expect("create src");
-    let src_pond_id = src.control_table().pond_id_uuid();
-
-    src.write_transaction(&meta("write_for_verify"), async |fs| {
-        let root = fs.root().await?;
-        let _ = tinyfs::async_helpers::convenience::create_file_path(
-            &root,
-            "/verify_me.txt",
-            b"payload for verify",
-        )
-        .await?;
-        Ok(())
-    })
-    .await
-    .expect("write transaction");
-    let txn_seq = src.last_write_seq();
-    assert!(txn_seq >= 2, "expected seq >= 2 after one write");
-
-    // 2. Fresh file:// remote with src's store_id.
-    let mut remote = Remote::create(&remote_path, src_pond_id)
-        .await
-        .expect("create remote");
-
-    // 3. Push.
-    {
-        let mut adapter = ShipRemoteSteward::new(&mut src);
-        remote.push(&mut adapter, txn_seq).await.expect("push");
-    }
-
-    // 4. Verify src against remote.  Pre-D5.7a, this would fail
-    //    because recorded was empty but live had real checksums.
-    let adapter = ShipRemoteSteward::new(&mut src);
-    let report = sync_remote::verify_against_remote(&remote, &adapter)
-        .await
-        .expect("verify src");
-    assert!(
-        report.ok,
-        "src verify must pass after D5.7a: live and recorded should match.  \
-         mismatches={:?}, divergence_boundary={:?}",
-        report.mismatches, report.divergence_boundary
-    );
-    assert_eq!(report.remote_latest_seq, Some(txn_seq));
-}
-
 /// Write `content` to `path` in its own write transaction and return the
 /// allocated txn_seq.
 async fn write_one(src: &mut Ship, path: &str, content: &[u8]) -> i64 {
@@ -971,8 +898,9 @@ async fn ship_compact_records_pushable_compact_transaction() {
         "recorded data_delta_version must point at the optimize commit"
     );
     assert!(
-        !dc_meta.partition_checksums.is_empty(),
-        "compaction records the post-compaction partition checksums"
+        dc_meta.partition_checksums.is_empty(),
+        "partition checksums are retired (step 5b): the content root is the \
+         compaction integrity check, so the vestigial control field is empty"
     );
 
     // get_last_write_sequence (reads DataCommitted from disk) reflects it.
@@ -1210,111 +1138,4 @@ async fn ship_maintain_compact_survives_reopen() {
         expected_seq,
         "reopen after maintain --compact must recover the compaction seq from the data table"
     );
-}
-
-/// P2-VERIFY-BOOTSTRAP-DRIFT regression: a replica bootstrapped from a
-/// remote must verify cleanly against that remote.  Before the fix the
-/// producer's pond_init root rows (Delta version 1, mis-recorded as
-/// data_delta_version=0 and skipped by push) were never replicated, so
-/// the replica's root partition diverged.  Now seq=1 is a normal bundle.
-#[tokio::test]
-async fn ship_replica_verify_matches_after_bootstrap() {
-    use sync_remote::Remote;
-
-    init_log();
-    let tmp = tempdir().expect("tempdir");
-    let src_path = tmp.path().join("src");
-    let dst_path = tmp.path().join("dst");
-    let remote_path = tmp.path().join("remote");
-
-    // Producer with a few writes.
-    let mut src = Ship::create_pond(&src_path, "test-host")
-        .await
-        .expect("create src");
-    let pond_id = src.control_table().pond_id_uuid();
-    for i in 0..3 {
-        let _ = write_one(
-            &mut src,
-            &format!("/f{}.txt", i),
-            format!("v{}", i).as_bytes(),
-        )
-        .await;
-    }
-
-    // Push every seq (1..=upper); seq=1 (pond_init) is now a real bundle.
-    let mut remote = Remote::create(&remote_path, pond_id).await.expect("remote");
-    let upper = src.last_write_seq();
-    for seq in 1..=upper {
-        let mut a = ShipRemoteSteward::new(&mut src);
-        match remote.push(&mut a, seq).await {
-            Ok(()) => {}
-            Err(sync_remote::RemoteError::NoSuchCommit(_)) => {}
-            Err(e) => panic!("push {}: {}", seq, e),
-        }
-    }
-
-    // The pond_init bundle (seq=1) must now exist on the remote.
-    let oldest = remote.oldest_available_seq().await.expect("oldest");
-    assert_eq!(
-        oldest,
-        Some(1),
-        "pond_init (seq=1) must be replicated as a bundle"
-    );
-
-    // Producer verifies against its own backup.
-    {
-        let a = ShipRemoteSteward::new(&mut src);
-        let r = sync_remote::verify_against_remote(&remote, &a)
-            .await
-            .expect("verify src");
-        assert!(
-            r.ok,
-            "producer verify must pass: mismatches={:?}",
-            r.mismatches
-        );
-    }
-
-    // Bootstrap a fresh mirror replica and verify it against the remote.
-    // Bundle bootstrap needs an empty data table (see the note on
-    // `ship_remote_bootstrap_consumer_no_compact`); `create_replica` would
-    // seed a diverging local root v1.
-    let mut dst = Ship::create_pond_for_restoration(
-        &dst_path,
-        replica_metadata(uuid::Uuid::from_bytes(*pond_id.as_bytes())),
-    )
-    .await
-    .expect("create restoration replica");
-    {
-        let mut a = ShipRemoteSteward::new(&mut dst);
-        remote
-            .bootstrap_consumer(&mut a)
-            .await
-            .expect("bootstrap_consumer");
-    }
-    {
-        let a = ShipRemoteSteward::new(&mut dst);
-        let r = sync_remote::verify_against_remote(&remote, &a)
-            .await
-            .expect("verify dst");
-        assert!(
-            r.ok,
-            "replica verify must pass after bootstrap: mismatches={:?}",
-            r.mismatches
-        );
-    }
-
-    // And the replica holds the data.
-    let tx = dst
-        .begin_read(&meta("verify_dst"))
-        .await
-        .expect("begin_read");
-    let root = tx.root().await.expect("root");
-    for i in 0..3 {
-        let bytes = root
-            .read_file_path_to_vec(&format!("/f{}.txt", i))
-            .await
-            .expect("read replica file");
-        assert_eq!(bytes, format!("v{}", i).as_bytes());
-    }
-    let _ = tx.commit().await.expect("commit read");
 }

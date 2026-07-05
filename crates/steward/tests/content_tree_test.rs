@@ -119,3 +119,73 @@ async fn differing_content_yields_differing_root() {
     let rb = steward::compute_content_tree(&ship_b).await.expect("b");
     assert_ne!(ra.root_tree_hash, rb.root_tree_hash);
 }
+
+/// A rich mix of mutation kinds (create, nested dir, overwrite, rename,
+/// delete) exercised in sequence.  Every write transaction runs the
+/// `StewardTransactionGuard` debug oracle, which asserts the *incremental*
+/// spine roots (`root_tree_hash`, `node_manifest_hash`, `node_manifest_root`,
+/// and the manifest bytes) are byte-identical to a full fold of the same live
+/// state.  Reaching the end without a panic proves incremental-vs-rebuild
+/// equivalence for both roots across all of these mutation kinds (Phase 6).
+#[tokio::test]
+async fn incremental_roots_match_full_fold_over_diverse_mutations() {
+    let tmp = tempdir().expect("tempdir");
+    let mut ship = Ship::create_pond(tmp.path().join("pond"), "phase6-equiv")
+        .await
+        .expect("create pond");
+
+    // Create files at the root and in a nested directory.
+    write_file(&mut ship, "/a.txt", b"alpha").await;
+    mkdir_and_file(&mut ship, "/sub", "/sub/b.txt", b"beta").await;
+    mkdir_and_file(&mut ship, "/sub/deep", "/sub/deep/c.txt", b"gamma").await;
+
+    // Overwrite an existing file (new version of the same node).
+    ship.write_transaction(&meta("overwrite"), async move |fs| {
+        use tokio::io::AsyncWriteExt;
+        let root = fs.root().await?;
+        let mut w = root
+            .async_writer_path_with_type("/a.txt", tinyfs::EntryType::FilePhysicalVersion)
+            .await?;
+        w.write_all(b"alpha-2")
+            .await
+            .map_err(|e| steward::StewardError::Aborted(format!("write: {e}")))?;
+        w.shutdown()
+            .await
+            .map_err(|e| steward::StewardError::Aborted(format!("close: {e}")))?;
+        Ok(())
+    })
+    .await
+    .expect("overwrite transaction");
+
+    // Rename a file within its directory.
+    ship.write_transaction(&meta("rename"), async move |fs| {
+        let root = fs.root().await?;
+        let sub = root.open_dir_path("/sub").await?;
+        sub.rename_entry("b.txt", "b-renamed.txt").await?;
+        Ok(())
+    })
+    .await
+    .expect("rename transaction");
+
+    // Delete a file.
+    ship.write_transaction(&meta("delete"), async move |fs| {
+        let root = fs.root().await?;
+        let deep = root.open_dir_path("/sub/deep").await?;
+        deep.remove_entry("c.txt").await?;
+        Ok(())
+    })
+    .await
+    .expect("delete transaction");
+
+    // The pond still folds to a stable, non-trivial content tree.
+    let r1 = steward::compute_content_tree(&ship).await.expect("fold 1");
+    let r2 = steward::compute_content_tree(&ship).await.expect("fold 2");
+    assert_eq!(
+        r1.root_tree_hash, r2.root_tree_hash,
+        "root tree hash must be deterministic after diverse mutations"
+    );
+    assert!(
+        r1.nodes_hashed >= 2,
+        "root plus /sub survive the delete of /sub/deep/c.txt"
+    );
+}

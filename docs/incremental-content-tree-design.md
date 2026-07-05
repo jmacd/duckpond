@@ -23,8 +23,8 @@ Phases track the plan in Section 8; each is independently reviewable.
 | 4a | Spine relocation + atomic commit (LOG node, in-txn `commit_object`) | **Done** |
 | 4b | Incremental commit fold (content root from changeset along touched path) | **Done** |
 | 5 | `commit_object` gains node-keyed Merkle root (`node_manifest_root`) alongside flat `node_manifest_hash` | **Done** |
-| 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | Not started |
-| 6 | Validation (equivalence + rebuild-from-pond; keep tlog/pull/719 green; presubmit) | Not started |
+| 5b | Checksum subsumption (per-directory `tree_hash` replaces `row_leaf_digest`) | **Done** |
+| 6 | Validation (equivalence + rebuild-from-pond; keep tlog/pull/719 green; presubmit) | **Done** |
 
 **Tier 0 (done).** Landed on branch `jmacd/65`. The two full-table `SELECT *`
 post-commit scans (content-tree fold + partition checksums) are now one shared
@@ -555,10 +555,30 @@ independently reviewable and keeps the whole suite green.
    flat `node_manifest_hash`, which is retained as the manifest object's fetch
    key; the pull path verifies both against the tip commit. Incremental manifest
    transfer via the Merkle root is deferred to a later delta-INDEX phase.
-4. **Checksum subsumption.** Replace the `row_leaf_digest` partition checksums
-   with per-directory `tree_hash` comparison in replication/fsck; drop the
-   redundant checksum path.
-5. **Validation (Section 8 step 6).** Incremental-vs-rebuild equivalence for
-   both roots; a "discard control, rebuild from pond" test; keep
-   `tlog_materialize_test`, `content_pull_test`, and
-   `testsuite/tests/719-tlog-verify.sh` green; full presubmit.
+4. **Checksum subsumption.** *(Done.)* `fsck` now computes the structural
+   root from each pond's content tree -- a directory *is* a partition, and its
+   recursive `tree_hash` (fold-excluding the reserved INDEX/LOG nodes) is its
+   content checksum; the cross-pond root is a `tree_hash` over the per-pond
+   `root_tree_hash`es. The compaction invariant (`Ship::compact`) asserts the
+   pond's `root_tree_hash` is byte-identical pre/post instead of comparing
+   per-partition `row_leaf_digest` Merkles, and the commit path
+   (`StewardTransactionGuard`, root-init) no longer computes partition
+   checksums -- the vestigial `DataCommittedMetadata.partition_checksums` field
+   is left empty for the disposable legacy replication stack (`sync-remote` /
+   `sync-steward`), which is untouched. `row_leaf_digest` /
+   `compute_live_checksums_for_table` survive only for that legacy adapter and
+   a full-vs-narrow-leaf equivalence test.
+5. **Validation (Section 8 step 6).** *(Done.)* Incremental-vs-rebuild
+   equivalence for both roots is asserted on every write transaction by the
+   `StewardTransactionGuard` debug oracle (`root_tree_hash`,
+   `node_manifest_hash`, `node_manifest_root`, and the manifest bytes); a new
+   `content_tree_test::incremental_roots_match_full_fold_over_diverse_mutations`
+   drives create / nested-dir / overwrite / rename / delete through that oracle.
+   A new `rebuild_control_test::rebuild_control_preserves_content_roots` discards
+   the control table, rebuilds it from the data FS alone, and confirms the
+   `fsck` content root and `compute_content_tree` root are byte-identical --
+   proving the pond content is reconstructable from data without the disposable
+   control table. `tlog_materialize_test`, `content_pull_test`, and the full
+   workspace suite (plus fmt and `clippy -D warnings`) are green;
+   `testsuite/tests/719-tlog-verify.sh` is unaffected (it compares tip commit
+   hashes, not fsck partition digests).

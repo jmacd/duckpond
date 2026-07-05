@@ -1,10 +1,10 @@
 # Unified Pond Storage Architecture (Decision D9)
 
 Status: **target architecture.** Steps 4a (spine relocation), 4b (incremental
-commit fold), and 5 (`commit_object` node-keyed Merkle root) have landed; steps
-5b and 6 are in progress. This document describes where the system ends
-up once that sequence completes, and why the design is coherent. It is the
-architectural companion to the phased implementation plan in
+commit fold), 5 (`commit_object` node-keyed Merkle root), 5b (checksum
+subsumption), and 6 (validation) have landed; the D9 sequence is complete. This
+document describes where the system ends up, and why the design is
+coherent. It is the architectural companion to the phased implementation plan in
 `docs/incremental-content-tree-design.md` (see its Section 10 and progress
 table); read this for the "what and why," read that for the "how and when."
 
@@ -155,13 +155,17 @@ remove the last pond-derived data from the authoritative-in-control position.
   push/pull fetch-and-verify key; the Merkle root adds an incremental identity
   commitment (verified by the pull path against the tip commit) and paves the
   way for a later incremental (delta-INDEX) manifest transfer.
-- **5b -- checksum subsumption.** A partition *is* a directory; that directory's
-  `tree_hash` in the INDEX node *is* its content checksum. Replication and fsck
-  compare content-tree hashes, and the Tier-0 `row_leaf_digest` partition
-  checksums are retired. After 5b, the per-transaction partition checksums --
-  today the last pond-derived datum that `control/` holds and
-  `rebuild-control` cannot recover -- are **no longer needed**, because the same
-  guarantee comes from the pond-resident tree hashes.
+- **5b -- checksum subsumption.** *(Done.)* A partition *is* a directory; that
+  directory's `tree_hash` in the content tree *is* its content checksum.
+  `fsck` and the compaction invariant now compare content-tree hashes
+  (`root_tree_hash` per pond, per-directory `tree_hash` per partition), and the
+  Tier-0 `row_leaf_digest` partition checksums are retired from the active
+  commit path. The per-transaction partition checksums -- previously the last
+  pond-derived datum that `control/` held and `rebuild-control` could not
+  recover -- are **no longer computed**, because the same guarantee comes from
+  the pond-resident tree hashes. The vestigial
+  `DataCommittedMetadata.partition_checksums` field is left empty for the
+  disposable legacy replication stack, which is otherwise unchanged.
 
 The endpoint: **`control/` holds nothing pond-derived that isn't rebuildable
 from `data/`.** The audit log comes from Delta `pond_txn` history; the spine
@@ -184,9 +188,15 @@ three things, none of which contradict the invariant:
 2. **A cache of pond-derived facts.** The audit log and the spine cache are
    copies of what `data/` already proves. They exist for fast local queries
    (`pond log`, tip lookup) and are rebuildable at any time -- `pond
-   rebuild-control` already reconstructs the audit skeleton from Delta history,
-   and post-5b it can reconstruct the spine from the LOG node and the checksums
-   from INDEX.
+   rebuild-control` reconstructs the audit skeleton from Delta history, and the
+   content itself is fully reconstructable from `data/` alone (Phase 6's
+   `rebuild_control_preserves_content_roots` confirms the `fsck` content root
+   and content-tree root survive a control discard + rebuild byte-for-byte).
+   The authoritative commit spine lives in the LOG node, so a rebuild *can*
+   in principle recompute the cached spine from it; today `rebuild-control`
+   reconstructs the audit skeleton with empty spine metadata (a known
+   follow-up) rather than replaying the LOG, which does not affect content
+   integrity.
 3. **Local operator state.** Which remotes this replica is attached to, their
    modes, and the `last_pushed_seq` / `last_pulled_seq` watermarks. This is the
    one class of state that is *not* rebuildable from the pond -- and that is
@@ -226,7 +236,7 @@ lineage-independent content check that needs neither `control/` nor matching
 | `root_tree_hash`, node manifest | recomputable from `data/` rows; cached in INDEX node | -- |
 | Commit spine + provenance | **LOG node** (`data/`) | `control/` spine cache |
 | Transaction audit log | Delta `pond_txn` history (`data/`) | `control/` audit rows |
-| Partition content checksum | INDEX node `tree_hash` (post-5b) | `control/` checksums (retired) |
+| Partition content checksum | content-tree `tree_hash` (recomputed from `data/`; cached in INDEX node) | `control/` checksums (retired -- field left empty) |
 | Transparency-log leaves | **LOG node** (`data/`) | `tlog/` tile export |
 | Remote topology & watermarks | `control/` (local only) | -- |
 | Write lock | `control/` (ephemeral) | -- |

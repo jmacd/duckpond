@@ -68,7 +68,7 @@ async fn fsck_root_is_deterministic_and_data_sensitive() {
         .await
         .expect("fsck full");
     assert!(full.ok(), "clean pond should fsck OK: {:?}", full.errors);
-    assert_eq!(full.root.bytes.len(), 32, "root is a 32-byte BLAKE3");
+    assert_eq!(full.root.as_bytes().len(), 32, "root is a 32-byte BLAKE3");
     assert!(full.blobs_checked >= 1, "the large file blob is verified");
     assert!(full.inline_checked >= 1, "the inline file is verified");
 
