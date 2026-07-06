@@ -634,6 +634,16 @@ impl TemporalReduceSqlFile {
             .to_cache_string();
         context.set_table_provider_cache(cache_key, table_provider.clone())?;
 
+        // Publish an export hint so the sitegen export layer can skip rewriting
+        // output partitions whose buckets did not change this build. The digest
+        // identifies the current merged content; `changed_since` is the earliest
+        // changed output bucket, or None when the merge was fully rebuilt (cache
+        // miss) and every partition must be rewritten.
+        if let Some(digest) = crate::rollup_cache::read_merged_digest(&merged_path).map_other()? {
+            let changed_since = if cache_valid { dirty_lo } else { None };
+            context.set_export_hint(&id, tinyfs::ExportHint { digest, changed_since })?;
+        }
+
         Ok(Some(table_provider))
     }
 

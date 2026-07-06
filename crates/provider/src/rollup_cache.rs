@@ -488,6 +488,19 @@ pub fn verify_merged_cache(cache_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Read the recorded content digest of a merged-output cache, if present.
+///
+/// Returns `Ok(None)` when the cache or its digest sidecar is absent. Callers
+/// use this to publish an export hint identifying the current merged content
+/// after a build that reused the cache without rewriting it.
+pub fn read_merged_digest(cache_path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(merged_digest_path(cache_path)) {
+        Ok(s) => Ok(Some(s.trim().to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(crate::error::Error::Io(e)),
+    }
+}
+
 /// Write the merged-output cache atomically and record its content digest.
 ///
 /// Publish order guarantees the only crash window leaves the Parquet present
