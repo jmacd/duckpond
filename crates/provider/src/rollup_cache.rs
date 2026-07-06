@@ -206,7 +206,31 @@ pub async fn listing_table_from_dir(
     Ok(Arc::new(table))
 }
 
-// --- Glob variant: one rollup dir per temporal-reduce node, holding one
+/// Build a `ListingTable` over a single Parquet file, reading its schema from
+/// the file's own metadata. Used to serve the merged-output cache as a table
+/// provider without unioning sibling resolution files that share its directory.
+pub async fn listing_table_for_file(path: &Path) -> Result<Arc<dyn TableProvider>> {
+    let file = tokio::fs::File::open(path).await?;
+    let builder = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(file)
+        .await
+        .map_err(|e| {
+            crate::error::Error::Arrow(format!(
+                "Failed to read parquet metadata from '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+    let schema = builder.schema().clone();
+
+    let table_url = ListingTableUrl::parse(format!("file://{}", path.display()))?;
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
+    let config = ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .with_schema(schema);
+    let table = ListingTable::try_new(config)?;
+    Ok(Arc::new(table))
+}
 // partial file per (source node, input version). The source pattern can match
 // many rotated input files, each its own node with its own versions; keying the
 // partial filename by the source node id keeps them collision-free while all

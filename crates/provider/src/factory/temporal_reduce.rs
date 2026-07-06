@@ -438,6 +438,10 @@ impl TemporalReduceSqlFile {
             provider_api = provider_api.with_root(root);
         }
 
+        // Paths of partials written this build, used to bound the merged-output
+        // cache recompute to only the output buckets they touch.
+        let mut newly_written: Vec<std::path::PathBuf> = Vec::new();
+
         for node_path in &source_files {
             let file_url_str = node_file_url(scheme, node_path);
             let file_url = crate::Url::parse(&file_url_str).map_other()?;
@@ -508,6 +512,11 @@ impl TemporalReduceSqlFile {
                     &parquet_path,
                 )
                 .await?;
+                newly_written.push(crate::rollup_cache::glob_member_path(
+                    &glob_dir,
+                    &source_node_id,
+                    version,
+                ));
                 // Advance and persist the frontier only after the partial is
                 // durably written, so a later violation in this loop cannot
                 // strand an unrecorded sealed bucket: on retry the persisted
@@ -539,17 +548,87 @@ impl TemporalReduceSqlFile {
                 .map_other()?;
         }
 
-        let merge_sql = pieces.merge_sql(self.duration, &filled.time_column, &partials_table);
-        let logical_plan = ctx
-            .sql(&merge_sql)
-            .await
-            .map_other_context("rollup merge SQL planning failed")?
-            .logical_plan()
-            .clone();
+        let ts = filled.time_column.clone();
+        let merge_sql = pieces.merge_sql(self.duration, &ts, &partials_table);
 
-        use datafusion::catalog::view::ViewTable;
-        let view_table = ViewTable::new(logical_plan, Some(merge_sql));
-        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(view_table);
+        // Merged-output cache: materialize the reconstructed series so a rebuild
+        // recomputes only the suffix of output buckets touched by newly-added
+        // source versions and reuses the sealed prefix. dirty_lo is the earliest
+        // output bucket any new partial falls into; every bucket strictly before
+        // it is provably unchanged because no new partial contributes to it.
+        let merged_path = crate::rollup_cache::merged_cache_path(
+            &cache_dir,
+            &cfg_hash,
+            &site_node_id,
+            self.duration.as_secs(),
+        );
+        let cache_valid = crate::rollup_cache::verify_merged_cache(&merged_path).map_other()?;
+        let dirty_lo = if newly_written.is_empty() {
+            None
+        } else {
+            self.min_output_bucket(&newly_written, self.duration).await?
+        };
+
+        let table_provider: Arc<dyn datafusion::catalog::TableProvider> =
+            if cache_valid && dirty_lo.is_none() {
+                // No source version changed: reuse the cached merged output.
+                crate::rollup_cache::listing_table_for_file(&merged_path)
+                    .await
+                    .map_other()?
+            } else {
+                let write_sql = match (cache_valid, dirty_lo) {
+                    (true, Some(lo)) => {
+                        // Incremental splice: cached buckets before lo (unchanged)
+                        // UNION ALL freshly merged buckets from lo onward. A single
+                        // UNION ALL lets DataFusion unify the two schemas and stream
+                        // one ordered result. The cached file is fully read before
+                        // write_merged_cache renames the new file into its place.
+                        let old_table = format!("__merged_old_{}_{}", cfg_hash, sanitized_id);
+                        if ctx.table_exist(old_table.as_str()).unwrap_or(false) {
+                            _ = ctx.deregister_table(old_table.as_str()).map_other()?;
+                        }
+                        ctx
+                            .register_parquet(
+                                &old_table,
+                                merged_path.to_string_lossy().as_ref(),
+                                datafusion::prelude::ParquetReadOptions::default(),
+                            )
+                            .await
+                            .map_other_context("register merged cache for incremental splice")?;
+                        format!(
+                            "SELECT * FROM ( \
+                               SELECT * FROM {old} WHERE CAST(\"{ts}\" AS BIGINT) < {lo} \
+                               UNION ALL \
+                               SELECT * FROM ({merge}) WHERE CAST(\"{ts}\" AS BIGINT) >= {lo} \
+                             ) ORDER BY \"{ts}\"",
+                            old = old_table,
+                            merge = merge_sql,
+                        )
+                    }
+                    _ => {
+                        // No usable cache (first build or dropped/corrupt cache):
+                        // full merge of all cached partials.
+                        merge_sql.clone()
+                    }
+                };
+
+                let stream = ctx
+                    .sql(&write_sql)
+                    .await
+                    .map_other_context("rollup merged-cache SQL planning failed")?
+                    .execute_stream()
+                    .await
+                    .map_other_context("rollup merged-cache SQL execution failed")?;
+                let schema = stream.schema();
+                let mapped =
+                    stream.map(|r| r.map_err(|e| crate::error::Error::Arrow(e.to_string())));
+                crate::rollup_cache::write_merged_cache(&merged_path, schema, Box::pin(mapped))
+                    .await
+                    .map_other()?;
+                crate::rollup_cache::listing_table_for_file(&merged_path)
+                    .await
+                    .map_other()?
+            };
 
         let cache_key = crate::TableProviderKey::new(id, crate::VersionSelection::LatestVersion)
             .to_cache_string();
@@ -620,10 +699,58 @@ impl TemporalReduceSqlFile {
         Ok(None)
     }
 
-    /// Compute one immutable source version's partials at the finest resolution
-    /// and write them to the site's rollup glob directory. The partials carry
-    /// no reconstruction so they stay mergeable across versions and re-bin into
-    /// any coarser nesting resolution.
+    /// Compute the earliest output-interval bucket touched by a set of freshly
+    /// written partial files, as `CAST(date_bin(out, time_bucket) AS BIGINT)`.
+    ///
+    /// Returns `None` only when none of the partials contribute a non-null
+    /// bucket. This lower bound (`dirty_lo`) is the splice point for the
+    /// merged-output cache: every output bucket strictly before it is unchanged
+    /// because no new partial falls into it, so it is reused from the cache.
+    async fn min_output_bucket(
+        &self,
+        partial_paths: &[std::path::PathBuf],
+        output_interval: Duration,
+    ) -> TinyFSResult<Option<i64>> {
+        let interval = duration_to_sql_interval(output_interval);
+        let bin = date_bin_expr(&interval, "time_bucket");
+        let mut global: Option<i64> = None;
+        for path in partial_paths {
+            let ctx = datafusion::prelude::SessionContext::new();
+            let table = "__new_partial";
+            ctx.register_parquet(
+                table,
+                path.to_string_lossy().as_ref(),
+                datafusion::prelude::ParquetReadOptions::default(),
+            )
+            .await
+            .map_other_context(format!("register new partial '{}'", path.display()))?;
+            let sql = format!("SELECT CAST(MIN({bin}) AS BIGINT) AS lo FROM {table}");
+            let batches = ctx
+                .sql(&sql)
+                .await
+                .map_other_context("min-output-bucket SQL planning failed")?
+                .collect()
+                .await
+                .map_other_context("min-output-bucket SQL execution failed")?;
+            for batch in &batches {
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                if let Some(lo) = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                {
+                    use arrow::array::Array;
+                    if !lo.is_null(0) {
+                        let v = lo.value(0);
+                        global = Some(global.map_or(v, |g| g.min(v)));
+                    }
+                }
+            }
+        }
+        Ok(global)
+    }
     async fn write_version_partial(
         &self,
         pieces: &AggSqlPieces,
@@ -3285,5 +3412,172 @@ mod tests {
             "day 2 aggregates wrong: {:?}",
             rows[1]
         );
+    }
+
+    /// Merged-output cache incremental splice: after a first build seeds the
+    /// cache, a later build that appends a NEWER version splices the cached
+    /// prefix with a freshly merged suffix, and a build that BACKFILLS an
+    /// earlier version recomputes from the earlier dirty_lo. Both must equal a
+    /// full single-pass recompute over the same versions.
+    #[tokio::test]
+    async fn test_merged_cache_incremental_splice_append_and_backfill() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+
+        async fn append_day(root: &tinyfs::WD, path: &str, day: u32) {
+            use tokio::io::AsyncWriteExt;
+            let mut csv = String::from("timestamp,temperature\n");
+            for hour in 0..24u32 {
+                let ts = format!("1970-01-{:02}T{:02}:00:00", day, hour);
+                let temp = 20.5 + hour as f64 + day as f64 * 100.0;
+                csv.push_str(&format!("{},{}\n", ts, temp));
+            }
+            let mut w = root
+                .async_writer_path_with_type(path, EntryType::FilePhysicalSeries)
+                .await
+                .unwrap();
+            w.write_all(csv.as_bytes()).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+            // Version 1: day 2.
+            append_day(&root, "/ingest/weather.csv", 2).await;
+        }
+
+        let config = || TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations: vec![
+                agg(AggregationType::Avg, &["temperature"]),
+                agg(AggregationType::Min, &["temperature"]),
+                agg(AggregationType::Max, &["temperature"]),
+            ],
+            transforms: None,
+        };
+
+        let make_ctx = |cache: Option<std::path::PathBuf>| {
+            let session = Arc::new(datafusion::prelude::SessionContext::new());
+            let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+                .expect("register object store");
+            let ctx = crate::ProviderContext::new(session, Arc::new(persistence.clone()));
+            match cache {
+                Some(dir) => ctx.with_cache_dir(dir),
+                None => ctx,
+            }
+        };
+
+        async fn collect_daily(
+            provider_context: &crate::ProviderContext,
+            config: TemporalReduceConfig,
+        ) -> Vec<(f64, f64, f64)> {
+            let context = test_context(provider_context, FileID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+            let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+            let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+                panic!("expected directory");
+            };
+            let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+            let file_id = daily_node.id;
+            let NodeType::File(file_handle) = &daily_node.node_type else {
+                panic!("expected file node");
+            };
+            let file_arc = file_handle.get_file().await;
+            let file_guard = file_arc.lock().await;
+            let queryable = file_guard.as_queryable().expect("queryable");
+            let table_provider = queryable
+                .as_table_provider(file_id, provider_context)
+                .await
+                .expect("table provider");
+            drop(file_guard);
+            let ctx = &provider_context.datafusion_session;
+            _ = ctx.register_table("reduced", table_provider).unwrap();
+            let batches = ctx
+                .sql(
+                    "SELECT \"temperature.avg\", \"temperature.min\", \"temperature.max\" \
+                     FROM reduced ORDER BY timestamp",
+                )
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let mut rows = Vec::new();
+            for b in &batches {
+                let col = |name: &str| {
+                    b.column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .clone()
+                };
+                let avg = col("temperature.avg");
+                let min = col("temperature.min");
+                let max = col("temperature.max");
+                for i in 0..b.num_rows() {
+                    rows.push((avg.value(i), min.value(i), max.value(i)));
+                }
+            }
+            rows
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+
+        // Build 1: only day 2 -> seeds the merged cache.
+        let rows1 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        assert_eq!(rows1.len(), 1, "one daily bucket after build 1");
+        assert!(approx(rows1[0].0, 232.0), "day2 avg wrong: {:?}", rows1);
+
+        // Build 2 (APPEND): add day 3 -> splice cached day2 prefix + fresh day3.
+        {
+            let root = fs.root().await.unwrap();
+            append_day(&root, "/ingest/weather.csv", 3).await;
+        }
+        let rows2 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        assert_eq!(rows2.len(), 2, "append splice: two buckets, got {:?}", rows2);
+        assert!(
+            approx(rows2[0].0, 232.0) && approx(rows2[1].0, 332.0),
+            "append splice values wrong: {:?}",
+            rows2
+        );
+
+        // Build 3 (BACKFILL): add day 1 (earliest) -> dirty_lo precedes cache min.
+        {
+            let root = fs.root().await.unwrap();
+            append_day(&root, "/ingest/weather.csv", 1).await;
+        }
+        let rows3 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+
+        // Ground truth is computed by hand: for day d, avg = 32 + d*100 (mean
+        // hour 11.5 plus 20.5 base), min = 20.5 + d*100 (hour 0), max = 43.5 +
+        // d*100 (hour 23). A no-cache single-pass cannot serve as the oracle here
+        // because it reads the appended per-version CSV headers as data rows.
+        assert_eq!(rows3.len(), 3, "three daily buckets: days 1,2,3");
+        let expected = |d: f64| (32.0 + d * 100.0, 20.5 + d * 100.0, 43.5 + d * 100.0);
+        for (i, d) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+            let (ea, emin, emax) = expected(d);
+            assert!(
+                approx(rows3[i].0, ea) && approx(rows3[i].1, emin) && approx(rows3[i].2, emax),
+                "backfill splice day {} wrong: got {:?}, want ({}, {}, {})",
+                d as u32,
+                rows3[i],
+                ea,
+                emin,
+                emax
+            );
+        }
     }
 }
