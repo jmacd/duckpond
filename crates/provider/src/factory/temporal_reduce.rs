@@ -577,7 +577,7 @@ impl TemporalReduceSqlFile {
                     .map_other()?
             } else {
                 let write_sql = match (cache_valid, dirty_lo) {
-                    (true, Some(lo)) => {
+                    (true, Some((lo, _lo_secs))) => {
                         // Incremental splice: cached buckets before lo (unchanged)
                         // UNION ALL freshly merged buckets from lo onward. A single
                         // UNION ALL lets DataFusion unify the two schemas and stream
@@ -640,7 +640,11 @@ impl TemporalReduceSqlFile {
         // changed output bucket, or None when the merge was fully rebuilt (cache
         // miss) and every partition must be rewritten.
         if let Some(digest) = crate::rollup_cache::read_merged_digest(&merged_path).map_other()? {
-            let changed_since = if cache_valid { dirty_lo } else { None };
+            let changed_since = if cache_valid {
+                dirty_lo.map(|(_native, secs)| secs)
+            } else {
+                None
+            };
             context.set_export_hint(&id, tinyfs::ExportHint { digest, changed_since })?;
         }
 
@@ -710,7 +714,12 @@ impl TemporalReduceSqlFile {
     }
 
     /// Compute the earliest output-interval bucket touched by a set of freshly
-    /// written partial files, as `CAST(date_bin(out, time_bucket) AS BIGINT)`.
+    /// written partial files. Returns `(native_lo, secs_lo)` where `native_lo`
+    /// is `CAST(date_bin(out, time_bucket) AS BIGINT)` in the timestamp's native
+    /// unit, used as the internal splice point, and `secs_lo` is the same bucket
+    /// as epoch seconds via `EXTRACT(EPOCH FROM ...)`, published in the export
+    /// hint so the export layer can compare against Hive partition path times
+    /// without knowing the timestamp's storage unit.
     ///
     /// Returns `None` only when none of the partials contribute a non-null
     /// bucket. This lower bound (`dirty_lo`) is the splice point for the
@@ -720,10 +729,10 @@ impl TemporalReduceSqlFile {
         &self,
         partial_paths: &[std::path::PathBuf],
         output_interval: Duration,
-    ) -> TinyFSResult<Option<i64>> {
+    ) -> TinyFSResult<Option<(i64, i64)>> {
         let interval = duration_to_sql_interval(output_interval);
         let bin = date_bin_expr(&interval, "time_bucket");
-        let mut global: Option<i64> = None;
+        let mut global: Option<(i64, i64)> = None;
         for path in partial_paths {
             let ctx = datafusion::prelude::SessionContext::new();
             let table = "__new_partial";
@@ -734,7 +743,11 @@ impl TemporalReduceSqlFile {
             )
             .await
             .map_other_context(format!("register new partial '{}'", path.display()))?;
-            let sql = format!("SELECT CAST(MIN({bin}) AS BIGINT) AS lo FROM {table}");
+            let sql = format!(
+                "SELECT CAST(MIN({bin}) AS BIGINT) AS lo, \
+                        CAST(MIN(EXTRACT(EPOCH FROM {bin})) AS BIGINT) AS lo_secs \
+                 FROM {table}"
+            );
             let batches = ctx
                 .sql(&sql)
                 .await
@@ -746,15 +759,21 @@ impl TemporalReduceSqlFile {
                 if batch.num_rows() == 0 {
                     continue;
                 }
-                if let Some(lo) = batch
+                let lo = batch
                     .column(0)
                     .as_any()
-                    .downcast_ref::<arrow::array::Int64Array>()
-                {
+                    .downcast_ref::<arrow::array::Int64Array>();
+                let lo_secs = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>();
+                if let (Some(lo), Some(lo_secs)) = (lo, lo_secs) {
                     use arrow::array::Array;
-                    if !lo.is_null(0) {
-                        let v = lo.value(0);
-                        global = Some(global.map_or(v, |g| g.min(v)));
+                    if !lo.is_null(0) && !lo_secs.is_null(0) {
+                        let v = (lo.value(0), lo_secs.value(0));
+                        global = Some(global.map_or(v, |g: (i64, i64)| {
+                            if v.0 < g.0 { v } else { g }
+                        }));
                     }
                 }
             }
