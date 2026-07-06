@@ -3508,7 +3508,7 @@ mod tests {
         async fn collect_daily(
             provider_context: &crate::ProviderContext,
             config: TemporalReduceConfig,
-        ) -> Vec<(f64, f64, f64)> {
+        ) -> (Vec<(f64, f64, f64)>, Option<tinyfs::ExportHint>) {
             let context = test_context(provider_context, FileID::root());
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
             let temporal_handle = temporal_dir.create_handle();
@@ -3529,6 +3529,7 @@ mod tests {
                 .await
                 .expect("table provider");
             drop(file_guard);
+            let hint = provider_context.get_export_hint(&file_id);
             let ctx = &provider_context.datafusion_session;
             _ = ctx.register_table("reduced", table_provider).unwrap();
             let batches = ctx
@@ -3558,7 +3559,7 @@ mod tests {
                     rows.push((avg.value(i), min.value(i), max.value(i)));
                 }
             }
-            rows
+            (rows, hint)
         }
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3566,21 +3567,35 @@ mod tests {
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
 
         // Build 1: only day 2 -> seeds the merged cache.
-        let rows1 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        let (rows1, hint1) = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
         assert_eq!(rows1.len(), 1, "one daily bucket after build 1");
         assert!(approx(rows1[0].0, 232.0), "day2 avg wrong: {:?}", rows1);
+        // First build is a cache miss: the hint carries a digest but no
+        // changed_since watermark, so the export does a full deterministic write.
+        let hint1 = hint1.expect("build 1 publishes an export hint");
+        assert!(hint1.changed_since.is_none(), "build 1 is a full rebuild");
 
         // Build 2 (APPEND): add day 3 -> splice cached day2 prefix + fresh day3.
         {
             let root = fs.root().await.unwrap();
             append_day(&root, "/ingest/weather.csv", 3).await;
         }
-        let rows2 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        let (rows2, hint2) = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
         assert_eq!(rows2.len(), 2, "append splice: two buckets, got {:?}", rows2);
         assert!(
             approx(rows2[0].0, 232.0) && approx(rows2[1].0, 332.0),
             "append splice values wrong: {:?}",
             rows2
+        );
+        // Append splice changes buckets from day 3 onward, so the hint reports a
+        // changed_since watermark at day 3 (epoch seconds) and a new digest.
+        let hint2 = hint2.expect("build 2 publishes an export hint");
+        assert_ne!(hint1.digest, hint2.digest, "append changes the merged digest");
+        let day3_secs = 2 * 86400; // 1970-01-03T00:00:00Z
+        assert_eq!(
+            hint2.changed_since,
+            Some(day3_secs),
+            "append splice watermark should be day 3 in epoch seconds"
         );
 
         // Build 3 (BACKFILL): add day 1 (earliest) -> dirty_lo precedes cache min.
@@ -3588,7 +3603,14 @@ mod tests {
             let root = fs.root().await.unwrap();
             append_day(&root, "/ingest/weather.csv", 1).await;
         }
-        let rows3 = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        let (rows3, hint3) = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
+        // Backfill moves the watermark earlier to day 1.
+        let hint3 = hint3.expect("build 3 publishes an export hint");
+        assert_eq!(
+            hint3.changed_since,
+            Some(0),
+            "backfill splice watermark should be day 1 (epoch 0)"
+        );
 
         // Ground truth is computed by hand: for day d, avg = 32 + d*100 (mean
         // hour 11.5 plus 20.5 base), min = 20.5 + d*100 (hour 0), max = 43.5 +
