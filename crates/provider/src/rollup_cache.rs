@@ -300,6 +300,10 @@ pub fn drop_node_namespace(
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(crate::error::Error::Io)?;
     }
+    let mdir = merged_dir(cache_dir, cfg_hash, node_id);
+    if mdir.exists() {
+        std::fs::remove_dir_all(&mdir).map_err(crate::error::Error::Io)?;
+    }
     Ok(())
 }
 
@@ -320,7 +324,7 @@ pub fn drop_all(cache_dir: &Path) -> Result<usize> {
             && entry
                 .file_name()
                 .to_str()
-                .is_some_and(|n| n.starts_with("rollup_"));
+                .is_some_and(|n| n.starts_with("rollup_") || n.starts_with("merged_"));
         if is_rollup {
             std::fs::remove_dir_all(&path).map_err(crate::error::Error::Io)?;
             dropped += 1;
@@ -338,15 +342,28 @@ pub fn frontier_path(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> PathBu
     glob_dir.join(format!("{}.frontier", source_node_id))
 }
 
-/// Read a source node's persisted frontier, or `None` if no version has been
-/// cached yet.  A malformed sidecar is treated as absent rather than fatal
-/// because the cache is throwaway and will simply be recomputed.
-#[must_use]
-pub fn read_frontier(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> Option<i64> {
+/// Read a source node's persisted sequentiality frontier.
+///
+/// Returns `Ok(None)` only when the frontier file is genuinely absent, which is
+/// the self-heal path for a fresh or `--rebuild`-cleared cache. A file that is
+/// present but unparseable is a corrupt control artifact and is a hard error:
+/// silently treating it as absent would disable the double-count guard for
+/// overlapping non-series sources, allowing a re-snapshot to be summed twice.
+pub fn read_frontier(glob_dir: &Path, source_node_id: &tinyfs::NodeID) -> Result<Option<i64>> {
     let path = frontier_path(glob_dir, source_node_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    };
+    contents.trim().parse::<i64>().map(Some).map_err(|e| {
+        crate::error::Error::CacheCorrupt(format!(
+            "frontier file '{}' is present but unparseable ({}); the rollup cache \
+             is corrupt. Re-run the export with --rebuild to recompute it from scratch.",
+            path.display(),
+            e
+        ))
+    })
 }
 
 /// Persist a source node's frontier (atomic write via `.tmp` then rename).
@@ -363,7 +380,147 @@ pub fn write_frontier(
     Ok(())
 }
 
-/// Read the Arrow schema from every `.parquet` file under `dir` and merge them
+// --- Merged-output cache: per-resolution materialized merge result -----------
+//
+// The partial cache above makes the partial COMPUTATION incremental, but the
+// cross-version merge (`GROUP BY date_bin` over every cached partial) still runs
+// in full on every build. This merged-output cache materializes the merged
+// buckets to one Parquet file per output resolution, so a rebuild recomputes
+// only the suffix of buckets touched by newly-added source versions and reuses
+// the sealed prefix unchanged.
+//
+// It lives in a directory SEPARATE from the partials glob dir so the partials
+// `ListingTable` (which unions every `.parquet` under the glob dir) never
+// mistakes a merged-output file for a partial.
+//
+// Integrity: a blake3 digest of the Parquet bytes is written to a sidecar. On
+// read the digest is re-verified. An absent or incompletely published file
+// self-heals via a full remerge; a present file whose bytes do not match the
+// digest is a hard error rather than silently serving tampered aggregates.
+
+/// Directory holding the merged-output cache for one temporal-reduce node and
+/// config namespace: `{cache_dir}/merged_{cfg_hash}_{node_id}/`.
+#[must_use]
+pub fn merged_dir(cache_dir: &Path, cfg_hash: &str, node_id: &tinyfs::NodeID) -> PathBuf {
+    cache_dir.join(format!("merged_{}_{}", cfg_hash, node_id))
+}
+
+/// Path of the merged-output cache Parquet for one output resolution:
+/// `{merged_dir}/res{interval_secs}.parquet`.
+#[must_use]
+pub fn merged_cache_path(
+    cache_dir: &Path,
+    cfg_hash: &str,
+    node_id: &tinyfs::NodeID,
+    output_interval_secs: u64,
+) -> PathBuf {
+    merged_dir(cache_dir, cfg_hash, node_id).join(format!("res{}.parquet", output_interval_secs))
+}
+
+/// Sidecar path holding the hex blake3 digest of a merged-output cache file.
+#[must_use]
+fn merged_digest_path(cache_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.blake3", cache_path.display()))
+}
+
+/// Compute the hex blake3 digest of a file's bytes.
+fn file_blake3(path: &Path) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path).map_err(crate::error::Error::Io)?;
+    let _copied = std::io::copy(&mut file, &mut hasher).map_err(crate::error::Error::Io)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Verify the merged-output cache at `cache_path`.
+///
+/// - `Ok(false)`: the file is absent or was only partially published (its digest
+///   sidecar is missing). The caller recomputes a full merge and republishes.
+/// - `Ok(true)`: the file is present and its bytes match the recorded digest.
+/// - `Err(CacheCorrupt)`: the file is present but its bytes do not match the
+///   recorded digest, indicating tampering or bit-rot. This is a hard failure
+///   recovered with `--rebuild`, never a silent serve of wrong aggregates.
+pub fn verify_merged_cache(cache_path: &Path) -> Result<bool> {
+    if !cache_path.exists() {
+        return Ok(false);
+    }
+    let digest_path = merged_digest_path(cache_path);
+    let recorded = match std::fs::read_to_string(&digest_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    };
+    let actual = file_blake3(cache_path)?;
+    if actual != recorded {
+        return Err(crate::error::Error::CacheCorrupt(format!(
+            "merged-output cache '{}' does not match its recorded digest \
+             (expected {}, found {}); the rollup cache is corrupt or was modified \
+             without the pond's knowledge. Re-run the export with --rebuild to \
+             recompute it from scratch.",
+            cache_path.display(),
+            recorded,
+            actual
+        )));
+    }
+    Ok(true)
+}
+
+/// Write the merged-output cache atomically and record its content digest.
+///
+/// Publish order guarantees the only crash window leaves the Parquet present
+/// with no digest sidecar, which [`verify_merged_cache`] treats as self-heal
+/// rather than a false corruption: the stale digest is removed before the new
+/// Parquet is renamed into place, and the fresh digest is written last.
+pub async fn write_merged_cache(
+    cache_path: &Path,
+    schema: SchemaRef,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
+) -> Result<()> {
+    if let Some(parent) = cache_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp_path = PathBuf::from(format!("{}.tmp", cache_path.display()));
+    let file = tokio::fs::File::create(&tmp_path).await?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+        .build();
+    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    let mut stream = stream;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        writer
+            .write(&batch)
+            .await
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    }
+    let _metadata = writer
+        .close()
+        .await
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+
+    let digest = file_blake3(&tmp_path)?;
+    let digest_path = merged_digest_path(cache_path);
+
+    // Remove any stale digest first, so a crash after the Parquet rename leaves
+    // "Parquet present, digest absent" (self-heal) and never "Parquet new,
+    // digest stale" (false corruption).
+    match std::fs::remove_file(&digest_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    }
+    tokio::fs::rename(&tmp_path, cache_path).await?;
+
+    let digest_tmp = PathBuf::from(format!("{}.tmp", digest_path.display()));
+    tokio::fs::write(&digest_tmp, digest.as_bytes()).await?;
+    tokio::fs::rename(&digest_tmp, &digest_path).await?;
+    log::debug!("[SAVE] Merged rollup cache: wrote {}", cache_path.display());
+    Ok(())
+}
+
 /// via `Schema::try_merge`, giving UNION-ALL-BY-NAME semantics across versions.
 async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {
     use arrow::datatypes::Schema;
@@ -608,5 +765,69 @@ mod tests {
         assert!(!cache_node_dir(cache_dir, "cfg", &node_id).exists());
         // Idempotent.
         drop_node_namespace(cache_dir, "cfg", &node_id).unwrap();
+    }
+
+    async fn write_test_merged(cache_dir: &Path, node_id: &tinyfs::NodeID) -> PathBuf {
+        let schema = partials_schema();
+        let batch = partials_batch(&schema, &[0, 1], &[10.0, 5.0], &[2, 1]);
+        let path = merged_cache_path(cache_dir, "cfg", node_id, 60);
+        let stream: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::iter(vec![Ok(batch)]));
+        write_merged_cache(&path, schema, stream).await.unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn test_merged_cache_absent_and_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_id = test_node_id();
+        let path = merged_cache_path(tmp.path(), "cfg", &node_id, 60);
+        // Absent -> self-heal signal.
+        assert!(!verify_merged_cache(&path).unwrap());
+        // After a clean write, present and valid.
+        let path = write_test_merged(tmp.path(), &node_id).await;
+        assert!(verify_merged_cache(&path).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_merged_cache_missing_digest_self_heals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_id = test_node_id();
+        let path = write_test_merged(tmp.path(), &node_id).await;
+        // Simulate a crash between the Parquet rename and the digest write.
+        std::fs::remove_file(merged_digest_path(&path)).unwrap();
+        assert!(
+            !verify_merged_cache(&path).unwrap(),
+            "Parquet present with no digest must self-heal, not hard-fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merged_cache_tamper_is_hard_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_id = test_node_id();
+        let path = write_test_merged(tmp.path(), &node_id).await;
+        // Modify the Parquet bytes without updating the digest.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = verify_merged_cache(&path).unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::CacheCorrupt(_)),
+            "tampered merged cache must be a hard CacheCorrupt error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merged_cache_drop_all_removes_merged_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_id = test_node_id();
+        let path = write_test_merged(tmp.path(), &node_id).await;
+        assert!(path.exists());
+        let dropped = drop_all(tmp.path()).unwrap();
+        assert!(dropped >= 1);
+        assert!(!path.exists());
     }
 }

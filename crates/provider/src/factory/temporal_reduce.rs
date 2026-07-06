@@ -469,7 +469,8 @@ impl TemporalReduceSqlFile {
             let mut uncached =
                 crate::rollup_cache::find_uncached_members(&glob_dir, &source_node_id, &versions);
             uncached.sort_by_key(|v| v.version);
-            let mut frontier = crate::rollup_cache::read_frontier(&glob_dir, &source_node_id);
+            let mut frontier =
+                crate::rollup_cache::read_frontier(&glob_dir, &source_node_id).map_other()?;
             for version in &uncached {
                 let parquet_path = crate::format_cache::cache_version_path(
                     &cache_dir,
