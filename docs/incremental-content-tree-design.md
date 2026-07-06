@@ -1,7 +1,7 @@
 # Incremental Content Tree: O(change) Commits
 
 > **Status:** Active design, implementation in progress. **Supersedes**
-> [`content-addressed-pond-design.md`](./content-addressed-pond-design.md),
+> [`content-addressed-pond-design.md`](./archive/content-addressed-pond-design.md),
 > which remains a valid description of the object model and transparency log but
 > describes per-commit hashing costs that this note replaces. Where the two
 > disagree about *how* the commit spine is computed and stored, **this document

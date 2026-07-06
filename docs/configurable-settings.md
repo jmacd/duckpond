@@ -4,7 +4,7 @@
 
 Several operational knobs in duckpond are currently hardcoded constants or
 expressed only as `pond maintain` CLI flags. The maintenance retention work
-(see `delta-cleanup-synchronization.md`) surfaced the question of where such
+(see `archive/delta-cleanup-synchronization.md`) surfaced the question of where such
 tunables belong. The answer for operator-facing defaults is the **steward
 control table**: a setting written once with `pond config set` is read on every
 subsequent pond open, so a single command changes behaviour for all later ticks
