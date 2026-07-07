@@ -41,6 +41,10 @@ pub enum Error {
     #[error("TLogFS error: {0}")]
     TLogFS(String),
 
+    /// Corrupt or tampered cache artifact detected on read
+    #[error("Corrupt cache artifact: {0}")]
+    CacheCorrupt(String),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

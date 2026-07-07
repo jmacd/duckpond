@@ -537,6 +537,7 @@ async fn run_format_provider_export(
             data_dir,
             provider_ctx,
             timestamp_column,
+            None,
         )
         .await
         .map_other_context(format!("export '{}'", path_str))?;
