@@ -566,69 +566,69 @@ impl TemporalReduceSqlFile {
         let dirty_lo = if newly_written.is_empty() {
             None
         } else {
-            self.min_output_bucket(&newly_written, self.duration).await?
+            self.min_output_bucket(&newly_written, self.duration)
+                .await?
         };
 
-        let table_provider: Arc<dyn datafusion::catalog::TableProvider> =
-            if cache_valid && dirty_lo.is_none() {
-                // No source version changed: reuse the cached merged output.
-                crate::rollup_cache::listing_table_for_file(&merged_path)
+        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = if cache_valid
+            && dirty_lo.is_none()
+        {
+            // No source version changed: reuse the cached merged output.
+            crate::rollup_cache::listing_table_for_file(&merged_path)
+                .await
+                .map_other()?
+        } else {
+            let write_sql = match (cache_valid, dirty_lo) {
+                (true, Some((lo, _lo_secs))) => {
+                    // Incremental splice: cached buckets before lo (unchanged)
+                    // UNION ALL freshly merged buckets from lo onward. A single
+                    // UNION ALL lets DataFusion unify the two schemas and stream
+                    // one ordered result. The cached file is fully read before
+                    // write_merged_cache renames the new file into its place.
+                    let old_table = format!("__merged_old_{}_{}", cfg_hash, sanitized_id);
+                    if ctx.table_exist(old_table.as_str()).unwrap_or(false) {
+                        _ = ctx.deregister_table(old_table.as_str()).map_other()?;
+                    }
+                    ctx.register_parquet(
+                        &old_table,
+                        merged_path.to_string_lossy().as_ref(),
+                        datafusion::prelude::ParquetReadOptions::default(),
+                    )
                     .await
-                    .map_other()?
-            } else {
-                let write_sql = match (cache_valid, dirty_lo) {
-                    (true, Some((lo, _lo_secs))) => {
-                        // Incremental splice: cached buckets before lo (unchanged)
-                        // UNION ALL freshly merged buckets from lo onward. A single
-                        // UNION ALL lets DataFusion unify the two schemas and stream
-                        // one ordered result. The cached file is fully read before
-                        // write_merged_cache renames the new file into its place.
-                        let old_table = format!("__merged_old_{}_{}", cfg_hash, sanitized_id);
-                        if ctx.table_exist(old_table.as_str()).unwrap_or(false) {
-                            _ = ctx.deregister_table(old_table.as_str()).map_other()?;
-                        }
-                        ctx
-                            .register_parquet(
-                                &old_table,
-                                merged_path.to_string_lossy().as_ref(),
-                                datafusion::prelude::ParquetReadOptions::default(),
-                            )
-                            .await
-                            .map_other_context("register merged cache for incremental splice")?;
-                        format!(
-                            "SELECT * FROM ( \
+                    .map_other_context("register merged cache for incremental splice")?;
+                    format!(
+                        "SELECT * FROM ( \
                                SELECT * FROM {old} WHERE CAST(\"{ts}\" AS BIGINT) < {lo} \
                                UNION ALL \
                                SELECT * FROM ({merge}) WHERE CAST(\"{ts}\" AS BIGINT) >= {lo} \
                              ) ORDER BY \"{ts}\"",
-                            old = old_table,
-                            merge = merge_sql,
-                        )
-                    }
-                    _ => {
-                        // No usable cache (first build or dropped/corrupt cache):
-                        // full merge of all cached partials.
-                        merge_sql.clone()
-                    }
-                };
-
-                let stream = ctx
-                    .sql(&write_sql)
-                    .await
-                    .map_other_context("rollup merged-cache SQL planning failed")?
-                    .execute_stream()
-                    .await
-                    .map_other_context("rollup merged-cache SQL execution failed")?;
-                let schema = stream.schema();
-                let mapped =
-                    stream.map(|r| r.map_err(|e| crate::error::Error::Arrow(e.to_string())));
-                crate::rollup_cache::write_merged_cache(&merged_path, schema, Box::pin(mapped))
-                    .await
-                    .map_other()?;
-                crate::rollup_cache::listing_table_for_file(&merged_path)
-                    .await
-                    .map_other()?
+                        old = old_table,
+                        merge = merge_sql,
+                    )
+                }
+                _ => {
+                    // No usable cache (first build or dropped/corrupt cache):
+                    // full merge of all cached partials.
+                    merge_sql.clone()
+                }
             };
+
+            let stream = ctx
+                .sql(&write_sql)
+                .await
+                .map_other_context("rollup merged-cache SQL planning failed")?
+                .execute_stream()
+                .await
+                .map_other_context("rollup merged-cache SQL execution failed")?;
+            let schema = stream.schema();
+            let mapped = stream.map(|r| r.map_err(|e| crate::error::Error::Arrow(e.to_string())));
+            crate::rollup_cache::write_merged_cache(&merged_path, schema, Box::pin(mapped))
+                .await
+                .map_other()?;
+            crate::rollup_cache::listing_table_for_file(&merged_path)
+                .await
+                .map_other()?
+        };
 
         let cache_key = crate::TableProviderKey::new(id, crate::VersionSelection::LatestVersion)
             .to_cache_string();
@@ -645,7 +645,13 @@ impl TemporalReduceSqlFile {
             } else {
                 None
             };
-            context.set_export_hint(&id, tinyfs::ExportHint { digest, changed_since })?;
+            context.set_export_hint(
+                &id,
+                tinyfs::ExportHint {
+                    digest,
+                    changed_since,
+                },
+            )?;
         }
 
         Ok(Some(table_provider))
@@ -771,9 +777,8 @@ impl TemporalReduceSqlFile {
                     use arrow::array::Array;
                     if !lo.is_null(0) && !lo_secs.is_null(0) {
                         let v = (lo.value(0), lo_secs.value(0));
-                        global = Some(global.map_or(v, |g: (i64, i64)| {
-                            if v.0 < g.0 { v } else { g }
-                        }));
+                        global =
+                            Some(global.map_or(v, |g: (i64, i64)| if v.0 < g.0 { v } else { g }));
                     }
                 }
             }
@@ -3581,7 +3586,12 @@ mod tests {
             append_day(&root, "/ingest/weather.csv", 3).await;
         }
         let (rows2, hint2) = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
-        assert_eq!(rows2.len(), 2, "append splice: two buckets, got {:?}", rows2);
+        assert_eq!(
+            rows2.len(),
+            2,
+            "append splice: two buckets, got {:?}",
+            rows2
+        );
         assert!(
             approx(rows2[0].0, 232.0) && approx(rows2[1].0, 332.0),
             "append splice values wrong: {:?}",
@@ -3590,7 +3600,10 @@ mod tests {
         // Append splice changes buckets from day 3 onward, so the hint reports a
         // changed_since watermark at day 3 (epoch seconds) and a new digest.
         let hint2 = hint2.expect("build 2 publishes an export hint");
-        assert_ne!(hint1.digest, hint2.digest, "append changes the merged digest");
+        assert_ne!(
+            hint1.digest, hint2.digest,
+            "append changes the merged digest"
+        );
         let day3_secs = 2 * 86400; // 1970-01-03T00:00:00Z
         assert_eq!(
             hint2.changed_since,

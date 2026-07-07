@@ -67,8 +67,7 @@ pub struct ProviderContext {
     /// during `as_table_provider`, keyed by the node's `FileID` string. The
     /// export layer reads these immediately after obtaining the table provider
     /// to decide which output partitions are unchanged.
-    pub export_hints:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, ExportHint>>>,
+    pub export_hints: Arc<std::sync::Mutex<std::collections::HashMap<String, ExportHint>>>,
 }
 
 impl ProviderContext {

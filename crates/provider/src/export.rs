@@ -82,7 +82,6 @@ pub struct SeriesExportManifest {
 /// File name of the per-series export manifest inside a series export dir.
 pub const MANIFEST_FILE: &str = ".export-manifest.json";
 
-
 /// Hierarchical metadata structure for export results
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -402,9 +401,14 @@ pub async fn export_table_provider_to_parquet(
         .map_err(|e| anyhow::anyhow!("export_dir not under base_output_dir: {}", e))?
         .to_path_buf();
 
-    let partitions =
-        distinct_partitions(ctx, &unique_table_name, temporal_parts, timestamp_column, source_label)
-            .await?;
+    let partitions = distinct_partitions(
+        ctx,
+        &unique_table_name,
+        temporal_parts,
+        timestamp_column,
+        source_label,
+    )
+    .await?;
 
     let mut manifest = SeriesExportManifest {
         digest: hint.map(|h| h.digest.clone()),
@@ -423,8 +427,8 @@ pub async fn export_table_provider_to_parquet(
 
         // A partition is unchanged iff its whole time window ends at or before
         // the changed-bucket watermark, so no changed bucket falls inside it.
-        let reusable = can_reuse
-            && matches!((reuse_before, end_time), (Some(lo), Some(end)) if end <= lo);
+        let reusable =
+            can_reuse && matches!((reuse_before, end_time), (Some(lo), Some(end)) if end <= lo);
 
         if reusable
             && let Some(seed_part) = seed_by_file.get(&file_rel)
@@ -479,7 +483,11 @@ pub async fn export_table_provider_to_parquet(
                 let abs = base_output_dir.join(&p.file);
                 if abs.exists() {
                     std::fs::remove_file(&abs).map_err(|e| {
-                        anyhow::anyhow!("Failed to remove stale partition '{}': {}", abs.display(), e)
+                        anyhow::anyhow!(
+                            "Failed to remove stale partition '{}': {}",
+                            abs.display(),
+                            e
+                        )
                     })?;
                 }
             }
@@ -559,7 +567,9 @@ async fn distinct_partitions(
         .map_err(|e| anyhow::anyhow!("partition enumeration failed for '{}': {}", source_label, e))?
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("partition enumeration failed for '{}': {}", source_label, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!("partition enumeration failed for '{}': {}", source_label, e)
+        })?;
 
     let mut out = Vec::new();
     for batch in &batches {
@@ -571,7 +581,11 @@ async fn distinct_partitions(
                     .as_any()
                     .downcast_ref::<arrow::array::Int64Array>()
                     .ok_or_else(|| {
-                        anyhow::anyhow!("partition column {} is not Int64 for '{}'", i, source_label)
+                        anyhow::anyhow!(
+                            "partition column {} is not Int64 for '{}'",
+                            i,
+                            source_label
+                        )
                     })
             })
             .collect::<Result<_>>()?;
@@ -1434,7 +1448,8 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.to_string().contains("does not match its recorded digest"),
+            err.to_string()
+                .contains("does not match its recorded digest"),
             "expected digest hard-fail, got: {err}"
         );
     }
@@ -1493,8 +1508,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(inode(&jun), jun_ino, "unchanged June partition must be reused");
-        assert_ne!(inode(&jul), jul_ino, "changed July partition must be rewritten");
+        assert_eq!(
+            inode(&jun),
+            jun_ino,
+            "unchanged June partition must be reused"
+        );
+        assert_ne!(
+            inode(&jul),
+            jul_ino,
+            "changed July partition must be rewritten"
+        );
 
         let manifest = read_series_manifest(&export_dir.join(MANIFEST_FILE))
             .unwrap()
