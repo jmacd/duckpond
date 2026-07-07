@@ -16,6 +16,22 @@ use std::sync::Arc;
 /// Result type for tinyfs context operations
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
+/// Hint published by an incremental reduction provider while building a node's
+/// table provider, consumed by the sitegen export layer to skip rewriting
+/// unchanged output partitions.
+///
+/// `digest` identifies the current merged output content. When it equals the
+/// digest recorded in the seed manifest, the entire series output is unchanged
+/// and every partition file can be reused. `changed_since` bounds which output
+/// buckets changed when the digest differs: buckets with a timestamp strictly
+/// below it are unchanged, so their partitions can be reused. `None` means the
+/// output was fully rebuilt and every partition must be rewritten.
+#[derive(Clone, Debug)]
+pub struct ExportHint {
+    pub digest: String,
+    pub changed_since: Option<i64>,
+}
+
 /// Provider context - holds tinyfs Persistence for transaction management
 ///
 /// This struct provides factories with:
@@ -46,6 +62,12 @@ pub struct ProviderContext {
     /// Pond root directory ({POND}/), if available.
     /// None for in-memory persistence (tests).
     pub pond_path: Option<PathBuf>,
+
+    /// Per-node export hints published by incremental reduction providers
+    /// during `as_table_provider`, keyed by the node's `FileID` string. The
+    /// export layer reads these immediately after obtaining the table provider
+    /// to decide which output partitions are unchanged.
+    pub export_hints: Arc<std::sync::Mutex<std::collections::HashMap<String, ExportHint>>>,
 }
 
 impl ProviderContext {
@@ -60,6 +82,7 @@ impl ProviderContext {
             persistence,
             cache_dir: None,
             pond_path: None,
+            export_hints: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -98,6 +121,22 @@ impl ProviderContext {
             .map_other_context("Mutex poisoned")?
             .insert(key, provider);
         Ok(())
+    }
+
+    /// Publish an export hint for a node, keyed by its `FileID` string.
+    pub fn set_export_hint(&self, id: &FileID, hint: ExportHint) -> Result<()> {
+        _ = self
+            .export_hints
+            .lock()
+            .map_other_context("export_hints mutex poisoned")?
+            .insert(id.to_string(), hint);
+        Ok(())
+    }
+
+    /// Read a previously published export hint for a node.
+    #[must_use]
+    pub fn get_export_hint(&self, id: &FileID) -> Option<ExportHint> {
+        self.export_hints.lock().ok()?.get(&id.to_string()).cloned()
     }
 
     /// Create a filesystem from the persistence layer
