@@ -8,7 +8,7 @@ It assumes familiarity with the data commands (`pond copy`, `pond cat`,
 `pond list`, `pond mknod`, `pond run`).  For the full command/flag
 reference see [docs/cli-reference.md](cli-reference.md); for the design
 rationale behind the remote model see
-[docs/remote-redesign.md](remote-redesign.md).
+[docs/remote-redesign.md](archive/remote-redesign.md).
 
 > This guide reflects the post-D6 CLI.  The pre-D6 factory-based remote
 > model (`pond sync`, `pond remote add <yaml>`, `/sys/run/<N>-backup`,
@@ -473,9 +473,9 @@ complete list.
 > This section is **forward-looking**.  It describes the operator-visible
 > end-state of the content-addressed (CA) migration, not current behavior.
 > Nothing here ships until the parity gate in the migration plan passes.  The
-> design is in [content-addressed-pond-design.md](content-addressed-pond-design.md);
+> design is in [content-addressed-pond-design.md](archive/content-addressed-pond-design.md);
 > the phased plan and its acceptance gates are in
-> [remote-redesign.md](remote-redesign.md) (the CA1-CA4 arc).  Until then, the
+> [remote-redesign.md](archive/remote-redesign.md) (the CA1-CA4 arc).  Until then, the
 > sections above remain authoritative.
 
 Today a pond replicates as a stream of per-transaction **bundles**
