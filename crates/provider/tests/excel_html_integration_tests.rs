@@ -16,7 +16,7 @@ mod excel_html_integration_tests {
         let fs = Arc::new(tinyfs::FS::new(persistence).await?);
 
         // Copy HTML file into TinyFS
-        let html_path = "/Volumes/sourcecode/src/duckpond/sample-excelhtml/HydroVu_FB-Bottom-664623_2024-12-31_22-00-00_Export.htm";
+        let html_path = "/Volumes/sourcecode/src/watertown/sample-excelhtml/HydroVu_FB-Bottom-664623_2024-12-31_22-00-00_Export.htm";
         if !std::path::Path::new(html_path).exists() {
             return Ok(());
         }

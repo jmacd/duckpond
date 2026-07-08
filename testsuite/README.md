@@ -1,4 +1,4 @@
-# DuckPond Test Framework
+# Watertown Test Framework
 
 > See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for the full testing workflow.
 

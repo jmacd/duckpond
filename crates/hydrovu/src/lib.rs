@@ -49,7 +49,7 @@ struct DeviceCollectionResult {
     final_timestamp: Option<i64>,
 }
 
-/// Convert timestamp in **microseconds** (DuckPond canonical unit) to RFC3339 date string
+/// Convert timestamp in **microseconds** (Watertown canonical unit) to RFC3339 date string
 pub fn utc2date(utc_micros: i64) -> Result<String> {
     let seconds = utc_micros / 1_000_000;
     Ok(DateTime::from_timestamp(seconds, 0)
@@ -433,7 +433,7 @@ impl HydroVuCollector {
         Ok(())
     }
 
-    /// Find the youngest (most recent) timestamp (in microseconds, the DuckPond
+    /// Find the youngest (most recent) timestamp (in microseconds, the Watertown
     /// canonical unit) for a device by scanning ALL *.series files in the
     /// writeable device directory via the oplog temporal metadata.
     ///
@@ -555,7 +555,7 @@ impl HydroVuCollector {
     }
 
     /// Query the read-only seed archives for a device's youngest timestamp,
-    /// returned in microseconds (DuckPond canonical unit).  Reads every
+    /// returned in microseconds (Watertown canonical unit).  Reads every
     /// `{archive_path}/devices/{device_id}/*.series` file via a `series://`
     /// cast (the same Provider builtin path used by `timeseries-join`) and
     /// takes `max(timestamp)` across all.  No new file-access mechanism: the
@@ -670,7 +670,7 @@ impl HydroVuCollector {
     }
 
     /// Extract a single `max(timestamp)` scalar from a query result and
-    /// normalize it to microseconds (DuckPond canonical unit).
+    /// normalize it to microseconds (Watertown canonical unit).
     ///
     /// HydroVu archives are produced by the hydrovu factory itself, so the
     /// timestamp column type is known.  Unsupported Arrow types hard-fail
@@ -839,7 +839,7 @@ impl HydroVuCollector {
         let count = wide_records.len();
         debug!("Fetched {count} new records from API (client handled row limiting)");
 
-        // Track final timestamp if needed (in microseconds -- DuckPond canonical unit)
+        // Track final timestamp if needed (in microseconds -- Watertown canonical unit)
         let mut final_timestamp = youngest_timestamp;
         if !wide_records.is_empty() {
             let oldest_timestamp = wide_records

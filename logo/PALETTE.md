@@ -1,6 +1,6 @@
-# duckpond logo palette
+# watertown logo palette
 
-Derived from `caspar_duckpond.jpg` and matched to the brand blue in
+Derived from `caspar_watertown.jpg` and matched to the brand blue in
 `caspar.water/site/img/logo.svg`.
 
 | Role          | Hex       | Notes                                  |
@@ -18,11 +18,11 @@ Derived from `caspar_duckpond.jpg` and matched to the brand blue in
 
 ## Files
 
-- `duckpond-scene-badge.svg` - rounded square badge: grey-blue sky, distant ocean,
+- `watertown-scene-badge.svg` - rounded square badge: grey-blue sky, distant ocean,
   treeline, pond with a depth gradient, grassy peninsula, and a small duck sitting
   in the water with concentric ripples. The primary mark.
-- `duckpond-banner.svg`      - front-page wordmark (1200x420) on white: a large
-  `Duckpond` (Arial Bold, outlined to vector paths) filled with the badge's grey-blue
+- `watertown-banner.svg`      - front-page wordmark (1200x420) on white: a large
+  `Watertown` (Arial Bold, outlined to vector paths) filled with the badge's grey-blue
   sky gradient and a thin brand-blue outline, over a large pond that fills the word
   footprint; the duck swims behind the word and shows through the bowl of the `p`,
   with reeds at the pond's left edge.

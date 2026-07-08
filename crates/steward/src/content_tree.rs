@@ -67,7 +67,7 @@ pub(crate) async fn materialize_tlog(
     pond_id: uuid::Uuid,
 ) {
     let dir = crate::get_tlog_path(pond_path);
-    let origin = format!("duckpond/{pond_id}");
+    let origin = format!("watertown/{pond_id}");
     let log = sync_store::TileLog::new(dir, origin);
 
     // Decision D9: the authoritative leaf sequence is the pond-resident commit

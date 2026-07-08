@@ -21,11 +21,11 @@ pub struct ExtendedAttributes {
     pub attributes: HashMap<String, String>,
 }
 
-/// DuckPond system metadata key constants
-pub mod duckpond {
-    pub const TIMESTAMP_COLUMN: &str = "duckpond.timestamp_column";
-    pub const MIN_TEMPORAL_OVERRIDE: &str = "duckpond.min_temporal_override";
-    pub const MAX_TEMPORAL_OVERRIDE: &str = "duckpond.max_temporal_override";
+/// Watertown system metadata key constants
+pub mod watertown {
+    pub const TIMESTAMP_COLUMN: &str = "watertown.timestamp_column";
+    pub const MIN_TEMPORAL_OVERRIDE: &str = "watertown.min_temporal_override";
+    pub const MAX_TEMPORAL_OVERRIDE: &str = "watertown.max_temporal_override";
 }
 
 impl ExtendedAttributes {
@@ -43,7 +43,7 @@ impl ExtendedAttributes {
     /// Set timestamp column name (defaults to "Timestamp" if not set)
     pub fn set_timestamp_column(&mut self, column_name: &str) -> &mut Self {
         _ = self.attributes.insert(
-            duckpond::TIMESTAMP_COLUMN.to_string(),
+            watertown::TIMESTAMP_COLUMN.to_string(),
             column_name.to_string(),
         );
         self
@@ -53,7 +53,7 @@ impl ExtendedAttributes {
     #[must_use]
     pub fn timestamp_column(&self) -> &str {
         self.attributes
-            .get(duckpond::TIMESTAMP_COLUMN)
+            .get(watertown::TIMESTAMP_COLUMN)
             .map(|s| s.as_str())
             .unwrap_or("Timestamp") // Default column name
     }
@@ -65,14 +65,16 @@ impl ExtendedAttributes {
         max_override: Option<i64>,
     ) -> &mut Self {
         if let Some(min) = min_override {
-            _ = self
-                .attributes
-                .insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
+            _ = self.attributes.insert(
+                watertown::MIN_TEMPORAL_OVERRIDE.to_string(),
+                min.to_string(),
+            );
         }
         if let Some(max) = max_override {
-            _ = self
-                .attributes
-                .insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
+            _ = self.attributes.insert(
+                watertown::MAX_TEMPORAL_OVERRIDE.to_string(),
+                max.to_string(),
+            );
         }
         self
     }
@@ -82,11 +84,11 @@ impl ExtendedAttributes {
     pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
         let min = self
             .attributes
-            .get(duckpond::MIN_TEMPORAL_OVERRIDE)
+            .get(watertown::MIN_TEMPORAL_OVERRIDE)
             .and_then(|s| s.parse::<i64>().ok());
         let max = self
             .attributes
-            .get(duckpond::MAX_TEMPORAL_OVERRIDE)
+            .get(watertown::MAX_TEMPORAL_OVERRIDE)
             .and_then(|s| s.parse::<i64>().ok());
 
         match (min, max) {

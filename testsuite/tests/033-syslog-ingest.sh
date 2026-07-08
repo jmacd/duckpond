@@ -75,7 +75,7 @@ echo "=== Step 2: Generate initial log entries ==="
 
 # Generate some initial log entries via logger
 for i in $(seq 1 10); do
-    logger -t duckpond-test "Initial log entry ${i}: Starting experiment at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    logger -t watertown-test "Initial log entry ${i}: Starting experiment at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 done
 
 # Give rsyslog time to flush
@@ -143,7 +143,7 @@ echo "=== Step 5: Generate more log entries ==="
 
 # Generate additional entries
 for i in $(seq 1 15); do
-    logger -t duckpond-test "Additional log entry ${i}: Testing append at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    logger -t watertown-test "Additional log entry ${i}: Testing append at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     sleep 0.1
 done
 

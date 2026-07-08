@@ -9,7 +9,7 @@
 //! Rust data (ExportedFile structs) and client-side HTML/JS.
 //!
 //! Uses our own shortcode parser (in `crate::markdown`) with closures that
-//! capture an `Arc<ShortcodeContext>` with DuckPond data.
+//! capture an `Arc<ShortcodeContext>` with Watertown data.
 
 use crate::config::{SidebarChild, SidebarEntry};
 use crate::markdown::{ShortcodeArgs, Shortcodes};
@@ -210,7 +210,7 @@ pub fn classify(
 /// Context passed to shortcodes during rendering.
 ///
 /// Each template page gets its own `ShortcodeContext`, wrapped in `Arc` and
-/// captured by the shortcode closures. This is the bridge between DuckPond's
+/// captured by the shortcode closures. This is the bridge between Watertown's
 /// typed data and the shortcode expansion engine.
 #[derive(Debug, Clone)]
 pub struct ShortcodeContext {

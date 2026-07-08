@@ -17,7 +17,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/duckpond
+  IMAGE_NAME: ${{ github.repository }}/watertown
 
 jobs:
   promote:

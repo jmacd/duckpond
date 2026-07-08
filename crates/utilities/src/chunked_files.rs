@@ -541,7 +541,7 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
     // But SELECT * may return [pond_txn_id(0), path(1), chunk_id(2), ...] if bundle_id
     // is excluded, causing batch.column(3) to be chunk_hash instead of chunk_id.
     //
-    // See: docs/duckpond-system-patterns.md "Delta Lake Partition Column Ordering"
+    // See: docs/watertown-system-patterns.md "Delta Lake Partition Column Ordering"
     let schema = batch.schema();
 
     let chunk_id_idx = schema

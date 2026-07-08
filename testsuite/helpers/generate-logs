@@ -4,7 +4,7 @@
 set -e
 
 COUNT=${1:-100}
-OUTPUT=${2:-/var/log/duckpond/app.json}
+OUTPUT=${2:-/var/log/watertown/app.json}
 
 echo "Generating ${COUNT} log entries to ${OUTPUT}"
 

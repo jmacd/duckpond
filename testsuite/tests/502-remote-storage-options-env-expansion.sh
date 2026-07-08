@@ -30,7 +30,7 @@ echo "=== Experiment: remote storage options + env-var expansion ==="
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9000}"
-BUCKET_NAME="duckpond-envexp"
+BUCKET_NAME="watertown-envexp"
 
 #############################
 # MINIO AVAILABILITY

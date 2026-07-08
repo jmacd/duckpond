@@ -1,4 +1,4 @@
-// DuckPond sitegen -- log-viewer.js
+// Watertown sitegen -- log-viewer.js
 // Reads the log-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // and renders a scrollable log viewer with unit filtering.
 //

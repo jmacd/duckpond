@@ -25,13 +25,13 @@ mkdir -p /var/log/nginx
 
 cat > /var/log/nginx/access.log << 'EOF'
 93.184.216.34 - - [15/Mar/2025:10:00:00 +0000] "GET / HTTP/1.1" 200 5120 "https://search.example.com/results" "Mozilla/5.0 (X11; Linux x86_64)"
-93.184.216.34 - - [15/Mar/2025:10:00:01 +0000] "GET /about HTTP/1.1" 200 3200 "https://duckpond.example.com/" "Mozilla/5.0 (X11; Linux x86_64)"
+93.184.216.34 - - [15/Mar/2025:10:00:01 +0000] "GET /about HTTP/1.1" 200 3200 "https://watertown.example.com/" "Mozilla/5.0 (X11; Linux x86_64)"
 10.0.0.1 - admin [15/Mar/2025:10:00:02 +0000] "POST /api/data HTTP/2.0" 201 64 "-" "curl/8.0"
-172.16.0.50 - - [15/Mar/2025:10:05:00 +0000] "GET /style.css HTTP/1.1" 200 1024 "https://duckpond.example.com/" "Mozilla/5.0 (Windows NT 10.0)"
-172.16.0.50 - - [15/Mar/2025:10:05:01 +0000] "GET /logo.png HTTP/1.1" 200 8192 "https://duckpond.example.com/" "Mozilla/5.0 (Windows NT 10.0)"
+172.16.0.50 - - [15/Mar/2025:10:05:00 +0000] "GET /style.css HTTP/1.1" 200 1024 "https://watertown.example.com/" "Mozilla/5.0 (Windows NT 10.0)"
+172.16.0.50 - - [15/Mar/2025:10:05:01 +0000] "GET /logo.png HTTP/1.1" 200 8192 "https://watertown.example.com/" "Mozilla/5.0 (Windows NT 10.0)"
 192.168.1.100 - - [15/Mar/2025:11:00:00 +0000] "GET / HTTP/1.1" 200 5120 "-" "Mozilla/5.0 (Macintosh; Intel Mac OS X)"
-192.168.1.100 - - [15/Mar/2025:11:00:05 +0000] "GET /about HTTP/1.1" 200 3200 "https://duckpond.example.com/" "Mozilla/5.0 (Macintosh; Intel Mac OS X)"
-192.168.1.100 - - [15/Mar/2025:11:00:10 +0000] "GET /docs/guide HTTP/1.1" 200 7500 "https://duckpond.example.com/about" "Mozilla/5.0 (Macintosh; Intel Mac OS X)"
+192.168.1.100 - - [15/Mar/2025:11:00:05 +0000] "GET /about HTTP/1.1" 200 3200 "https://watertown.example.com/" "Mozilla/5.0 (Macintosh; Intel Mac OS X)"
+192.168.1.100 - - [15/Mar/2025:11:00:10 +0000] "GET /docs/guide HTTP/1.1" 200 7500 "https://watertown.example.com/about" "Mozilla/5.0 (Macintosh; Intel Mac OS X)"
 10.0.0.99 - - [15/Mar/2025:11:30:00 +0000] "GET /missing HTTP/1.1" 404 128 "-" "Mozilla/5.0 (compatible; bot/1.0)"
 10.0.0.99 - - [15/Mar/2025:11:30:01 +0000] "GET / HTTP/1.1" 500 256 "-" "Mozilla/5.0 (compatible; bot/1.0)"
 EOF

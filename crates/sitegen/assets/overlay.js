@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// DuckPond sitegen -- overlay.js
+// Watertown sitegen -- overlay.js
 // Interactive pump cycle analysis with coordinated brush+filter.
 //
 // Top: 4-year well-depth overview with a Vega-Lite interval selection for

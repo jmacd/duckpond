@@ -43,7 +43,7 @@ echo ""
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
-BUCKET_NAME="duckpond-erase-test"
+BUCKET_NAME="watertown-erase-test"
 BUCKET_URL="s3://${BUCKET_NAME}"
 
 CHECKS_TOTAL=0

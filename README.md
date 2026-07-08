@@ -1,41 +1,41 @@
-<img src="logo/duckpond-banner.svg" alt="Duckpond" width="640">
+<img src="logo/watertown-banner.svg" alt="Watertown" width="640">
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jmacd/duckpond/badge)](https://scorecard.dev/viewer/?uri=github.com/jmacd/duckpond)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jmacd/watertown/badge)](https://scorecard.dev/viewer/?uri=github.com/jmacd/watertown)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 
-DuckPond is a file machine.<br>
-DuckPond is a timeseries database.<br>
-DuckPond is a site generator.<br>
-DuckPond is a telemetry system.<br>
+Watertown is a file machine.<br>
+Watertown is a timeseries database.<br>
+Watertown is a site generator.<br>
+Watertown is a telemetry system.<br>
 
-DuckPond is local-first.<br>
-DuckPond is transactional.<br>
-DuckPond is replicated.<br>
-DuckPond is small.<br>
+Watertown is local-first.<br>
+Watertown is transactional.<br>
+Watertown is replicated.<br>
+Watertown is small.<br>
 
-## What is DuckPond?
+## What is Watertown?
 
-DuckPond is a file system tool to help organize process files and
-file-based processes. DuckPond lets you place your CSV, Parquet, and
+Watertown is a file system tool to help organize process files and
+file-based processes. Watertown lets you place your CSV, Parquet, and
 JSON files into application-specific paths, then pattern-match and
 query them using pre-built file factories or ad-hoc SQL statements.
 
-DuckPond is built in Rust, using Apache DataFusion embedded query
-engine and DeltaLake transaction system. DuckPond reads and writes
+Watertown is built in Rust, using Apache DataFusion embedded query
+engine and DeltaLake transaction system. Watertown reads and writes
 local storage, cloud storage, git repositories, REST APIs, and more.
 
-DuckPond's abstract file system has first-class support for tabular,
+Watertown's abstract file system has first-class support for tabular,
 time-series, and multi-version file data. File and directory factory
 instances can be registered to create dynamic, derivative file
-content. DuckPond includes built-in factories for combining, joining,
+content. Watertown includes built-in factories for combining, joining,
 and reducing timeseries.
 
-DuckPond is useful for data collection, analysis, and monitoring in
+Watertown is useful for data collection, analysis, and monitoring in
 small industrial settings.
 
-## Who is building DuckPond?
+## Who is building Watertown?
 
-DuckPond is built by the [Caspar Water System](https://casparwater.us)
+Watertown is built by the [Caspar Water System](https://casparwater.us)
 for small water systems everywhere.
 
 The author is [Joshua MacDonald](https://github.com/jmacd), an
@@ -45,16 +45,16 @@ committee and co-founder of the OpenTelemetry-Arrow project, which is
 bringing a high-performance telemetry pipeline in Rust to
 OpenTelemetry.
 
-## Who is using DuckPond?
+## Who is using Watertown?
 
-Caspar Water uses DuckPond for telemetry, monitoring, its public
+Caspar Water uses Watertown for telemetry, monitoring, its public
 portal, and more.
 
 The [Noyo Center for Marine Sciences](https://www.noyocenter.org/) in
-Fort Bragg, CA was DuckPond's first user, where DuckPond gathers water
+Fort Bragg, CA was Watertown's first user, where Watertown gathers water
 quality data for its public portal.
 
-![Caspar Duck Pond](./caspar_duckpond.jpg)
+![Caspar Duck Pond](./caspar_watertown.jpg)
 
 ## CLI Reference
 

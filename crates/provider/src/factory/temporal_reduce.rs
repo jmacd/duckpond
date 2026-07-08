@@ -254,7 +254,7 @@ impl TemporalReduceSqlFile {
             .filter(|name| name != &self.config.time_column)
             .collect();
 
-        // Fail fast if no columns are discovered (following DuckPond's fail-fast architectural principles)
+        // Fail fast if no columns are discovered (following Watertown's fail-fast architectural principles)
         if columns.is_empty() {
             return Err(tinyfs::Error::Other(format!(
                 "Schema discovery failed: no columns found in source file '{}'. \

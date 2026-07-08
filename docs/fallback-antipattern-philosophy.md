@@ -1,10 +1,10 @@
-# DuckPond Architectural Philosophy: The Fallback Anti-Pattern
+# Watertown Architectural Philosophy: The Fallback Anti-Pattern
 
 ## Core Principle: Fallbacks Are Architectural Code Smells
 
 **Fallbacks often mask architectural defects rather than handle legitimate edge cases.**
 
-This document captures the key insight discovered during DuckPond's development: what appears to be a simple "fallback cleanup" task often reveals fundamental architectural problems that require design-level solutions.
+This document captures the key insight discovered during Watertown's development: what appears to be a simple "fallback cleanup" task often reveals fundamental architectural problems that require design-level solutions.
 
 ## Quick Reference: Common Mistakes
 
@@ -367,4 +367,4 @@ This approach is more work upfront but results in:
 
 ---
 
-*This philosophy emerged from DuckPond's transaction management redesign, where a simple fallback fix revealed the need for a complete architectural overhaul that ultimately eliminated many other problems as side effects. The unimplemented API case study was added after discovering how "helpful" error messages can create fallback cascades.*
+*This philosophy emerged from Watertown's transaction management redesign, where a simple fallback fix revealed the need for a complete architectural overhaul that ultimately eliminated many other problems as side effects. The unimplemented API case study was added after discovering how "helpful" error messages can create fallback cascades.*

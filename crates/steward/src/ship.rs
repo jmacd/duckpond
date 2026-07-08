@@ -1031,7 +1031,7 @@ impl Ship {
 
         // 6. Record DataCommitted(Compact) at the new data Delta version.
         //    DataCommitted is the terminal record for a data write in the
-        //    duckpond control schema (no trailing Completed).
+        //    watertown control schema (no trailing Completed).
         let new_version = self.data_persistence.table().version().unwrap_or(-1);
         // Keep the in-memory persistence allocator in step with the
         // committed compaction seq (the optimize commit already carries it

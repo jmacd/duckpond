@@ -86,12 +86,12 @@ pond run \
 echo "=== Test 2: Footer with BUILD variable ==="
 check_contains "${OUTDIR}/index.html" "footer contains build-footer class" "build-footer"
 check_contains "${OUTDIR}/index.html" "footer contains custom text" "Test Site"
-check_contains "${OUTDIR}/index.html" "footer mentions DuckPond" "DuckPond"
+check_contains "${OUTDIR}/index.html" "footer mentions Watertown" "Watertown"
 
 # The footer should contain either a version (v0.47.0) or a git SHA
-if grep -q 'DuckPond v[0-9]' "${OUTDIR}/index.html"; then
+if grep -q 'Watertown v[0-9]' "${OUTDIR}/index.html"; then
     echo "[OK] Footer contains version identifier"
-elif grep -q 'DuckPond [0-9a-f]' "${OUTDIR}/index.html"; then
+elif grep -q 'Watertown [0-9a-f]' "${OUTDIR}/index.html"; then
     echo "[OK] Footer contains git SHA identifier"
 else
     echo "[FAIL] Footer does not contain a recognizable build identifier"

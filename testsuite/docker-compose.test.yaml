@@ -1,9 +1,9 @@
-# Docker Compose for running DuckPond tests that require MinIO
+# Docker Compose for running Watertown tests that require MinIO
 #
 # Used by run-test.sh --compose (triggered by '# REQUIRES: compose' annotation).
 # Tests without this annotation run via plain 'docker run' for speed.
 #
-# The test container image (duckpond-test:latest) is built by build-image.sh,
+# The test container image (watertown-test:latest) is built by build-image.sh,
 # NOT by docker compose build.  Run build-image.sh first.
 #
 # Volume mounts for the test script, testdata, and output directory are
@@ -25,7 +25,7 @@ services:
 
   # Test runner — same image as run-test.sh uses
   test:
-    image: duckpond-test:latest
+    image: watertown-test:latest
     environment:
       POND: /pond
       POND1: /pond1

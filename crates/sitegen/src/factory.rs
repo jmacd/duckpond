@@ -1397,10 +1397,10 @@ const VENDOR_FILES_COMPRESSED: &[&str] = &[
 /// Copy vendor files from the vendor/dist/ directory to the output site.
 ///
 /// Searches for vendor files in these locations (first match wins):
-///   1. DUCKPOND_VENDOR environment variable
+///   1. WATERTOWN_VENDOR environment variable
 ///   2. vendor/dist/ relative to the sitegen crate (development)
-///   3. /usr/local/share/duckpond/vendor/ (Docker / installed)
-///   4. ~/.cache/duckpond/vendor/ (user cache)
+///   3. /usr/local/share/watertown/vendor/ (Docker / installed)
+///   4. ~/.cache/watertown/vendor/ (user cache)
 ///
 /// If no vendor directory is found, warns but does not error -- the site
 /// will not function without network access in that case.
@@ -1454,7 +1454,7 @@ fn copy_vendor_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
 
 fn find_vendor_dir() -> Option<std::path::PathBuf> {
     // 1. Explicit env var
-    if let Ok(path) = std::env::var("DUCKPOND_VENDOR") {
+    if let Ok(path) = std::env::var("WATERTOWN_VENDOR") {
         let p = std::path::PathBuf::from(path);
         if p.join("duckdb-eh.wasm").exists() {
             return Some(p);
@@ -1469,7 +1469,7 @@ fn find_vendor_dir() -> Option<std::path::PathBuf> {
     }
 
     // 3. Installed location (Docker image, system install)
-    let system = std::path::Path::new("/usr/local/share/duckpond/vendor");
+    let system = std::path::Path::new("/usr/local/share/watertown/vendor");
     if system.join("duckdb-eh.wasm").exists() {
         return Some(system.to_path_buf());
     }
@@ -1477,14 +1477,14 @@ fn find_vendor_dir() -> Option<std::path::PathBuf> {
     // 3b. FHS install location (cargo-deb-built .deb installs here,
     //     since /usr/share/ is the standard path for arch-independent
     //     read-only data on Debian/Ubuntu).
-    let fhs = std::path::Path::new("/usr/share/duckpond/vendor");
+    let fhs = std::path::Path::new("/usr/share/watertown/vendor");
     if fhs.join("duckdb-eh.wasm").exists() {
         return Some(fhs.to_path_buf());
     }
 
     // 4. User cache
     if let Ok(home) = std::env::var("HOME") {
-        let cache = std::path::PathBuf::from(home).join(".cache/duckpond/vendor");
+        let cache = std::path::PathBuf::from(home).join(".cache/watertown/vendor");
         if cache.join("duckdb-eh.wasm").exists() {
             return Some(cache);
         }

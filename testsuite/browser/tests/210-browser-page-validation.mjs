@@ -108,7 +108,7 @@ async function testPage(browser, page) {
       () => document.querySelector('meta[name="generator"]')?.content || ""
     );
     check(
-      generator.startsWith("DuckPond v"),
+      generator.startsWith("Watertown v"),
       `version marker present ("${generator}")`
     );
 

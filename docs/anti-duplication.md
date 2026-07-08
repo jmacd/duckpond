@@ -214,7 +214,7 @@ Use a `#[cfg(test)]` helper when:
 3. **You have 10+ test call sites** vs. <10 production call sites
 4. **The helper just supplies defaults** (no logic, just parameter filling)
 
-### Examples in DuckPond
+### Examples in Watertown
 
 - **`commit_test()`**: Production needs metadata, tests use txn_seq=2 default
 - **`create_test()`**: Production needs audit metadata, tests use synthetic

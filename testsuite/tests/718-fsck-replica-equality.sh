@@ -77,7 +77,7 @@ status_pulled_tip() {  # POND_DIR
 echo "--- Part A: byte replica, top-level root equality ---"
 export POND="$P1"
 pond init --birthplace test-host >/dev/null
-echo "hello duckpond" > /tmp/718-small.txt
+echo "hello watertown" > /tmp/718-small.txt
 head -c 200000 /dev/urandom > /tmp/718-big.bin   # incompressible -> real blob
 pond copy host:///tmp/718-small.txt /small.txt >/dev/null 2>&1
 pond copy host:///tmp/718-big.bin   /big.bin    >/dev/null 2>&1

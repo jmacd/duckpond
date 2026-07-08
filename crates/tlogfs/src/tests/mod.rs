@@ -925,7 +925,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error::Error>> {
     use crate::query::execute_sql_on_file;
-    use crate::schema::duckpond;
+    use crate::schema::watertown;
     use futures::stream::StreamExt;
     use std::collections::HashMap;
 
@@ -1081,11 +1081,11 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         // Note: bounds need to be in milliseconds since that's the internal representation
         let mut attributes = HashMap::new();
         _ = attributes.insert(
-            duckpond::MIN_TEMPORAL_OVERRIDE.to_string(),
+            watertown::MIN_TEMPORAL_OVERRIDE.to_string(),
             "10000".to_string(),
         ); // 10 seconds = 10000 ms
         _ = attributes.insert(
-            duckpond::MAX_TEMPORAL_OVERRIDE.to_string(),
+            watertown::MAX_TEMPORAL_OVERRIDE.to_string(),
             "20000".to_string(),
         ); // 20 seconds = 20000 ms
 

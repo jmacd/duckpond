@@ -1,8 +1,8 @@
-# DuckPond - Copilot Instructions
+# Watertown - Copilot Instructions
 
 ## 🧠 SYSTEM MENTAL MODEL (Read This First)
 
-DuckPond is a **transactional, query-native filesystem** for time-series data. It stores
+Watertown is a **transactional, query-native filesystem** for time-series data. It stores
 files and directories in a Delta Lake–backed filesystem where every object has a *type*
 that determines how it's stored, queried, and exported. The `pond` CLI is the primary
 interface; behind it is a layered Rust architecture.
@@ -56,7 +56,7 @@ it's stored (Delta Lake + OpLog). `steward` wraps transactions with lifecycle tr
 Every directory in the pond has its own **partition** (UUID). File data and metadata
 are stored as Parquet rows within those partitions.
 
-### Entry Types (What Makes DuckPond Different)
+### Entry Types (What Makes Watertown Different)
 
 **Entry type is metadata stored in tinyfs, NOT derived from the filename.**
 A file named `foo.series` is NOT necessarily a series — the type was set when
@@ -259,10 +259,10 @@ need version-level access.
 |--------------|-----------|
 | CLI commands, syntax, flags | `docs/cli-reference.md` — **always check first** |
 | Factory YAML configs | `docs/cli-reference.md` § Factory Types |
-| Transaction/persistence code | `docs/duckpond-system-patterns.md` §1-3 |
-| Factories/providers/TableProvider | `docs/duckpond-system-patterns.md` §3+ |
+| Transaction/persistence code | `docs/watertown-system-patterns.md` §1-3 |
+| Factories/providers/TableProvider | `docs/watertown-system-patterns.md` §3+ |
 | Large file storage (>64KB) | `docs/large-file-storage-implementation.md` |
-| Architecture overview, crate map | `docs/duckpond-overview.md` |
+| Architecture overview, crate map | `docs/watertown-overview.md` |
 | Design philosophy (no fallbacks) | `docs/fallback-antipattern-philosophy.md` |
 | Sitegen (static site generator) | `docs/sitegen-design.md` |
 
@@ -270,7 +270,7 @@ need version-level access.
 
 ## ⚡ THE CORE LOOP (Every Session)
 
-**DuckPond development is test-driven discovery.** Every work session follows this loop:
+**Watertown development is test-driven discovery.** Every work session follows this loop:
 
 ```
 1. UNDERSTAND what we're testing/building
@@ -301,7 +301,7 @@ cd testsuite
 
 # Run with S3/MinIO for replication tests
 docker-compose up -d minio
-docker-compose run --rm duckpond ./tests/500-*.sh
+docker-compose run --rm watertown ./tests/500-*.sh
 ```
 
 ### Test Script Template

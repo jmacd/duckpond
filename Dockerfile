@@ -24,6 +24,6 @@ RUN apt-get update && \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/pond /usr/local/bin/pond
-COPY --from=vendor /vendor/dist/ /usr/local/share/duckpond/vendor/
+COPY --from=vendor /vendor/dist/ /usr/local/share/watertown/vendor/
 
 ENTRYPOINT ["/usr/local/bin/pond"]

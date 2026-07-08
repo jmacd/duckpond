@@ -72,7 +72,7 @@ impl TransactionState {
                 - Forgetting to pass transaction context through async functions\n\
                 - Opening a transaction inside a factory (factories receive context)\n\
                 \n\
-                See docs/duckpond-system-patterns.md for correct transaction patterns."
+                See docs/watertown-system-patterns.md for correct transaction patterns."
                     .into(),
             ));
         }

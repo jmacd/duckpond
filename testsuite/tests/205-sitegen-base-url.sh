@@ -267,7 +267,7 @@ echo "--- Root site (base_url: /) ---"
 
 echo ""
 echo "  Version marker:"
-check_contains "${ROOT_DIR}/index.html" "root: has version generator meta" 'name="generator" content="DuckPond v'
+check_contains "${ROOT_DIR}/index.html" "root: has version generator meta" 'name="generator" content="Watertown v'
 
 echo ""
 echo "  Nav links:"

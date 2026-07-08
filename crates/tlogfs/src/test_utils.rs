@@ -5,7 +5,7 @@
 // Test utilities for DRY test code - eliminates duplication across test files
 //
 // NOTE: RecordBatch builders and Parquet generation utilities have been moved
-// to the utilities crate (utilities::test_helpers) for use across all DuckPond
+// to the utilities crate (utilities::test_helpers) for use across all Watertown
 // crates. Import from there instead of duplicating here.
 
 use crate::persistence::OpLogPersistence;

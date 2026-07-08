@@ -2,10 +2,10 @@
 
 ## Overview
 
-This document describes the design for `crates/sitegen`, a new DuckPond crate that uses [Maudit](https://maudit.org/) as a library to provide static site generation. The goal is to replace the current Tera-based `TemplateFactory` with a Rust-native solution that:
+This document describes the design for `crates/sitegen`, a new Watertown crate that uses [Maudit](https://maudit.org/) as a library to provide static site generation. The goal is to replace the current Tera-based `TemplateFactory` with a Rust-native solution that:
 
 1. Uses **Markdown** for content authoring (not HTML templates)
-2. Derives **routes from DuckPond patterns** (not manually defined)
+2. Derives **routes from Watertown patterns** (not manually defined)
 3. Provides **type-safe templating** via Maud (optional)
 4. Keeps all content and configuration **inside the pond**
 
@@ -24,7 +24,7 @@ Maudit has built-in integration with Maud as one of its templating options, but 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              DuckPond                                    │
+│                              Watertown                                    │
 │                                                                          │
 │  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐ │
 │  │ Data Files       │   │ Templates        │   │ Config               │ │
@@ -379,7 +379,7 @@ shortcodes.register("nav-list", |attrs, ctx| {
 });
 ```
 
-**Pros**: Type-safe, fast, full access to DuckPond context  
+**Pros**: Type-safe, fast, full access to Watertown context  
 **Future**: Can add pond-based custom shortcodes later if needed
 
 ---
@@ -390,7 +390,7 @@ shortcodes.register("nav-list", |attrs, ctx| {
 
 **DECIDED: Maud layouts in Rust, selected by frontmatter**
 
-Layouts are Maud functions in the DuckPond codebase. The markdown frontmatter `layout: name` selects which one to use.
+Layouts are Maud functions in the Watertown codebase. The markdown frontmatter `layout: name` selects which one to use.
 
 ```rust
 // Built-in layouts
@@ -462,7 +462,7 @@ layout: data
 
 **DECIDED: `pond run` with site definition**
 
-Use DuckPond's factory command entry point:
+Use Watertown's factory command entry point:
 
 ```bash
 pond run /site.yaml build ./dist
@@ -647,7 +647,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
 
 **DECIDED: Build to dist, serve with Vite**
 
-Two-step workflow: DuckPond builds the site, Vite serves it for dev iteration.
+Two-step workflow: Watertown builds the site, Vite serves it for dev iteration.
 
 ```bash
 # 1. Build the site

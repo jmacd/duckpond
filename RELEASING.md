@@ -1,6 +1,6 @@
-# Releasing DuckPond
+# Releasing Watertown
 
-This document describes the release process for DuckPond and addresses software supply chain security considerations.
+This document describes the release process for Watertown and addresses software supply chain security considerations.
 
 ## Current Release Process
 
@@ -16,7 +16,7 @@ All builds are performed via GitHub Actions (see `.github/workflows/rust-ci.yml`
 
 For each successful build on main or version tags:
 
-- **Container Image**: `ghcr.io/jmacd/duckpond:latest` (or version tag)
+- **Container Image**: `ghcr.io/jmacd/watertown:latest` (or version tag)
   - Built with Podman on GitHub's Ubuntu runners
   - Based on Debian Bookworm (glibc 2.36)
   - Includes pond binary at `/usr/bin/pond`
@@ -149,12 +149,12 @@ Users will be able to verify signatures:
 dpkg-sig --verify pond_0.16.0_amd64.deb
 
 # Verify container image
-cosign verify ghcr.io/jmacd/duckpond:v0.16.0
+cosign verify ghcr.io/jmacd/watertown:v0.16.0
 
 # Verify SLSA provenance
 slsa-verifier verify-artifact pond \
   --provenance-path pond-provenance.intoto.jsonl \
-  --source-uri github.com/jmacd/duckpond
+  --source-uri github.com/jmacd/watertown
 ```
 
 ## Deployment to Production
@@ -170,7 +170,7 @@ slsa-verifier verify-artifact pond \
 
 ```bash
 # Download from GitHub Release
-wget https://github.com/jmacd/duckpond/releases/download/v0.16.0/pond_0.16.0_amd64.deb
+wget https://github.com/jmacd/watertown/releases/download/v0.16.0/pond_0.16.0_amd64.deb
 
 # Install
 sudo dpkg -i pond_0.16.0_amd64.deb
@@ -189,7 +189,7 @@ Create systemd service `/etc/systemd/system/pond.service`:
 
 ```ini
 [Unit]
-Description=DuckPond Service
+Description=Watertown Service
 After=network.target
 
 [Service]

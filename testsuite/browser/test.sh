@@ -117,7 +117,7 @@ docker run --rm \
     -v "${SUBDIR_OUTPUT}:/output" \
     -v "${TESTSUITE_DIR}/tests/205-sitegen-base-url.sh:/test/run.sh:ro" \
     -v "${TESTSUITE_DIR}/testdata:/data:ro" \
-    duckpond-test:latest \
+    watertown-test:latest \
     -c "/bin/bash /test/run.sh && cp -r /tmp/sitegen-subdir/* /output/" > /tmp/test-202-subdir.log 2>&1
 
 if [[ ! -f "${SUBDIR_OUTPUT}/index.html" ]]; then

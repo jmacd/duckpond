@@ -17,9 +17,9 @@ members = [
 [workspace.package]
 version = "0.52.0"
 edition = "2024"
-authors = ["DuckPond Contributors"]
-homepage = "https://github.com/duckpond"
-repository = "https://github.com/duckpond"
+authors = ["Watertown Contributors"]
+homepage = "https://github.com/watertown"
+repository = "https://github.com/watertown"
 readme = "README.md"
 license = "LICENSE.txt"
 categories = ["small data", "local first", "industrial", "telemetry", "water system"]

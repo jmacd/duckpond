@@ -1,4 +1,4 @@
-# DuckPond CLI Reference
+# Watertown CLI Reference
 
 > **Living documentation** - Built from experimentation, updated when confusion is discovered.
 
@@ -35,7 +35,7 @@
 
 ### Two Operating Modes
 
-DuckPond commands work in two modes:
+Watertown commands work in two modes:
 
 - **Pond mode**: Operations on a transactional filesystem at `$POND`.
   Files are persistent, versioned, and replicable.
@@ -415,7 +415,7 @@ pond log --incomplete
 
 ### pond remote / pond backup
 
-DuckPond splits remote attachment into two verbs that match operator
+Watertown splits remote attachment into two verbs that match operator
 intent (D5.7b):
 
 - **`pond remote add NAME URL PATH`** -- attach a **pull-mode** remote
@@ -868,7 +868,7 @@ pushable transaction**: the merge is written to the control table as a
 `Compact` commit, so a subsequent `pond push` publishes the compacted
 content closure.
 
-Compaction never changes logical content -- duckpond snapshots each
+Compaction never changes logical content -- watertown snapshots each
 partition's checksum before and after the merge and aborts if they
 differ.  A run with nothing to merge is a clean no-op.
 
@@ -1887,7 +1887,7 @@ pond run 15-journal status
 
 ## Glob Patterns
 
-DuckPond uses glob patterns for file matching:
+Watertown uses glob patterns for file matching:
 
 | Pattern | Matches |
 |---------|---------|
@@ -1906,7 +1906,7 @@ Examples:
 
 ## End-to-End Pipeline Examples
 
-DuckPond factories compose into data pipelines. Here are two real-world patterns.
+Watertown factories compose into data pipelines. Here are two real-world patterns.
 
 ### Multi-Site / Multi-Parameter (Noyo)
 
@@ -2125,4 +2125,4 @@ pond cat oteljson:///ingest/data.json --format=table --sql "
 ## See Also
 
 - [testsuite/](../testsuite/) - Runnable test scripts
-- [duckpond-overview.md](duckpond-overview.md) - Architecture overview
+- [watertown-overview.md](watertown-overview.md) - Architecture overview

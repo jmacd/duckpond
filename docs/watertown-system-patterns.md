@@ -1,12 +1,12 @@
-# DuckPond System Patterns: Critical Implementation Guidelines
+# Watertown System Patterns: Critical Implementation Guidelines
 
 ## Overview
 
-This document captures the critical system patterns and subtleties that are essential for successful development in the DuckPond codebase. These patterns emerged from real implementation challenges where architectural misunderstandings led to significant debugging sessions.
+This document captures the critical system patterns and subtleties that are essential for successful development in the Watertown codebase. These patterns emerged from real implementation challenges where architectural misunderstandings led to significant debugging sessions.
 
-**Key Insight**: DuckPond's layered architecture creates subtle but critical constraints that must be understood to avoid common pitfalls. The system is designed around **single-instance patterns** and **low-level filesystem abstractions** that require precise handling.
+**Key Insight**: Watertown's layered architecture creates subtle but critical constraints that must be understood to avoid common pitfalls. The system is designed around **single-instance patterns** and **low-level filesystem abstractions** that require precise handling.
 
-**Architecture Update (Dec 2025)**: DuckPond now separates concerns into distinct crates:
+**Architecture Update (Dec 2025)**: Watertown now separates concerns into distinct crates:
 - **tinyfs**: Core filesystem abstractions (Node, FileID, PersistenceLayer trait, ProviderContext)
 - **provider**: Factory infrastructure, QueryableFile trait, table creation utilities (generic, persistence-agnostic)
 - **tlogfs**: OpLog-based persistence implementation (Delta Lake + OpLog)
@@ -1503,7 +1503,7 @@ fn some_function(part_id: NodeID) {  // Actually use the parameter
 
 ## Conclusion
 
-DuckPond's architecture requires understanding these critical patterns:
+Watertown's architecture requires understanding these critical patterns:
 
 ### Core Transaction Patterns
 1. **Single Instance Rule**: One transaction guard, one state, one DataFusion context per operation
