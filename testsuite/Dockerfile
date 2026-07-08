@@ -1,4 +1,4 @@
-# DuckPond Experiment Container
+# Watertown Experiment Container
 # 
 # A sandbox environment for testing pond CLI operations safely.
 # Built with the pre-compiled pond binary for fast iteration.
@@ -103,14 +103,14 @@ ENV POND2=/pond2
 RUN mkdir -p /pond /pond1 /pond2
 
 # Create log directories for testing
-RUN mkdir -p /var/log/duckpond /var/log/experiment
+RUN mkdir -p /var/log/watertown /var/log/experiment
 
 # Copy the pond binary (built separately)
 COPY pond /usr/local/bin/pond
 RUN chmod +x /usr/local/bin/pond
 
 # Copy vendor assets (DuckDB-WASM, Observable Plot, D3) for sitegen
-COPY --from=vendor /vendor/dist/ /usr/local/share/duckpond/vendor/
+COPY --from=vendor /vendor/dist/ /usr/local/share/watertown/vendor/
 
 # Create experiment workspace
 RUN mkdir -p /experiment /results /etc/supervisor/conf.d

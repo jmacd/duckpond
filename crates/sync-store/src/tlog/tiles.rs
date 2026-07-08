@@ -715,7 +715,7 @@ mod tests {
         // Cover empty, sub-tile, exact-tile, and multi-tile-level sizes.
         for size in [0usize, 1, 2, 3, 255, 256, 257, 512, 600, 1000] {
             let sub = dir.path().join(format!("log-{size}"));
-            let log = TileLog::new(&sub, "duckpond/test");
+            let log = TileLog::new(&sub, "watertown/test");
             let ls = leaves(size);
             let cp = log.materialize(&ls).expect("materialize");
 
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn leaves_round_trip_through_tiles() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let log = TileLog::new(dir.path(), "duckpond/test");
+        let log = TileLog::new(dir.path(), "watertown/test");
         let ls = leaves(600);
         let _ = log.materialize(&ls).expect("materialize");
         let loaded = log.load_leaves().expect("load");
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn incremental_append_equals_batch_and_full_tiles_are_stable() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let inc = TileLog::new(dir.path().join("inc"), "duckpond/test");
+        let inc = TileLog::new(dir.path().join("inc"), "watertown/test");
 
         // Fill exactly one full level-0 tile, then verify that appending more
         // leaves does not disturb the now-immutable full tile bytes.
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(full_before, full_after, "full tile must be immutable");
 
         // The full-batch materialization of the same 300 leaves agrees.
-        let batch = TileLog::new(dir.path().join("batch"), "duckpond/test");
+        let batch = TileLog::new(dir.path().join("batch"), "watertown/test");
         let batch_cp = batch.materialize(&leaves(300)).expect("materialize");
         assert_eq!(cp.root, batch_cp.root);
     }
@@ -803,10 +803,10 @@ mod tests {
         for &size in &split_points {
             let ls = leaves(size);
 
-            let oracle = TileLog::new(base.path().join(format!("oracle-{size}")), "duckpond/test");
+            let oracle = TileLog::new(base.path().join(format!("oracle-{size}")), "watertown/test");
             let oracle_cp = oracle.materialize(&ls).expect("materialize");
 
-            let inc = TileLog::new(base.path().join(format!("inc-{size}")), "duckpond/test");
+            let inc = TileLog::new(base.path().join(format!("inc-{size}")), "watertown/test");
             // Deterministic but uneven chunk sizes exercise partial-tile carries.
             let mut i = 0;
             let mut step = 1usize;
@@ -836,7 +836,7 @@ mod tests {
     #[test]
     fn tile_leaves_prove_inclusion_against_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let log = TileLog::new(dir.path(), "duckpond/test");
+        let log = TileLog::new(dir.path(), "watertown/test");
         let ls = leaves(257);
         let cp = log.materialize(&ls).expect("materialize");
 
@@ -866,7 +866,7 @@ mod tests {
         // Correct bytes for the width-`wider` tile come from a clean log of that
         // size; its first `committed` hashes equal the committed representation.
         let src = tempfile::tempdir().expect("tempdir");
-        let wide_log = TileLog::new(src.path(), "duckpond/test");
+        let wide_log = TileLog::new(src.path(), "watertown/test");
         let _ = wide_log
             .materialize(&leaves(wider))
             .expect("materialize wide");
@@ -895,7 +895,7 @@ mod tests {
         // rightmost partial tile WIDER than the checkpoint records.  The
         // committed prefix must stay readable and the log must stay appendable.
         let dir = tempfile::tempdir().expect("tempdir");
-        let log = TileLog::new(dir.path(), "duckpond/test");
+        let log = TileLog::new(dir.path(), "watertown/test");
         let committed = 100usize;
         let _ = log.materialize(&leaves(committed)).expect("materialize");
 
@@ -922,7 +922,7 @@ mod tests {
             .append_leaf_data((committed..target).map(|i| format!("leaf-{i}")))
             .expect("append after crash");
         assert_eq!(cp.size, target as u64);
-        let oracle = TileLog::new(dir.path().join("oracle"), "duckpond/test");
+        let oracle = TileLog::new(dir.path().join("oracle"), "watertown/test");
         let oracle_cp = oracle.materialize(&leaves(target)).expect("materialize");
         assert_eq!(
             cp.root, oracle_cp.root,
@@ -937,14 +937,14 @@ mod tests {
         // promoted to a full immutable tile but before the checkpoint advanced.
         // A committed size within that tile must still read back.
         let dir = tempfile::tempdir().expect("tempdir");
-        let log = TileLog::new(dir.path(), "duckpond/test");
+        let log = TileLog::new(dir.path(), "watertown/test");
         let committed = 200usize;
         let _ = log.materialize(&leaves(committed)).expect("materialize");
 
         // Replace the width-200 partial with the completed full tile (256) that
         // a crash could have left, keeping the checkpoint at 200.
         let src = tempfile::tempdir().expect("tempdir");
-        let full_log = TileLog::new(src.path(), "duckpond/test");
+        let full_log = TileLog::new(src.path(), "watertown/test");
         let _ = full_log
             .materialize(&leaves(256))
             .expect("materialize full");

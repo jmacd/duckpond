@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn hex_round_trips() {
-        let h = ObjectHash::of_bytes(b"duckpond");
+        let h = ObjectHash::of_bytes(b"watertown");
         let hex = h.to_hex();
         assert_eq!(hex.len(), 64);
         assert_eq!(ObjectHash::from_hex(&hex).unwrap(), h);

@@ -4136,7 +4136,7 @@ impl InnerState {
 
         // Extract temporal overrides if present
         if let Some(min_val) =
-            remaining_attributes.remove(crate::schema::duckpond::MIN_TEMPORAL_OVERRIDE)
+            remaining_attributes.remove(crate::schema::watertown::MIN_TEMPORAL_OVERRIDE)
         {
             info!("set_extended_attributes found min_temporal_override: {min_val}");
             match min_val.parse::<i64>() {
@@ -4156,7 +4156,7 @@ impl InnerState {
         }
 
         if let Some(max_val) =
-            remaining_attributes.remove(crate::schema::duckpond::MAX_TEMPORAL_OVERRIDE)
+            remaining_attributes.remove(crate::schema::watertown::MAX_TEMPORAL_OVERRIDE)
         {
             info!("set_extended_attributes found max_temporal_override: {max_val}");
             match max_val.parse::<i64>() {

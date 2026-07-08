@@ -59,7 +59,7 @@ async fn fsck_root_is_deterministic_and_data_sensitive() {
         .await
         .expect("create pond");
 
-    write_file(&mut ship, "/small.txt", b"hello duckpond").await;
+    write_file(&mut ship, "/small.txt", b"hello watertown").await;
     // Force an external large-file blob (> 64 KiB threshold).
     let big = pseudo_random(200_000);
     write_file(&mut ship, "/big.bin", &big).await;

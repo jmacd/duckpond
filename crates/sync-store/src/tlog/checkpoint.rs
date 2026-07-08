@@ -12,8 +12,8 @@
 //! <base64(root_hash)>
 //! ```
 //!
-//! * `origin` -- a schema-less identifier for the log (DuckPond uses
-//!   `duckpond/<pond_id>`), distinguishing this log from any other.
+//! * `origin` -- a schema-less identifier for the log (Watertown uses
+//!   `watertown/<pond_id>`), distinguishing this log from any other.
 //! * `size` -- the number of leaves (commit spine records) folded into the tree.
 //! * `root_hash` -- the RFC 6962 tree head over those leaves, SHA-256, standard
 //!   base64 with padding.
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn checkpoint_round_trips() {
-        let cp = Checkpoint::new("duckpond/pond-a", 42, hash_leaf(b"leaf"));
+        let cp = Checkpoint::new("watertown/pond-a", 42, hash_leaf(b"leaf"));
         let encoded = cp.encode();
         assert_eq!(encoded.lines().count(), 3);
         assert!(encoded.ends_with('\n'));
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn checkpoint_ignores_trailing_extension_lines() {
-        let cp = Checkpoint::new("duckpond/pond-a", 7, hash_leaf(b"x"));
+        let cp = Checkpoint::new("watertown/pond-a", 7, hash_leaf(b"x"));
         let mut body = cp.encode();
         body.push_str("timestamp 1700000000\n");
         let parsed = Checkpoint::parse(&body).expect("parse");
@@ -306,7 +306,7 @@ mod tests {
     fn checkpoint_file_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(Checkpoint::read(dir.path()).expect("read empty").is_none());
-        let cp = Checkpoint::new("duckpond/pond-b", 3, hash_leaf(b"root"));
+        let cp = Checkpoint::new("watertown/pond-b", 3, hash_leaf(b"root"));
         cp.write(dir.path()).expect("write");
         let read = Checkpoint::read(dir.path()).expect("read").expect("some");
         assert_eq!(read, cp);
@@ -322,9 +322,9 @@ mod tests {
         );
 
         let cps = [
-            Checkpoint::new("duckpond/pond-h", 1, hash_leaf(b"a")),
-            Checkpoint::new("duckpond/pond-h", 2, hash_leaf(b"b")),
-            Checkpoint::new("duckpond/pond-h", 5, hash_leaf(b"c")),
+            Checkpoint::new("watertown/pond-h", 1, hash_leaf(b"a")),
+            Checkpoint::new("watertown/pond-h", 2, hash_leaf(b"b")),
+            Checkpoint::new("watertown/pond-h", 5, hash_leaf(b"c")),
         ];
         for cp in &cps {
             assert!(cp.append_to_history(dir.path()).expect("append"));
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn history_read_skips_torn_trailing_line() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cp = Checkpoint::new("duckpond/pond-t", 4, hash_leaf(b"ok"));
+        let cp = Checkpoint::new("watertown/pond-t", 4, hash_leaf(b"ok"));
         cp.append_to_history(dir.path()).expect("append");
         // Simulate a torn append leaving a partial trailing record.
         use std::io::Write as _;
@@ -377,7 +377,7 @@ mod tests {
             .append(true)
             .open(checkpoint_history_path(dir.path()))
             .expect("open");
-        f.write_all(b"duckpond/pond-t 5 not-bas")
+        f.write_all(b"watertown/pond-t 5 not-bas")
             .expect("partial write");
         let hist = Checkpoint::read_history(dir.path()).expect("read history");
         assert_eq!(hist, vec![cp]);

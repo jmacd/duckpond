@@ -43,7 +43,7 @@ echo ""
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
-BUCKET_NAME="duckpond-replication-test"
+BUCKET_NAME="watertown-replication-test"
 
 # Test data parameters.  6000 rows of ~20 bytes each ~= 120KB, which
 # crosses the 64KB large-file threshold so the replication cycle

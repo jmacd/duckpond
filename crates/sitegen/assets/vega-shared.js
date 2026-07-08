@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// DuckPond sitegen -- vega-shared.js
+// Watertown sitegen -- vega-shared.js
 //
 // Shared Vega-Lite rendering helpers used by the explorer (explore.js) and,
 // in a later stage, the chart pages (chart.js). Centralizing the lazy vendor

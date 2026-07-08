@@ -47,7 +47,7 @@ echo "--- Step 1: producer builds a pond (inline files + a >64KB blob) ---"
 export POND="$P1"
 pond init --birthplace test-host >/dev/null
 pond mkdir /data >/dev/null
-echo "hello duckpond" > /tmp/724-a.txt
+echo "hello watertown" > /tmp/724-a.txt
 printf 'row-one\n'     > /tmp/724-f1.txt
 head -c 200000 /dev/urandom > /tmp/724-big.bin   # incompressible -> real blob
 pond copy host:///tmp/724-a.txt  /data/a.txt   >/dev/null 2>&1

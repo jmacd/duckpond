@@ -754,7 +754,7 @@ pub async fn set_temporal_bounds_command(
         let timestamp = parse_timestamp_millis(&min_str)?;
         debug!("Setting min temporal override: {timestamp}");
         _ = extended_attrs.insert(
-            "duckpond.min_temporal_override".to_string(),
+            "watertown.min_temporal_override".to_string(),
             timestamp.to_string(),
         );
     }
@@ -763,7 +763,7 @@ pub async fn set_temporal_bounds_command(
         let timestamp = parse_timestamp_millis(&max_str)?;
         debug!("Setting max temporal override: {timestamp}");
         _ = extended_attrs.insert(
-            "duckpond.max_temporal_override".to_string(),
+            "watertown.max_temporal_override".to_string(),
             timestamp.to_string(),
         );
     }

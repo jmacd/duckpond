@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! TableProvider creation for DuckPond
+//! TableProvider creation for Watertown
 //!
 //! This module provides the core logic for creating DataFusion TableProviders from FileID references.
 //! It abstracts away persistence implementation details by accepting ProviderContext instead of State.

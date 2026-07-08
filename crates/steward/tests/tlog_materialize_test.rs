@@ -86,7 +86,7 @@ async fn checkpoint_grows_and_root_matches_commit_spine() {
     // Origin binds the checkpoint to this pond's identity.
     let pond_id = ship.control_table().pond_id_uuid();
     let cp = Checkpoint::read(&tlog_dir).unwrap().unwrap();
-    assert_eq!(cp.origin, format!("duckpond/{pond_id}"));
+    assert_eq!(cp.origin, format!("watertown/{pond_id}"));
 }
 
 #[tokio::test]

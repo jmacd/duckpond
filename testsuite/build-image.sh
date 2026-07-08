@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=== DuckPond Experiment Image Builder ==="
+echo "=== Watertown Experiment Image Builder ==="
 echo "Repository: ${REPO_ROOT}"
 
 # Determine target architecture
@@ -150,7 +150,7 @@ ln -sf pond1 "${SCRIPT_DIR}/helpers/pond2" 2>/dev/null || true
 
 ${CONTAINER_RT} build \
     -f Dockerfile \
-    -t duckpond-test:latest \
+    -t watertown-test:latest \
     .
 
 # Clean up copied binary and scripts
@@ -159,12 +159,12 @@ rm -f "${SCRIPT_DIR}/vendor-download.sh"
 
 echo ""
 echo "=== Build complete ==="
-echo "Image: duckpond-test:latest"
+echo "Image: watertown-test:latest"
 echo ""
 echo "Test with:"
-echo "  ${CONTAINER_RT} run --rm -it duckpond-test:latest"
+echo "  ${CONTAINER_RT} run --rm -it watertown-test:latest"
 echo "  pond --help"
 echo ""
 echo "For S3 experiments:"
 echo "  docker-compose up -d minio"
-echo "  docker-compose run --rm duckpond"
+echo "  docker-compose run --rm watertown"

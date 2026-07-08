@@ -1,7 +1,7 @@
 version = 1
-SPDX-PackageName = "duckpond"
+SPDX-PackageName = "watertown"
 SPDX-PackageSupplier = "Caspar Water Company"
-SPDX-PackageDownloadLocation = "https://github.com/jmacd/duckpond"
+SPDX-PackageDownloadLocation = "https://github.com/jmacd/watertown"
 
 [[annotations]]
 path = ["crates/**/**.rs", "crates/**/**.js", "crates/**/**.css", "original/**/**.rs"]

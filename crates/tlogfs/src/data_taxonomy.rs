@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! DuckPond data taxonomy for classifying and protecting sensitive configuration data.
+//! Watertown data taxonomy for classifying and protecting sensitive configuration data.
 //!
-//! This module defines data classes for sensitive information in DuckPond configurations,
+//! This module defines data classes for sensitive information in Watertown configurations,
 //! such as API keys, OAuth secrets, and service credentials. These classified types
 //! automatically redact sensitive data when serialized or displayed, preventing accidental
 //! exposure in logs, debugging output, or file listings.
@@ -25,20 +25,20 @@
 
 use data_privacy::taxonomy;
 
-/// DuckPond data taxonomy for sensitive configuration fields
+/// Watertown data taxonomy for sensitive configuration fields
 ///
 /// This enum defines the data classification categories. The `#[taxonomy]` macro
 /// generates wrapper types (ApiKey<T>, ApiSecret<T>, ServiceEndpoint<T>) for each variant.
 ///
 /// The macro generates:
-/// - `Debug` trait: Shows `<duckpond/api_key:REDACTED>` to prevent leaking in logs
+/// - `Debug` trait: Shows `<watertown/api_key:REDACTED>` to prevent leaking in logs
 /// - `Serialize`/`Deserialize` traits: Pass through actual values for config file I/O
 ///
 /// This means config files contain real credentials (as needed), but debug/log output
 /// is automatically redacted to prevent accidental exposure.
-#[taxonomy(duckpond)]
+#[taxonomy(watertown)]
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum DuckPondTaxonomy {
+pub enum WatertownTaxonomy {
     /// API keys, client IDs, access keys - identifiers for authentication
     ApiKey,
 

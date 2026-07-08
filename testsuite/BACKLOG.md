@@ -13,7 +13,7 @@
 >    to add the verbs for now, so this stays parked until that decision changes.
 > 2. **CA-RENAME-CYCLE** (P2) — superseded by #1; no independent work. Becomes
 >    the convergence test once `pond mv` exists.
-> 3. **FLAKY-SITEGEN-OUTPUT** (P3) — monitor only; not a duckpond regression,
+> 3. **FLAKY-SITEGEN-OUTPUT** (P3) — monitor only; not a watertown regression,
 >    mitigation already applied. Act only if it recurs in CI.
 
 ### CA-DELETE-RENAME-CLI: Delete/Rename apply-ops have no CLI-driven e2e path
@@ -53,7 +53,7 @@
 ### FLAKY-SITEGEN-OUTPUT: 209/210 sitegen-sidebar tests flake under heavy churn
 - **Type**: TEST FLAKINESS (pre-existing; surfaced during the full
   testsuite run 2026-06-08)
-- **Priority**: #3 (monitor only; not a duckpond regression, mitigation applied)
+- **Priority**: #3 (monitor only; not a watertown regression, mitigation applied)
 - **Symptom**: Under rapid back-to-back container runs (`./run-all.sh`, or
   a tight `run-test.sh` loop), one of `209-sitegen-sidebar-theme.sh` /
   `210-sitegen-nested-sidebar.sh` intermittently fails with
@@ -62,7 +62,7 @@
   PASS in isolation and in light back-to-back runs (21/21, 18/18).
 - **Assessment**: transient ENOENT on the container `/output` path under
   heavy Docker-Desktop-on-macOS container churn (each test runs in its OWN
-  fresh container, so it is not a cross-test collision).  NOT a duckpond
+  fresh container, so it is not a cross-test collision).  NOT a watertown
   code regression -- sitegen is untouched by D7/D7b/D8.
 - **Mitigation applied**: `sitegen build <dir>` now `create_dir_all`s its
   output root before writing (crates/sitegen/src/factory.rs), so the build
@@ -351,12 +351,12 @@
   `ship_remote_push_replicates_pond_init` (rewritten from the old
   clean-skip test).
 
-### ✅ D7: Fix P2-PRODUCER-COMPACT-BUNDLES (duckpond producers emit Compact bundles)
+### ✅ D7: Fix P2-PRODUCER-COMPACT-BUNDLES (watertown producers emit Compact bundles)
 - **Completed**: 2026-06-06
 - **Type**: FEATURE / DESIGN GAP (discovered 2026-06-05 while wiring D6.4
   `pond restart-from-compact`)
 - **Symptom (pre-fix)**: `pond restart-from-compact <mirror>` always
-  reported "no compact bundle to restart from" for a pure duckpond
+  reported "no compact bundle to restart from" for a pure watertown
   mirror, even after many writes + `pond maintain --compact`.
 - **Root cause**: `pond maintain --compact` ran a best-effort Delta
   optimize that was NOT recorded in the control table, so
@@ -381,7 +381,7 @@
   (never pushed) keeps its best-effort optimize.
 - **Result**: `Remote::push` emits a Compact bundle; `restart-from-compact`
   + `Remote::maintain` retention now close the mirror recovery loop
-  end-to-end from duckpond alone.
+  end-to-end from watertown alone.
 - **Files**: crates/steward/src/ship.rs (`Ship::compact`, `maintain`
   routing, `assert_compaction_invariant`); crates/steward/src/maintenance.rs
   (`compact_pond_partitions`, `CompactStats`); crates/steward/src/control_table.rs
@@ -418,7 +418,7 @@
   tree and was therefore never enumerated, read, chunked, or sent in the
   bundle.
 - **Fix**: Added an `external_blobs_referenced_by(add_path, add_bytes)`
-  hook to the `RemoteSteward` trait with an empty default; duckpond's
+  hook to the `RemoteSteward` trait with an empty default; watertown's
   adapter overrides it to scan each partition parquet for rows where
   `content IS NULL` AND the entry is a file, then resolves each `blake3`
   to the on-disk hierarchical/flat path under `_large_files/`.  In
@@ -436,7 +436,7 @@
       broadened path validator default.
     - `crates/sync-remote/src/remote.rs` -- push-side dedup loop emits
       DataAdd rows for partition parquets and external blobs.
-    - `crates/steward/src/remote_adapter.rs` -- duckpond override scans
+    - `crates/steward/src/remote_adapter.rs` -- watertown override scans
       parquet for blake3 refs; `apply_pulled_bundle` splits adds by
       `_large_files/` prefix.
     - `crates/steward/Cargo.toml` -- added `bytes` and `parquet` deps.
@@ -683,10 +683,10 @@
       fixed.
 - **Regression**: 500 / 501 / 510 / 520 / 521 / 522 / 523 all clean.
 
-### ✅ D5.8.4: Rewrite `crates/cmd/scripts/duckpond-emergency` for current Delta schema + revive `522-emergency-recovery-tool.sh`
+### ✅ D5.8.4: Rewrite `crates/cmd/scripts/watertown-emergency` for current Delta schema + revive `522-emergency-recovery-tool.sh`
 - **Completed**: 2026-06-03
 - **Type**: BUG (out-of-date disaster-recovery tool) + REVIVAL
-- **Root Cause**: `duckpond-emergency` (v1.0.0) was written for the long-removed
+- **Root Cause**: `watertown-emergency` (v1.0.0) was written for the long-removed
   chunked-parquet remote schema (`bundle_id`, `path`, `root_hash`, `total_size`,
   `pond_txn_id`, `chunk_*` packed into a single parquet per bundle).  After
   D4.5 + D5.x replaced that with a Delta-Lake-native backup table
@@ -837,7 +837,7 @@ Tests waiting to be run:
 
 ```bash
 # Run next test
-cd /Volumes/sourcecode/src/duckpond/tests
+cd /Volumes/sourcecode/src/watertown/tests
 ./run-test.sh --save-result tests/XXX.sh
 
 # Interactive exploration
@@ -845,5 +845,5 @@ cd /Volumes/sourcecode/src/duckpond/tests
 
 # With S3/MinIO
 docker-compose up -d minio
-docker-compose run --rm duckpond
+docker-compose run --rm watertown
 ```

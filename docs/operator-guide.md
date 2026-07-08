@@ -1,6 +1,6 @@
-# DuckPond Operator Guide
+# Watertown Operator Guide
 
-This guide is for the person who keeps a DuckPond running: creating
+This guide is for the person who keeps a Watertown running: creating
 ponds, attaching remotes, replicating, running maintenance, monitoring
 health, and recovering from failures.
 
@@ -338,37 +338,37 @@ a remote bucket).  Use with care; see `pond emergency --help`.
 ### Data collection (factory) every minute
 
 ```bash
-# /etc/cron.d/duckpond-collect
-* * * * *  duckpond  POND=/data/mysite pond run 20-hydrovu collect 2>&1 | logger -t duckpond
+# /etc/cron.d/watertown-collect
+* * * * *  watertown  POND=/data/mysite pond run 20-hydrovu collect 2>&1 | logger -t watertown
 ```
 
 ### Replica pull every 5 minutes
 
 ```bash
-# /etc/cron.d/duckpond-pull
-*/5 * * * *  duckpond  POND=/data/replica pond pull 2>&1 | logger -t duckpond-pull
+# /etc/cron.d/watertown-pull
+*/5 * * * *  watertown  POND=/data/replica pond pull 2>&1 | logger -t watertown-pull
 ```
 
 ### Weekly compaction
 
 ```bash
-# /etc/cron.d/duckpond-maintain
-0 3 * * 0  duckpond  POND=/data/mysite pond maintain --compact 2>&1 | logger -t duckpond-maintain
+# /etc/cron.d/watertown-maintain
+0 3 * * 0  watertown  POND=/data/mysite pond maintain --compact 2>&1 | logger -t watertown-maintain
 ```
 
 ### systemd oneshot + timer
 
 ```ini
-# /etc/systemd/system/duckpond-collect.service
+# /etc/systemd/system/watertown-collect.service
 [Service]
 Type=oneshot
-User=duckpond
+User=watertown
 Environment=POND=/data/mysite
 ExecStart=/usr/local/bin/pond run 20-hydrovu collect
 ```
 
 ```ini
-# /etc/systemd/system/duckpond-collect.timer
+# /etc/systemd/system/watertown-collect.timer
 [Timer]
 OnCalendar=minutely
 Persistent=true

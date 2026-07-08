@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! DuckPond Utilities
+//! Watertown Utilities
 //!
-//! Shared utilities used across DuckPond crates
+//! Shared utilities used across Watertown crates
 
 pub mod banner;
 pub mod bao_outboard;

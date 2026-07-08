@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared test assertion helpers for DuckPond testsuite.
+# Shared test assertion helpers for Watertown testsuite.
 # Source this at the top of your test:  source check.sh
 #
 # Usage:

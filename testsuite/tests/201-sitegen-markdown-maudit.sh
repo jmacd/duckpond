@@ -226,18 +226,18 @@ pond mkdir /site
 # Write markdown pages into pond
 cat > /tmp/index.md << 'MD'
 ---
-title: "Synthetic Example — DuckPond"
+title: "Synthetic Example — Watertown"
 layout: default
 ---
 
 # Synthetic Example
 
-DuckPond End-to-End Pipeline Demo
+Watertown End-to-End Pipeline Demo
 
 ## About This Example
 
 This dashboard is generated entirely from **synthetic waveform data**
-using the full DuckPond pipeline:
+using the full Watertown pipeline:
 
 - **synthetic-timeseries** — generates sine/triangle/square waveforms
 - **timeseries-join** — combines parameters per site

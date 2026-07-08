@@ -1,8 +1,8 @@
-# Agent Instructions: DuckPond Test Workflow
+# Agent Instructions: Watertown Test Workflow
 
 ## The Goal
 
-Test DuckPond -> Classify results -> Fix the right layer -> Save passing tests
+Test Watertown -> Classify results -> Fix the right layer -> Save passing tests
 
 **Living documentation**: `docs/cli-reference.md` is THE source of truth. Update it when you learn something.
 
@@ -164,8 +164,8 @@ bare `=== PASSED ===` that tells you nothing about what was actually verified.
 ## Reference Docs
 
 - **CLI syntax**: `docs/cli-reference.md` (always check first)
-- **Architecture**: `docs/duckpond-overview.md`
-- **Transactions**: `docs/duckpond-system-patterns.md`
+- **Architecture**: `docs/watertown-overview.md`
+- **Transactions**: `docs/watertown-system-patterns.md`
 
 ---
 
@@ -210,7 +210,7 @@ POND=/pond1 pond mkdir /data
 ### S3/MinIO
 ```bash
 docker-compose up -d minio
-docker-compose run --rm duckpond ./tests/500-*.sh
+docker-compose run --rm watertown ./tests/500-*.sh
 ```
 
 Environment: `MINIO_ENDPOINT=http://minio:9000`, user/pass: `minioadmin`

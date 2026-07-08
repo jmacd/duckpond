@@ -1063,7 +1063,7 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // Create host text file
-        let content = "Hello, DuckPond!\nThis is a test file.\n";
+        let content = "Hello, Watertown!\nThis is a test file.\n";
         let host_file = setup.create_host_text_file("test.txt", content).await?;
 
         // Copy to pond as data file

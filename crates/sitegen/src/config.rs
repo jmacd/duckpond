@@ -67,7 +67,7 @@ pub struct SiteConfig {
     pub subsites: Vec<SubsiteConfig>,
     /// Custom text shown in the page footer alongside the build identifier.
     /// Example: `footer: "Made in Mendocino"` renders as
-    /// "Made in Mendocino | DuckPond v0.39.0".
+    /// "Made in Mendocino | Watertown v0.39.0".
     #[serde(default)]
     pub footer: Option<String>,
     /// Image path for a full-width centered banner at the top of every page.
@@ -96,7 +96,7 @@ pub struct SiteConfig {
     ///
     /// The canonical source of truth for each project should be a
     /// Weaver semconv registry (e.g. caspar.water's
-    /// `config/semconv/duckpond-pond.yaml`); mirror its
+    /// `config/semconv/watertown-pond.yaml`); mirror its
     /// non-gauge entries here.
     #[serde(default)]
     pub metric_registry: std::collections::BTreeMap<String, String>,

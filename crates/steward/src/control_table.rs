@@ -84,7 +84,7 @@ struct PostCommitMetadata {
 }
 
 /// Thin wrapper over [`crate::inner_control::ControlTable`] exposing the
-/// duckpond-flavored `record_*` API and caching pond identity, factory
+/// watertown-flavored `record_*` API and caching pond identity, factory
 /// modes and settings on top of the lean `config_*` primitives.
 /// The content-graph spine recorded alongside a `DataCommitted` control
 /// record: the root tree hash this commit produced, the previous commit on
@@ -789,7 +789,7 @@ impl ControlTable {
     /// the sync-remote adapter for keys like `last_pulled_seq:<url>`
     /// and `last_pushed_seq:<url>` which must match the sync_steward
     /// key format exactly.  See [`Self::get_setting`] for the
-    /// duckpond user-facing API (which adds a `"setting:"` prefix).
+    /// watertown user-facing API (which adds a `"setting:"` prefix).
     pub async fn raw_config_get(&self, key: &str) -> Result<Option<String>, StewardError> {
         self.inner
             .config_get(self.pond_id_uuid(), key)

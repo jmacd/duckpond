@@ -93,7 +93,7 @@ where
         if long {
             handler(&file_info.format_long_style());
         } else {
-            handler(&file_info.format_duckpond_style());
+            handler(&file_info.format_watertown_style());
         }
     }
 

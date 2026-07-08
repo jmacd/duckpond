@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run a DuckPond test in a fresh container
+# Run a Watertown test in a fresh container
 #
 # Usage:
 #   ./run-test.sh 201                       # Run test, inspect on failure
@@ -10,7 +10,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE_NAME="duckpond-test:latest"
+IMAGE_NAME="watertown-test:latest"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 # Detect container runtime (docker or podman)
@@ -284,7 +284,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
             exit 1
         fi
         COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.test.yaml"
-        COMPOSE_PROJECT="duckpond-test-$$"
+        COMPOSE_PROJECT="watertown-test-$$"
 
         compose_cleanup() {
             "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" down --volumes --timeout 5 2>/dev/null || true

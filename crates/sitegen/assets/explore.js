@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// DuckPond sitegen -- explore.js
+// Watertown sitegen -- explore.js
 //
 // A Datasette-style browser data explorer. Reads a `script.datasets` JSON
 // manifest emitted by sitegen, registers each dataset's static parquet files

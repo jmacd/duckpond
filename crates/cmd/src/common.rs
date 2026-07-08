@@ -372,7 +372,7 @@ pub fn format_file_size(size: u64) -> String {
     }
 }
 
-/// Helper struct to store file information for DuckPond-specific output
+/// Helper struct to store file information for Watertown-specific output
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
@@ -382,9 +382,9 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    /// Format in DuckPond-specific style showing meaningful metadata
+    /// Format in Watertown-specific style showing meaningful metadata
     #[must_use]
-    pub fn format_duckpond_style(&self) -> String {
+    pub fn format_watertown_style(&self) -> String {
         self.format_with_options(false)
     }
 

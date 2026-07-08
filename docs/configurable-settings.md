@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Several operational knobs in duckpond are currently hardcoded constants or
+Several operational knobs in watertown are currently hardcoded constants or
 expressed only as `pond maintain` CLI flags. The maintenance retention work
 (see `archive/delta-cleanup-synchronization.md`) surfaced the question of where such
 tunables belong. The answer for operator-facing defaults is the **steward

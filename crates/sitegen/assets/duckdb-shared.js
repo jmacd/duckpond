@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// DuckPond sitegen -- duckdb-shared.js
+// Watertown sitegen -- duckdb-shared.js
 //
 // Shared DuckDB-WASM helpers used by both chart.js and explore.js. Factoring
 // the init, file registration, and CSV serialization here keeps the two assets

@@ -10,7 +10,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/duckpond
+  IMAGE_NAME: ${{ github.repository }}/watertown
 
 jobs:
   check:

@@ -9,21 +9,21 @@
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
-/// DuckPond version baked into generated HTML as `<meta name="generator">`.
+/// Watertown version baked into generated HTML as `<meta name="generator">`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Git short SHA captured at build time for dev identification.
-const GIT_SHA: &str = env!("DUCKPOND_GIT_SHA");
+const GIT_SHA: &str = env!("WATERTOWN_GIT_SHA");
 
 /// Build identifier string for the page footer.
 ///
-/// For release builds (version != "0.0.0"), shows "DuckPond v0.38.0".
-/// For dev builds, shows "DuckPond abc1234".
+/// For release builds (version != "0.0.0"), shows "Watertown v0.38.0".
+/// For dev builds, shows "Watertown abc1234".
 fn build_id() -> String {
     if VERSION.starts_with("0.0.") || VERSION.contains("dev") {
-        format!("DuckPond {}", GIT_SHA)
+        format!("Watertown {}", GIT_SHA)
     } else {
-        format!("DuckPond v{}", VERSION)
+        format!("Watertown v{}", VERSION)
     }
 }
 
@@ -31,7 +31,7 @@ fn build_id() -> String {
 ///
 /// Supports variable expansion in the text:
 /// - `${DATE}` — generation date (e.g. "April 20, 2026")
-/// - `${BUILD}` — build identifier (e.g. "DuckPond v0.47.0")
+/// - `${BUILD}` — build identifier (e.g. "Watertown v0.47.0")
 ///
 /// If no footer text is configured, the footer element is omitted entirely.
 fn build_footer(custom: Option<&str>) -> Markup {
@@ -169,7 +169,7 @@ fn common_head(ctx: &LayoutContext) -> Markup {
     html! {
         meta charset="utf-8";
         meta name="viewport" content="width=device-width, initial-scale=1";
-        meta name="generator" content=(format!("DuckPond v{}", VERSION));
+        meta name="generator" content=(format!("Watertown v{}", VERSION));
         title { (ctx.title) " -- " (ctx.site_title) }
         link rel="preconnect" href="https://fonts.googleapis.com";
         link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;

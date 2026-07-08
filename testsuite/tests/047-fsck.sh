@@ -23,7 +23,7 @@ echo "=== Experiment: pond fsck ==="
 
 pond init --birthplace test-host
 
-echo "hello duckpond" > /tmp/small.txt
+echo "hello watertown" > /tmp/small.txt
 head -c 200000 /dev/urandom > /tmp/big.bin
 pond copy host:///tmp/small.txt /small.txt
 pond copy host:///tmp/big.bin /big.bin

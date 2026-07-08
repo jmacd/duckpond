@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// DuckPond sitegen — chart.js
+// Watertown sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // renders time-series line charts with Vega-Lite.
 // Supports duration buttons (12h … 7d) and click-drag brush-to-zoom.

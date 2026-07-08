@@ -1,6 +1,6 @@
 ## Repository Overview
 
-DuckPond is a **query-native filesystem** that treats all filesystem operations as queryable data. Built on Apache Arrow, DataFusion, and Delta Lake, it creates a unified platform where files, directories, and metadata are first-class SQL citizens, enabling sophisticated data transformations and time-series analytics through familiar filesystem operations.
+Watertown is a **query-native filesystem** that treats all filesystem operations as queryable data. Built on Apache Arrow, DataFusion, and Delta Lake, it creates a unified platform where files, directories, and metadata are first-class SQL citizens, enabling sophisticated data transformations and time-series analytics through familiar filesystem operations.
 
 **Core Innovation**: Every filesystem object can be queried with SQL, and SQL queries can create new filesystem objects that appear as native files and directories.
 
@@ -8,7 +8,7 @@ DuckPond is a **query-native filesystem** that treats all filesystem operations 
 
 ## File System Architecture
 
-DuckPond implements a transactional filesystem with these distinguishing features:
+Watertown implements a transactional filesystem with these distinguishing features:
 
 - **ACID Transactions**: Atomic filesystem operations backed by Delta Lake
 - **SQL-Queryable Everything**: Files, directories, and metadata accessible via DataFusion SQL
@@ -20,7 +20,7 @@ The filesystem provides a hierarchical namespace with pattern matching, glob sup
 
 ## Command-Line Interface
 
-DuckPond is primarily accessed through the `pond` CLI, which provides Unix-like commands for filesystem operations:
+Watertown is primarily accessed through the `pond` CLI, which provides Unix-like commands for filesystem operations:
 
 ### Basic Operations
 
@@ -127,7 +127,7 @@ pond control show-config
 
 ## Built-in Factory Types
 
-DuckPond provides several factory types for data transformation and management:
+Watertown provides several factory types for data transformation and management:
 
 ### Data Transformation Factories
 
@@ -187,7 +187,7 @@ A complete example using multiple factories can be found in `${REPO_ROOT}/noyo`.
 
 ## Project Crates
 
-DuckPond is organized into eight Rust crates with clear separation of concerns:
+Watertown is organized into eight Rust crates with clear separation of concerns:
 
 ### Core Filesystem Crates
 

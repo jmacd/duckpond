@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # `billing` — Caspar Water bookkeeping (v2)
 
 A tiny, transactional, double-entry bookkeeping system implemented as a
-DuckPond executable factory. Replaces the legacy CSV-driven Go program
+Watertown executable factory. Replaces the legacy CSV-driven Go program
 with an append-only journal, pluggable billing policies, and operator
 CLI commands that maintain audit-correctness automatically.
 
@@ -16,7 +16,7 @@ document this implementation follows.
 
 ## What this crate provides
 
-- The **`accounts` executable factory** registered in the duckpond
+- The **`accounts` executable factory** registered in the watertown
   factory registry. Mounted via `pond apply` (conventionally at
   `/system/etc/accounts`) and invoked via `pond run`.
 - ~30 operator subcommands grouped under nouns:
@@ -321,7 +321,7 @@ $POND/
 
 ## Backups
 
-Use the standard duckpond `remote` factory. The books pond is just a
+Use the standard watertown `remote` factory. The books pond is just a
 pond.
 
 ## Out of scope (future phases)

@@ -1,4 +1,4 @@
-# DuckPond Makefile
+# Watertown Makefile
 #
 # Quick reference:
 #   make              - show this help
@@ -139,4 +139,4 @@ site-cross: release sites
 clean:
 	cargo clean
 	rm -rf crates/sitegen/vendor/dist crates/sitegen/vendor/.work
-	rm -f testsuite/pond testsuite/duckpond-emergency
+	rm -f testsuite/pond testsuite/watertown-emergency

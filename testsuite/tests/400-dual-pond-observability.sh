@@ -5,12 +5,12 @@
 #   Pond2: Monitors Pond1's invocations by querying its control table
 #
 # EXPECTED:
-#   - Pond1 ingests logs from /var/log/duckpond
+#   - Pond1 ingests logs from /var/log/watertown
 #   - Pond2 can query Pond1's transaction history
 #   - Both ponds operate independently
 #
 # CONCEPT:
-#   This demonstrates using DuckPond to observe DuckPond - a meta-monitoring pattern
+#   This demonstrates using Watertown to observe Watertown - a meta-monitoring pattern
 #   useful for understanding system behavior and debugging.
 #
 set -e
@@ -34,8 +34,8 @@ pond mkdir /system
 pond mkdir /system/run
 
 # Generate some sample logs to ingest
-mkdir -p /var/log/duckpond
-cat > /var/log/duckpond/app.json << 'EOF'
+mkdir -p /var/log/watertown
+cat > /var/log/watertown/app.json << 'EOF'
 {"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"Application started"}
 {"timestamp":"2024-01-01T00:01:00Z","level":"INFO","message":"Processing request 1"}
 {"timestamp":"2024-01-01T00:02:00Z","level":"WARN","message":"High latency detected"}
@@ -48,8 +48,8 @@ echo "✓ Generated sample logs"
 # Create logfile-ingest configuration
 cat > /tmp/logfile-ingest.yaml << 'EOF'
 name: app-logs
-archived_pattern: "/var/log/duckpond/app-*.json"
-active_pattern: "/var/log/duckpond/app.json"
+archived_pattern: "/var/log/watertown/app-*.json"
+active_pattern: "/var/log/watertown/app.json"
 pond_path: "logs/app"
 EOF
 
@@ -65,7 +65,7 @@ if pond mknod logfile-ingest /system/run/20-logs --config-path /tmp/logfile-inge
 else
     echo "⚠ logfile-ingest factory not available - trying manual copy"
     # Fallback: manually copy the log file
-    pond copy host:///var/log/duckpond/app.json /logs/app.json
+    pond copy host:///var/log/watertown/app.json /logs/app.json
     echo "OK: Manually copied logs"
 fi
 
@@ -160,10 +160,10 @@ echo "=== Cron Configuration (for reference) ==="
 
 cat << 'CRON_EXAMPLE'
 # To run log ingestion every minute (add to /etc/cron.d/experiment):
-* * * * * root POND=/pond1 /usr/local/bin/pond run /system/run/20-logs ingest >> /var/log/duckpond/cron.log 2>&1
+* * * * * root POND=/pond1 /usr/local/bin/pond run /system/run/20-logs ingest >> /var/log/watertown/cron.log 2>&1
 
 # To run observation every 5 minutes:
-*/5 * * * * root /experiment/observe-pond1.sh >> /var/log/duckpond/observer.log 2>&1
+*/5 * * * * root /experiment/observe-pond1.sh >> /var/log/watertown/observer.log 2>&1
 CRON_EXAMPLE
 
 echo ""

@@ -1,9 +1,9 @@
-DUCKPOND LOGO - EXACTING RECONSTRUCTION SPEC
+WATERTOWN LOGO - EXACTING RECONSTRUCTION SPEC
 ============================================
 
 ORIGIN / INTENT
 ---------------
-The duckpond logo is a clipart interpretation of caspar_duckpond.jpg (repo root),
+The watertown logo is a clipart interpretation of caspar_watertown.jpg (repo root),
 a small circular pond seen at an angle with a far treeline, an ocean horizon
 behind it, a duck on the water, reeds at the near shore.
 
@@ -17,12 +17,12 @@ verbatim from the rendered SVGs.
 
 FILES
 -----
-  logo/duckpond-scene-badge.svg  Square rounded badge, viewBox 0 0 256 256.
-  logo/duckpond-banner.svg       Wide banner: badge (left) + "Duckpond" wordmark.
+  logo/watertown-scene-badge.svg  Square rounded badge, viewBox 0 0 256 256.
+  logo/watertown-banner.svg       Wide banner: badge (left) + "Watertown" wordmark.
   logo/PALETTE.md                Color reference.
 
 ==================================================================
-PART 1 - THE BADGE  (logo/duckpond-scene-badge.svg)
+PART 1 - THE BADGE  (logo/watertown-scene-badge.svg)
 ==================================================================
 Canvas: <svg viewBox="0 0 256 256" width="256" height="256">
 A 256x256 square. All scene art is clipped to a rounded square; a brand-blue
@@ -133,10 +133,10 @@ BADGE BORDER (outside the clip group, drawn last, on top):
   <rect x=8 y=8 w=240 h=240 rx=48 ry=48 fill=none stroke=#00325a stroke-width=6>
 
 ==================================================================
-PART 2 - THE BANNER  (logo/duckpond-banner.svg)
+PART 2 - THE BANNER  (logo/watertown-banner.svg)
 ==================================================================
 Canvas: <svg viewBox="0 0 1557 300" width="1557" height="300">
-White background, the badge on the left, the "Duckpond" wordmark to its right.
+White background, the badge on the left, the "Watertown" wordmark to its right.
 Layout: badge ~30..273 high (vertically centered, center y=150); the wordmark's
 cap height is centered on the same y=150 so badge and "D" share a center line.
 
@@ -160,7 +160,7 @@ BADGE (left):
   20px left margin and 22px top margin, so it occupies x 28..268, y 30..270
   (border stroke extends ~3px beyond).
 
-WORDMARK ("Duckpond" in small caps):
+WORDMARK ("Watertown" in small caps):
   Style: Montserrat Bold (700), SMALL CAPS - a full-height cap "D" followed by
   smaller caps "UCKPOND". Solid fill #00325a, NO stroke/outline.
 
@@ -190,4 +190,4 @@ RENDERING / VERIFICATION
 ------------------------
 macOS qlmanage is unreliable (scales ~1.57x, clips square, ignores text-anchor).
 Render with librsvg via sharp instead:
-  node -e "require('sharp')('logo/duckpond-banner.svg',{density:150}).png().toFile('out.png')"
+  node -e "require('sharp')('logo/watertown-banner.svg',{density:150}).png().toFile('out.png')"
