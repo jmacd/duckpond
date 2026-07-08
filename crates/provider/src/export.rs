@@ -401,6 +401,40 @@ pub async fn export_table_provider_to_parquet(
         .map_err(|e| anyhow::anyhow!("export_dir not under base_output_dir: {}", e))?
         .to_path_buf();
 
+    // Full-rewrite fast path: no prior output is reusable, so write every
+    // partition in a single `COPY ... PARTITIONED BY` (one source scan) rather
+    // than rescanning the source once per partition. The per-partition loop
+    // below is reserved for the small changed-partition tail of an incremental
+    // reconcile, where most partitions are reused and only a few are rewritten.
+    if !can_reuse {
+        let (results, manifest) = full_rewrite_partitioned(
+            ctx,
+            &unique_table_name,
+            temporal_parts,
+            timestamp_column,
+            export_dir,
+            base_output_dir,
+            captures,
+            source_label,
+            hint,
+        )
+        .await?;
+
+        _ = ctx.deregister_table(datafusion::sql::TableReference::bare(
+            unique_table_name.as_str(),
+        ));
+        write_series_manifest(&manifest_path, &manifest)?;
+
+        if results.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No files were exported for: {}",
+                source_label
+            ));
+        }
+        let schema = read_parquet_schema(export_dir)?;
+        return Ok((results, schema));
+    }
+
     let partitions = distinct_partitions(
         ctx,
         &unique_table_name,
@@ -662,6 +696,113 @@ async fn export_one_partition(
         )
     })?;
     file_blake3(abs_file)
+}
+
+/// Full-rewrite export via a single `COPY ... PARTITIONED BY` (one source scan).
+///
+/// This is the fast path taken when no prior output can be reused (first build,
+/// missing seed manifest, or an unbounded `changed_since`). It writes every
+/// partition in one DataFusion pass -- as opposed to `export_one_partition`,
+/// which rescans the source once per partition and is only appropriate for the
+/// small changed-partition tail of an incremental reconcile. DataFusion emits
+/// one UUID-named parquet per Hive partition; each is renamed to the
+/// deterministic `data.parquet` so a later build can reuse it by path, and its
+/// blake3 digest is recorded in the returned manifest.
+async fn full_rewrite_partitioned(
+    ctx: &datafusion::prelude::SessionContext,
+    table: &str,
+    temporal_parts: &[String],
+    timestamp_column: &str,
+    export_dir: &Path,
+    base_output_dir: &Path,
+    captures: &[String],
+    source_label: &str,
+    hint: Option<&tinyfs::ExportHint>,
+) -> Result<(Vec<(Vec<String>, ExportOutput)>, SeriesExportManifest)> {
+    let temporal_columns = temporal_parts
+        .iter()
+        .map(|p| {
+            format!(
+                "CAST(date_part('{}', \"{}\") AS BIGINT) AS {}",
+                p, timestamp_column, p
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select = if temporal_parts.is_empty() {
+        format!("SELECT * FROM \"{table}\" ORDER BY \"{timestamp_column}\"")
+    } else {
+        format!("SELECT *, {temporal_columns} FROM \"{table}\" ORDER BY \"{timestamp_column}\"")
+    };
+    let mut copy_sql = format!(
+        "COPY ({select}) TO '{}' STORED AS PARQUET",
+        export_dir.to_string_lossy()
+    );
+    if !temporal_parts.is_empty() {
+        copy_sql.push_str(&format!(" PARTITIONED BY ({})", temporal_parts.join(", ")));
+    }
+    log::debug!("full-rewrite export SQL: {}", copy_sql);
+    let df = ctx
+        .sql(&copy_sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("COPY failed for '{}': {}", source_label, e))?;
+    _ = df
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("COPY stream failed for '{}': {}", source_label, e))?;
+
+    // DataFusion wrote one UUID-named parquet per Hive partition. Rename each to
+    // the deterministic `data.parquet` and record its digest + temporal bounds.
+    let produced = discover_exported_files(export_dir, base_output_dir)?;
+    let mut manifest = SeriesExportManifest {
+        digest: hint.map(|h| h.digest.clone()),
+        partitions: Vec::new(),
+    };
+    let mut results: Vec<(Vec<String>, ExportOutput)> = Vec::new();
+    for out in produced {
+        let src_abs = base_output_dir.join(&out.file);
+        let file_rel = out
+            .file
+            .parent()
+            .map(|d| d.join("data.parquet"))
+            .unwrap_or_else(|| PathBuf::from("data.parquet"));
+        let dst_abs = base_output_dir.join(&file_rel);
+        if src_abs != dst_abs {
+            if dst_abs.exists() {
+                return Err(anyhow::anyhow!(
+                    "Partition '{}' produced more than one parquet file for '{}'; \
+                     deterministic naming requires exactly one file per partition.",
+                    file_rel.display(),
+                    source_label
+                ));
+            }
+            std::fs::rename(&src_abs, &dst_abs).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to normalize partition '{}': {}",
+                    dst_abs.display(),
+                    e
+                )
+            })?;
+        }
+        let digest = file_blake3(&dst_abs)?;
+        manifest.partitions.push(ManifestPartition {
+            file: file_rel.clone(),
+            digest,
+            start_time: out.start_time,
+            end_time: out.end_time,
+        });
+        results.push((
+            captures.to_vec(),
+            ExportOutput {
+                file: file_rel,
+                start_time: out.start_time,
+                end_time: out.end_time,
+            },
+        ));
+    }
+    results.sort_by(|a, b| a.1.file.cmp(&b.1.file));
+    manifest.partitions.sort_by(|a, b| a.file.cmp(&b.file));
+    Ok((results, manifest))
 }
 
 /// blake3 hex digest of a file's bytes.
