@@ -133,6 +133,66 @@ struct PondFileState {
     blake3: String,
     /// Cumulative size (for FilePhysicalSeries)
     cumulative_size: u64,
+    /// Stored bao-tree frontier (rightmost path of complete subtrees) for the
+    /// tracked prefix. `Some` for FilePhysicalSeries with a parseable
+    /// bao_outboard; `None` for legacy entries without one. When present it lets
+    /// prefix verification resume from the committed hashes and read only the
+    /// trailing partial block instead of the whole prefix.
+    frontier: Option<Vec<(u32, [u8; 32], u64)>>,
+}
+
+/// Verify that the host file's tracked prefix still matches the pond's committed
+/// cumulative hash, using the stored bao-tree frontier so we read at most one
+/// `BLOCK_SIZE` trailing block instead of re-hashing the entire prefix.
+///
+/// Returns `(matches, host_root_hex)`. `matches` is true when the prefix is
+/// intact (a normal append) and false when it changed (a rotation). The host
+/// root hash is returned so callers can include it in diagnostics.
+///
+/// When no frontier is stored (a legacy entry without a bao_outboard) this falls
+/// back to the historical full-prefix read so behavior is unchanged for that
+/// degraded case. This is a precondition fallback, not a verification fallback:
+/// a genuine hash mismatch is still surfaced to the caller as `matches == false`.
+fn verify_prefix_matches(
+    host_path: &std::path::Path,
+    pond_state: &PondFileState,
+) -> Result<(bool, String), tinyfs::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    use utilities::bao_outboard::{BLOCK_SIZE, IncrementalHashState};
+
+    let cumulative_size = pond_state.cumulative_size;
+    if cumulative_size == 0 {
+        // Nothing tracked yet; any host content is a fresh prefix.
+        return Ok((true, String::new()));
+    }
+
+    let host_root = match &pond_state.frontier {
+        Some(frontier) => {
+            let block = BLOCK_SIZE as u64;
+            let pending_start = (cumulative_size / block) * block;
+            let pending_len = (cumulative_size % block) as usize;
+
+            let mut file = std::fs::File::open(host_path).map_other()?;
+            let _ = file.seek(SeekFrom::Start(pending_start)).map_other()?;
+            let mut verified_pending = vec![0u8; pending_len];
+            file.read_exact(&mut verified_pending).map_other()?;
+
+            let state = IncrementalHashState::resume(frontier, cumulative_size, &verified_pending)
+                .map_other()?;
+            state.root_hash().to_hex().to_string()
+        }
+        None => {
+            let mut file = std::fs::File::open(host_path).map_other()?;
+            let mut prefix_content = vec![0u8; cumulative_size as usize];
+            file.read_exact(&mut prefix_content).map_other()?;
+            let mut hasher = IncrementalHashState::new();
+            hasher.ingest(&prefix_content);
+            hasher.root_hash().to_hex().to_string()
+        }
+    };
+
+    let matches = host_root == pond_state.blake3;
+    Ok((matches, host_root))
 }
 
 /// Summary of ingestion activity for logging
@@ -264,18 +324,13 @@ pub async fn execute(
                 // host_active.size > pond_active.cumulative_size
                 // Usually a normal append, but could also be a rotation where
                 // the new file already grew past the old tracked size.
-                // Check the prefix to distinguish.
+                // Verify the tracked prefix via the stored frontier (reads only
+                // the trailing partial block, not the whole prefix).
                 if pond_active.cumulative_size > 0 {
-                    let mut prefix_file = std::fs::File::open(&host_active.path).map_other()?;
-                    let mut prefix_content = vec![0u8; pond_active.cumulative_size as usize];
-                    use std::io::Read;
-                    prefix_file.read_exact(&mut prefix_content).map_other()?;
+                    let (prefix_matches, host_blake3) =
+                        verify_prefix_matches(&host_active.path, pond_active)?;
 
-                    let mut hasher = IncrementalHashState::new();
-                    hasher.ingest(&prefix_content);
-                    let host_blake3 = hasher.root_hash().to_hex().to_string();
-
-                    if host_blake3 == pond_active.blake3 {
+                    if prefix_matches {
                         debug!(
                             "Active file {} grew from {} to {} bytes - prefix matches, normal append",
                             active_filename, pond_active.cumulative_size, host_active.size
@@ -283,8 +338,11 @@ pub async fn execute(
                         false
                     } else {
                         info!(
-                            "Active file {} grew from {} to {} bytes but prefix changed - checking for rotation",
-                            active_filename, pond_active.cumulative_size, host_active.size
+                            "Active file {} grew from {} to {} bytes but prefix changed (host root {}) - checking for rotation",
+                            active_filename,
+                            pond_active.cumulative_size,
+                            host_active.size,
+                            &host_blake3[..host_blake3.len().min(16)]
                         );
                         true
                     }
@@ -566,17 +624,18 @@ async fn read_pond_state(
             ))
         })?;
 
-        // For FilePhysicalSeries, extract cumulative_size from the bao_outboard
-        // The metadata.size is just the latest version's size, not cumulative
-        // NOTE: We use SeriesOutboard ONLY to get cumulative_size, not for verification
-        let cumulative_size = if let Some(bao_outboard) = &metadata.bao_outboard {
+        // For FilePhysicalSeries, extract cumulative_size and the bao-tree
+        // frontier from the bao_outboard. The frontier lets prefix verification
+        // resume from committed hashes instead of re-reading the whole prefix.
+        // metadata.size is just the latest version's size, not cumulative.
+        let (cumulative_size, frontier) = if let Some(bao_outboard) = &metadata.bao_outboard {
             match utilities::bao_outboard::SeriesOutboard::from_bytes(bao_outboard) {
                 Ok(series) => {
                     debug!(
                         "File {} has bao_outboard with cumulative_size={}",
                         filename, series.cumulative_size
                     );
-                    series.cumulative_size
+                    (series.cumulative_size, Some(series.incremental.frontier))
                 }
                 Err(e) => {
                     warn!(
@@ -585,7 +644,7 @@ async fn read_pond_state(
                         e,
                         metadata.size.unwrap_or(0)
                     );
-                    metadata.size.unwrap_or(0)
+                    (metadata.size.unwrap_or(0), None)
                 }
             }
         } else {
@@ -593,7 +652,7 @@ async fn read_pond_state(
                 "File {} has NO bao_outboard, falling back to size={:?}",
                 filename, metadata.size
             );
-            metadata.size.unwrap_or(0)
+            (metadata.size.unwrap_or(0), None)
         };
 
         let size = metadata.size.unwrap_or(0);
@@ -606,6 +665,7 @@ async fn read_pond_state(
                 size,
                 blake3,
                 cumulative_size,
+                frontier,
             },
         );
     }
@@ -813,25 +873,17 @@ async fn ingest_append(
         snapshot_size
     );
 
-    // Verify prefix hasn't changed before appending
-    // This ensures the file wasn't rotated between when we checked size and now
+    // Verify prefix hasn't changed before appending.
+    // This guards against the file being rotated between when we checked size
+    // and now (TOCTOU). Uses the stored frontier so it reads only the trailing
+    // partial block, not the whole prefix.
     {
-        // Read the prefix from host file
-        let mut prefix_file = std::fs::File::open(&host_file.path).map_other()?;
-        let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
-        prefix_file.read_exact(&mut prefix_content).map_other()?;
-
-        // Compute blake3 of prefix (using same method as TinyFS - bao-tree root)
-        let mut hasher = IncrementalHashState::new();
-        hasher.ingest(&prefix_content);
-        let prefix_blake3 = hasher.root_hash().to_hex().to_string();
-
-        // Compare to pond's stored blake3
-        if prefix_blake3 != pond_state.blake3 {
+        let (prefix_matches, host_blake3) = verify_prefix_matches(&host_file.path, pond_state)?;
+        if !prefix_matches {
             return Err(tinyfs::Error::Other(format!(
                 "Prefix verification failed for {}: expected blake3={}, got blake3={}. \
                  File may have been rotated during ingestion.",
-                filename, pond_state.blake3, prefix_blake3
+                filename, pond_state.blake3, host_blake3
             )));
         }
 
@@ -996,5 +1048,102 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    use std::io::Write;
+    use utilities::bao_outboard::BLOCK_SIZE;
+
+    /// Build a `PondFileState` whose blake3/frontier commit to `content`,
+    /// mirroring how a FilePhysicalSeries stores its cumulative bao-tree state.
+    fn pond_state_for(content: &[u8], with_frontier: bool) -> PondFileState {
+        let mut hasher = IncrementalHashState::new();
+        hasher.ingest(content);
+        PondFileState {
+            node_id: FileID::root(),
+            version: 1,
+            size: content.len() as u64,
+            blake3: hasher.root_hash().to_hex().to_string(),
+            cumulative_size: content.len() as u64,
+            frontier: with_frontier.then(|| hasher.to_frontier()),
+        }
+    }
+
+    fn write_host(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(bytes).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn verify_prefix_matches_multiblock_parity_and_rotation() {
+        // > 1 block so the stored frontier is non-empty (the hot path).
+        let prefix: Vec<u8> = (0..(BLOCK_SIZE * 3 + 123))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let state = pond_state_for(&prefix, true);
+        assert!(!state.frontier.as_ref().unwrap().is_empty());
+
+        // Intact prefix -> matches, host root equals the committed root.
+        let host = write_host(&prefix);
+        let (matches, host_root) = verify_prefix_matches(host.path(), &state).unwrap();
+        assert!(matches);
+        assert_eq!(host_root, state.blake3);
+
+        // Same-size prefix with a mutated trailing block -> rotation detected.
+        let mut mutated = prefix.clone();
+        *mutated.last_mut().unwrap() ^= 0xFF;
+        let host = write_host(&mutated);
+        let (matches, _) = verify_prefix_matches(host.path(), &state).unwrap();
+        assert!(!matches);
+    }
+
+    #[test]
+    fn verify_prefix_matches_ignores_appended_tail() {
+        // A grown file: same tracked prefix plus new bytes. Only the prefix is
+        // verified, so this is a normal append.
+        let prefix: Vec<u8> = (0..(BLOCK_SIZE * 2)).map(|i| (i % 97) as u8).collect();
+        let state = pond_state_for(&prefix, true);
+
+        let mut grown = prefix.clone();
+        grown.extend_from_slice(b"newly appended log line\n");
+        let host = write_host(&grown);
+
+        let (matches, host_root) = verify_prefix_matches(host.path(), &state).unwrap();
+        assert!(matches);
+        assert_eq!(host_root, state.blake3);
+    }
+
+    #[test]
+    fn verify_prefix_matches_sub_block_empty_frontier() {
+        // < 1 block: frontier is empty, resume covers the whole (tiny) prefix.
+        let prefix = b"a few log lines\nnot even one block\n".to_vec();
+        let state = pond_state_for(&prefix, true);
+        assert!(state.frontier.as_ref().unwrap().is_empty());
+
+        let host = write_host(&prefix);
+        assert!(verify_prefix_matches(host.path(), &state).unwrap().0);
+
+        let mut mutated = prefix.clone();
+        mutated[0] ^= 0xFF;
+        let host = write_host(&mutated);
+        assert!(!verify_prefix_matches(host.path(), &state).unwrap().0);
+    }
+
+    #[test]
+    fn verify_prefix_matches_no_frontier_full_read_fallback() {
+        // Legacy entry without a stored frontier -> full-prefix read fallback,
+        // which must still verify correctly.
+        let prefix: Vec<u8> = (0..(BLOCK_SIZE + 500)).map(|i| (i % 211) as u8).collect();
+        let state = pond_state_for(&prefix, false);
+        assert!(state.frontier.is_none());
+
+        let host = write_host(&prefix);
+        assert!(verify_prefix_matches(host.path(), &state).unwrap().0);
+
+        let mut mutated = prefix.clone();
+        mutated[BLOCK_SIZE / 2] ^= 0x01;
+        let host = write_host(&mutated);
+        assert!(!verify_prefix_matches(host.path(), &state).unwrap().0);
     }
 }
