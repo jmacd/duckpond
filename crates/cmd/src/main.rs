@@ -469,7 +469,7 @@ enum Commands {
         #[arg(short, long)]
         pattern: Vec<String>,
         /// Output directory for exported files
-        #[arg(short, long)]
+        #[arg(long)]
         dir: PathBuf,
         /// Temporal partitioning levels (comma-separated: year,month,day,hour,minute)
         #[arg(long, default_value = "")]
