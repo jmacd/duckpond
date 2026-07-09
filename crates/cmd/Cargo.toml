@@ -42,7 +42,7 @@ extended-description = """\
 Watertown is a local-first data management tool for small industrial
 systems built on Apache Arrow, DataFusion, and Delta Lake.  This
 package installs the `pond` CLI plus the sitegen browser-side vendor
-assets (DuckDB-WASM, Observable Plot, D3) needed for chart rendering.
+assets (DuckDB-WASM and Vega-Lite) needed for chart rendering.
 """
 section = "utils"
 priority = "optional"
@@ -60,15 +60,15 @@ assets = [
     ["../sitegen/vendor/dist/duckdb-eh.wasm",            "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser.mjs",        "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js","usr/share/watertown/vendor/",    "644"],
-    ["../sitegen/vendor/dist/plot-d3-bundle.mjs",        "usr/share/watertown/vendor/",     "644"],
+    ["../sitegen/vendor/dist/vega-bundle.mjs",           "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-eh.wasm.gz",         "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser.mjs.gz",     "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js.gz","usr/share/watertown/vendor/", "644"],
-    ["../sitegen/vendor/dist/plot-d3-bundle.mjs.gz",     "usr/share/watertown/vendor/",     "644"],
+    ["../sitegen/vendor/dist/vega-bundle.mjs.gz",        "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-eh.wasm.br",         "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser.mjs.br",     "usr/share/watertown/vendor/",     "644"],
     ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js.br","usr/share/watertown/vendor/", "644"],
-    ["../sitegen/vendor/dist/plot-d3-bundle.mjs.br",     "usr/share/watertown/vendor/",     "644"],
+    ["../sitegen/vendor/dist/vega-bundle.mjs.br",        "usr/share/watertown/vendor/",     "644"],
     ["../../README.md",                                  "usr/share/doc/watertown/README", "644"],
 ]
 
