@@ -8,23 +8,46 @@ This document describes the release process for Watertown and addresses software
 
 All builds are performed via GitHub Actions (see `.github/workflows/rust-ci.yml`):
 
-1. **On Pull Requests**: Run tests, clippy, and format checks only
-2. **On Main Branch**: Run tests + build and publish container image + create .deb package
-3. **On Version Tags** (`v*`): Same as main, with version-tagged artifacts
+1. **On Pull Requests**: Run tests, clippy, and format checks only.  The
+   container image and `.deb` artifact jobs run on a PR only when the
+   `build-container` label is present.
+2. **On Main Branch**: Run tests + build and publish the multi-arch container
+   image (`build-container`) + build and publish the `.deb` as an OCI artifact
+   (`build-deb`)
+3. **On `workflow_dispatch`**: Same as main.
 
 ### Artifacts Produced
 
-For each successful build on main or version tags:
+For each successful build on `main` or `workflow_dispatch`:
 
-- **Container Image**: `ghcr.io/jmacd/watertown:latest` (or version tag)
-  - Built with Podman on GitHub's Ubuntu runners
+- **Container Image**: `ghcr.io/jmacd/watertown/watertown:latest-<arch>`
+  (plus `sha-<short>-<arch>`)
+  - Built with Podman on GitHub's Ubuntu runners (amd64 + arm64)
   - Based on Debian Bookworm (glibc 2.36)
-  - Includes pond binary at `/usr/bin/pond`
-  
-- **Debian Package**: `pond_<version>_amd64.deb`
-  - Available as GitHub Actions artifact (90 day retention)
-  - Dependencies: libssl3, ca-certificates
-  - Installs to `/usr/bin/pond`
+  - Includes the pond binary at `/usr/bin/pond`
+  - Cosign-signed via Sigstore keyless signing
+
+- **Debian Package (OCI artifact)**:
+  `ghcr.io/jmacd/watertown/pond-deb:latest-<arch>` (plus `sha-<short>-<arch>`)
+  - Built with `cargo deb -p cmd` on amd64 + arm64 runners
+  - Pushed as an OCI artifact with `oras` (media type
+    `application/vnd.debian.binary-package`); the artifact carries the real
+    `watertown_<version>_<arch>.deb` filename
+  - Package name `watertown`, installs `/usr/bin/pond` plus the sitegen vendor
+    blobs to `/usr/share/watertown/vendor/`
+  - Cosign-signed via Sigstore keyless signing
+  - Consumed by the natively-installed `watershop-selfmon` pond, which pulls
+    it hourly (see caspar.water `config/scripts/update-selfmon.sh`)
+
+### Promotion to prod
+
+`.github/workflows/promote.yml` (manual `workflow_dispatch`) retags an existing
+`latest-<arch>` (or `sha-…` / `prod-…`) tag to `prod-<arch>` for **both** the
+container image and the `pond-deb` artifact in lockstep, using `crane cp` (a
+digest-preserving retag, not a rebuild), plus a dated `prod-<stamp>-<arch>`
+rollback handle, then cosign-signs each. Container hosts select `latest-` for
+`*-staging` instances and `prod-` otherwise; the selfmon host selects its deb
+channel via the `DEB_CHANNEL` env (default `latest`).
 
 ### Creating a Release
 
@@ -166,22 +189,31 @@ slsa-verifier verify-artifact pond \
 - **Minimum RAM**: 1GB (monitor memory usage)
 - **Dependencies**: libssl3, ca-certificates
 
-### Installation via .deb Package
+### Installation via .deb Package (OCI artifact)
+
+The `.deb` is published as an OCI artifact rather than a GitHub Release asset.
+Pull it with `oras` (the package is public, no login required) and install:
 
 ```bash
-# Download from GitHub Release
-wget https://github.com/jmacd/watertown/releases/download/v0.16.0/pond_0.16.0_amd64.deb
+# Pull the newest deb for this arch (e.g. arm64) into the current dir
+oras pull ghcr.io/jmacd/watertown/pond-deb:latest-arm64
 
-# Install
-sudo dpkg -i pond_0.16.0_amd64.deb
+# Install (auto-supersedes a legacy `duckpond` package via Conflicts/Replaces)
+sudo dpkg -i watertown_*_arm64.deb
 sudo apt-get install -f  # Install any missing dependencies
 
 # Verify
 pond --version
 
 # Uninstall
-sudo dpkg -r pond
+sudo dpkg -r watertown
 ```
+
+On the `watershop-selfmon` host this is automated: an hourly
+`pond-selfmon-update@.timer` runs `update-selfmon.sh`, which pulls the deb for
+its `DEB_CHANNEL` and installs it only when the pulled version is newer.
+`tools/build-on-watershop.sh` remains a dev-only fallback for fast local
+iteration without waiting for CI.
 
 ### Running in Production
 

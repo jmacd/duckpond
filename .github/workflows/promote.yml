@@ -18,6 +18,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/watertown
+  DEB_PACKAGE: ${{ github.repository }}/pond-deb
 
 jobs:
   promote:
@@ -46,8 +47,11 @@ jobs:
         run: |
           IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          DEB_ID=${{ env.REGISTRY }}/${{ env.DEB_PACKAGE }}
+          DEB_ID=$(echo $DEB_ID | tr '[A-Z]' '[a-z]')
           STAMP=$(date -u +%Y%m%d-%H%M%S)
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "deb_id=$DEB_ID" >> $GITHUB_OUTPUT
           echo "stamp=$STAMP" >> $GITHUB_OUTPUT
 
       - name: Promote (retag by digest)
@@ -68,24 +72,47 @@ jobs:
             echo "prod_${ARCH}_digest=${DIGEST}" >> $GITHUB_OUTPUT
           done
 
+      - name: Promote deb artifact (retag by digest)
+        run: |
+          set -euo pipefail
+          DEB="${{ steps.refs.outputs.deb_id }}"
+          SRC="${{ github.event.inputs.source }}"
+          STAMP="${{ steps.refs.outputs.stamp }}"
+          for ARCH in amd64 arm64; do
+            SRC_REF="${DEB}:${SRC}-${ARCH}"
+            PROD_REF="${DEB}:prod-${ARCH}"
+            STAMPED_REF="${DEB}:prod-${STAMP}-${ARCH}"
+            echo "=== Promoting ${SRC_REF}"
+            DIGEST=$(crane digest "${SRC_REF}")
+            echo "    digest: ${DIGEST}"
+            crane cp "${SRC_REF}" "${PROD_REF}"
+            crane cp "${SRC_REF}" "${STAMPED_REF}"
+          done
+
       - name: Sign promoted images with Sigstore
         run: |
           set -euo pipefail
           IMAGE="${{ steps.refs.outputs.image_id }}"
+          DEB="${{ steps.refs.outputs.deb_id }}"
           STAMP="${{ steps.refs.outputs.stamp }}"
           for ARCH in amd64 arm64; do
             cosign sign --yes "${IMAGE}:prod-${ARCH}"
             cosign sign --yes "${IMAGE}:prod-${STAMP}-${ARCH}"
+            cosign sign --yes "${DEB}:prod-${ARCH}"
+            cosign sign --yes "${DEB}:prod-${STAMP}-${ARCH}"
           done
 
       - name: Summary
         run: |
           IMAGE="${{ steps.refs.outputs.image_id }}"
+          DEB="${{ steps.refs.outputs.deb_id }}"
           STAMP="${{ steps.refs.outputs.stamp }}"
           {
             echo "## Promoted \`${{ github.event.inputs.source }}\` → \`prod\`"
             echo ""
-            echo "Rollback handle: \`${IMAGE}:prod-${STAMP}-<arch>\`"
+            echo "Image rollback handle: \`${IMAGE}:prod-${STAMP}-<arch>\`"
+            echo "Deb rollback handle:   \`${DEB}:prod-${STAMP}-<arch>\`"
             echo ""
-            echo "Prod hosts will pull the new image on their next systemd timer tick (\`--pull=newer\`)."
+            echo "Prod container hosts pull the new image on their next systemd timer tick (\`pond.sh --pull-image\`)."
+            echo "Selfmon hosts on \`DEB_CHANNEL=prod\` pull the new deb on their next hourly update-selfmon tick."
           } >> $GITHUB_STEP_SUMMARY
