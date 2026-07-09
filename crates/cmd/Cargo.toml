@@ -47,6 +47,14 @@ assets (DuckDB-WASM, Observable Plot, D3) needed for chart rendering.
 section = "utils"
 priority = "optional"
 depends = "libc6, ca-certificates"
+# Watertown is the renamed successor of the old `duckpond` package and
+# ships the same `/usr/bin/pond`.  Conflicts + Replaces is the Debian
+# package-rename idiom: it lets `dpkg -i watertown_*.deb` automatically
+# remove an installed `duckpond` and take over its files, instead of
+# aborting with "trying to overwrite '/usr/bin/pond', which is also in
+# package duckpond".
+conflicts = "duckpond"
+replaces = "duckpond"
 assets = [
     ["target/release/pond",                              "usr/bin/",                       "755"],
     ["../sitegen/vendor/dist/duckdb-eh.wasm",            "usr/share/watertown/vendor/",     "644"],
