@@ -366,14 +366,14 @@ async fn discover_export_targets(
     let result = root
         .visit_with_visitor(&pattern, &mut visitor)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to find files matching '{}': {}", &pattern, e));
+        .map_err(|e| anyhow::anyhow!("Failed to find files matching '{}': {}", pattern, e));
 
     match result {
         Ok(targets) => {
             log::debug!(
                 "  [OK] Found {} matches for pattern '{}'",
                 targets.len(),
-                &pattern
+                pattern
             );
             for (i, target) in targets.iter().enumerate() {
                 log::debug!(
@@ -386,7 +386,7 @@ async fn discover_export_targets(
             Ok(targets)
         }
         Err(e) => {
-            log::debug!("  [ERR] Pattern '{}' failed: {}", &pattern, e);
+            log::debug!("  [ERR] Pattern '{}' failed: {}", pattern, e);
             Err(e)
         }
     }

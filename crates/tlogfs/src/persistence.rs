@@ -561,7 +561,7 @@ impl OpLogPersistence {
 
         let table = match deltalake::open_table(url.clone()).await {
             Ok(existing_table) => {
-                debug!("Found existing table at {}", &path_str);
+                debug!("Found existing table at {}", path_str);
                 // D5: refuse to open tables with the pre-D5 partition layout.
                 // Pre-D5: partition_columns = ["part_id"]; D5+: ["pond_id", "part_id"].
                 let part_cols: Vec<String> = existing_table
@@ -594,7 +594,7 @@ impl OpLogPersistence {
                 } else {
                     info!(
                         "Migrating Delta schema at {}: adding column(s) {:?}",
-                        &path_str,
+                        path_str,
                         missing_fields.iter().map(|f| &f.name).collect::<Vec<_>>()
                     );
                     existing_table
@@ -604,10 +604,7 @@ impl OpLogPersistence {
                 }
             }
             Err(open_err) => {
-                debug!(
-                    "no existing table at {}, will create: {open_err}",
-                    &path_str
-                );
+                debug!("no existing table at {}, will create: {open_err}", path_str);
                 // Table doesn't exist, create it
                 // Configure stats collection to skip the binary 'content' column to avoid warnings
                 let config: HashMap<String, Option<String>> = vec![(
@@ -631,7 +628,7 @@ impl OpLogPersistence {
                 match create_result {
                     Ok(table) => table,
                     Err(create_err) => {
-                        debug!("failed to create table at {}: {create_err}", &path_str);
+                        debug!("failed to create table at {}: {create_err}", path_str);
                         return Err(create_err.into());
                     }
                 }
@@ -651,7 +648,7 @@ impl OpLogPersistence {
 
         // Initialize root directory ONLY when creating a new pond
         if create_new {
-            debug!("Initializing root directory for new pond at {}", &path_str);
+            debug!("Initializing root directory for new pond at {}", path_str);
 
             let metadata = PondTxnMetadata::new(1, root_metadata.expect("metadata when new"));
 
@@ -704,7 +701,7 @@ impl OpLogPersistence {
             }
             debug!(
                 "Loaded per-pond seq allocator {:?} from Delta metadata at {} (local pond_id={})",
-                seqs, &path_str, persistence.pond_id,
+                seqs, path_str, persistence.pond_id,
             );
             persistence.seqs = seqs;
         }

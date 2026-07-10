@@ -502,11 +502,11 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                                     .unwrap_or(&dest);
                                 copy_single_file(&host_root, &source.host_path, &dest_wd, dest_filename, source.entry_type).await
                                     .map_other_context("Failed to overwrite file")?;
-                                log::info!("Overwrote {}", &dest);
+                                log::info!("Overwrote {}", dest);
                                 Ok(())
                             } else {
                                 Err(tinyfs::Error::Other(
-                                    format!("When copying multiple files, destination '{}' must be a directory", &dest)
+                                    format!("When copying multiple files, destination '{}' must be a directory", dest)
                                 ).into())
                             }
                         }
@@ -520,7 +520,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                                 Ok(())
                             } else {
                                 Err(tinyfs::Error::Other(
-                                    format!("When copying multiple files, destination '{}' must be an existing directory", &dest)
+                                    format!("When copying multiple files, destination '{}' must be an existing directory", dest)
                                 ).into())
                             }
                         }
@@ -536,7 +536,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                             .map_other_context("Copy to created directory failed")?;
                         Ok(())
                     } else {
-                        Err(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)).into())
+                        Err(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", dest, e)).into())
                     }
                 }
             }
