@@ -179,6 +179,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history is needed so the commit-count build number is
+          # accurate; a shallow clone would report 1.
+          fetch-depth: 0
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -214,8 +218,34 @@ jobs:
       - name: Build vendor assets
         run: make vendor
 
+      - name: Compute package version
+        id: ver
+        run: |
+          set -euo pipefail
+          # Version scheme: 0.<pr>.<build> where <pr> is the pull-request number
+          # and <build> is the total commit count. <build> is monotonic across
+          # every build cause (PR merge, direct push, CI re-run), so each new
+          # deb is strictly-newer under dpkg --compare-versions and the selfmon
+          # auto-updater always upgrades. <pr> stays readable; 0. is the epoch
+          # until a deliberate 1.0.0. A break from the old static 0.52.0.
+          BUILD=$(git rev-list --count HEAD)
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            PR="${{ github.event.pull_request.number }}"
+          else
+            # On main the merge/squash commit subject carries "(#NN)". A direct
+            # push without a PR ref inherits the most recent PR number in
+            # history so the <pr> component never collapses to 0; its higher
+            # <build> then keeps the version strictly-newer. Falls back to 0
+            # only if no PR reference exists anywhere in history.
+            PR=$(git log --pretty=%s | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
+            PR=${PR:-0}
+          fi
+          DEB_VERSION="0.${PR}.${BUILD}"
+          echo "deb_version=${DEB_VERSION}" >> $GITHUB_OUTPUT
+          echo "Computed deb version: ${DEB_VERSION}"
+
       - name: Build Debian package
-        run: cargo deb -p cmd
+        run: cargo deb -p cmd --deb-version "${{ steps.ver.outputs.deb_version }}"
 
       - name: Extract metadata
         id: meta
