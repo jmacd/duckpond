@@ -49,9 +49,44 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the commit-count build number is accurate; a
+          # shallow clone would report 1.
+          fetch-depth: 0
+
+      - name: Compute version
+        id: v
+        run: |
+          set -euo pipefail
+          # Version scheme: 0.<pr>.<build>. <pr> is the pull-request number,
+          # taken directly on PR events or parsed from the merge/squash commit
+          # subject on main. <build> is the total commit count, monotonic across
+          # every build cause, so each build is strictly-newer under
+          # dpkg --compare-versions and the selfmon auto-updater always upgrades.
+          # A direct push without a PR ref inherits the most recent PR number in
+          # history so <pr> never collapses to 0. 0. is the epoch until a
+          # deliberate 1.0.0.
+          BUILD=$(git rev-list --count HEAD)
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            PR="${{ github.event.pull_request.number }}"
+          else
+            PR=$(git log --pretty=%s | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
+            PR=${PR:-0}
+          fi
+          VERSION="0.${PR}.${BUILD}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}"
+
   build-container:
     name: Build & Publish Container (${{ matrix.arch }})
-    needs: check
+    needs: [check, version]
     # Run on main/tags always, on PRs only with 'build-container' label
     if: |
       (success() || failure()) && (
@@ -114,6 +149,7 @@ jobs:
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "extra_tag=$EXTRA_TAG" >> $GITHUB_OUTPUT
+          echo "semver=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
       
       - name: Free up disk space before build
         run: |
@@ -127,8 +163,14 @@ jobs:
       - name: Build container image
         run: |
           podman build \
+            --build-arg WATERTOWN_VERSION=${{ steps.meta.outputs.semver }} \
             -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
             -f Dockerfile .
+          # The 0.<pr>.<build> semver is an immutable, human-readable handle
+          # alongside the moving version tag (latest / pr-N).
+          podman tag \
+            ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
+            ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.semver }}-${{ matrix.arch }}
           if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
             podman tag \
               ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
@@ -139,6 +181,7 @@ jobs:
         id: push
         run: |
           podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.semver }}-${{ matrix.arch }}
           if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
             podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.extra_tag }}-${{ matrix.arch }}
           fi
@@ -148,13 +191,14 @@ jobs:
       - name: Sign container image with Sigstore
         run: |
           cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+          cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.semver }}-${{ matrix.arch }}
           if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
             cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.extra_tag }}-${{ matrix.arch }}
           fi
 
   build-deb:
     name: Build & Publish Deb (${{ matrix.arch }})
-    needs: check
+    needs: [check, version]
     # Same gate as build-container: always on main/workflow_dispatch, on PRs
     # only when the 'build-container' label is present.
     if: |
@@ -179,10 +223,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          # Full history is needed so the commit-count build number is
-          # accurate; a shallow clone would report 1.
-          fetch-depth: 0
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -218,34 +258,12 @@ jobs:
       - name: Build vendor assets
         run: make vendor
 
-      - name: Compute package version
-        id: ver
-        run: |
-          set -euo pipefail
-          # Version scheme: 0.<pr>.<build> where <pr> is the pull-request number
-          # and <build> is the total commit count. <build> is monotonic across
-          # every build cause (PR merge, direct push, CI re-run), so each new
-          # deb is strictly-newer under dpkg --compare-versions and the selfmon
-          # auto-updater always upgrades. <pr> stays readable; 0. is the epoch
-          # until a deliberate 1.0.0. A break from the old static 0.52.0.
-          BUILD=$(git rev-list --count HEAD)
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR="${{ github.event.pull_request.number }}"
-          else
-            # On main the merge/squash commit subject carries "(#NN)". A direct
-            # push without a PR ref inherits the most recent PR number in
-            # history so the <pr> component never collapses to 0; its higher
-            # <build> then keeps the version strictly-newer. Falls back to 0
-            # only if no PR reference exists anywhere in history.
-            PR=$(git log --pretty=%s | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
-            PR=${PR:-0}
-          fi
-          DEB_VERSION="0.${PR}.${BUILD}"
-          echo "deb_version=${DEB_VERSION}" >> $GITHUB_OUTPUT
-          echo "Computed deb version: ${DEB_VERSION}"
-
       - name: Build Debian package
-        run: cargo deb -p cmd --deb-version "${{ steps.ver.outputs.deb_version }}"
+        env:
+          # Bake the same version into the packaged binary so `pond --version`
+          # matches the deb version.
+          WATERTOWN_VERSION: ${{ needs.version.outputs.version }}
+        run: cargo deb -p cmd --deb-version "${{ needs.version.outputs.version }}"
 
       - name: Extract metadata
         id: meta
@@ -265,6 +283,7 @@ jobs:
           echo "pkg=$PKG" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "extra_tag=$EXTRA_TAG" >> $GITHUB_OUTPUT
+          echo "semver=${{ needs.version.outputs.version }}" >> $GITHUB_OUTPUT
           echo "deb=$DEB" >> $GITHUB_OUTPUT
 
       - name: Log in to Container Registry (oras)
@@ -286,6 +305,7 @@ jobs:
           ( cd "$(dirname "$DEB")" && \
             oras push "${PKG}:${VERSION}-${ARCH}" \
               "$(basename "$DEB"):application/vnd.debian.binary-package" )
+          oras tag "${PKG}:${VERSION}-${ARCH}" "${{ steps.meta.outputs.semver }}-${ARCH}"
           if [ -n "${EXTRA_TAG}" ]; then
             oras tag "${PKG}:${VERSION}-${ARCH}" "${EXTRA_TAG}-${ARCH}"
           fi
@@ -296,8 +316,10 @@ jobs:
           PKG="${{ steps.meta.outputs.pkg }}"
           VERSION="${{ steps.meta.outputs.version }}"
           EXTRA_TAG="${{ steps.meta.outputs.extra_tag }}"
+          SEMVER="${{ steps.meta.outputs.semver }}"
           ARCH="${{ matrix.arch }}"
           cosign sign --yes "${PKG}:${VERSION}-${ARCH}"
+          cosign sign --yes "${PKG}:${SEMVER}-${ARCH}"
           if [ -n "${EXTRA_TAG}" ]; then
             cosign sign --yes "${PKG}:${EXTRA_TAG}-${ARCH}"
           fi
@@ -336,3 +358,35 @@ jobs:
               repo: context.repo.repo,
               body: body
             });
+
+  release:
+    name: GitHub Release
+    needs: [version, build-container, build-deb]
+    # One release per build on main; skipped on PRs and forks.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; nothing to do"
+            exit 0
+          fi
+          # Tag the exact built commit and let GitHub generate notes from the
+          # merged pull requests since the previous release.
+          gh release create "$TAG" \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --generate-notes
