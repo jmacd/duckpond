@@ -294,7 +294,7 @@ impl TemporalReduceSqlFile {
         .await?;
         log::debug!(
             "[SEARCH] TEMPORAL-REDUCE SQL for {}: \n{}",
-            &self.source_path,
+            self.source_path,
             sql
         );
         Ok(sql)

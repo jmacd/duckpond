@@ -465,7 +465,7 @@ impl Ship {
     {
         debug!(
             "Replaying transaction txn_seq={} {:?}",
-            txn_meta.txn_seq, &txn_meta.user.args
+            txn_meta.txn_seq, txn_meta.user.args
         );
 
         // Begin transaction replay with specific sequence number
@@ -587,7 +587,7 @@ impl Ship {
         };
         debug!(
             "Transaction {} allocated sequence {txn_seq} (type={:?}, based_on_seq={:?})",
-            &meta.txn_id, transaction_type, based_on_seq,
+            meta.txn_id, transaction_type, based_on_seq,
         );
 
         // For writes, acquire the process-level exclusion lock BEFORE
@@ -672,7 +672,7 @@ impl Ship {
         let txn_seq = txn_meta.txn_seq;
         debug!(
             "Replaying transaction at txn_seq={} {:?}",
-            txn_seq, &txn_meta.user.args
+            txn_seq, txn_meta.user.args
         );
 
         // Validate sequence - must be exactly next expected sequence
@@ -1110,7 +1110,7 @@ impl Ship {
 
             info!(
                 "Transaction details: args={:?}, data_fs_version={}",
-                &txn_meta.user.args, data_fs_version
+                txn_meta.user.args, data_fs_version
             );
 
             // Return RecoveryNeeded error with complete metadata
