@@ -255,7 +255,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!(
             "Aborting steward transaction {} (seq={}): {}",
-            &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, &error_msg
+            self.txn_meta.user.txn_id, self.txn_meta.txn_seq, error_msg
         );
 
         // Record the failure in control table — writes only (reads no
@@ -288,10 +288,10 @@ impl<'a> StewardTransactionGuard<'a> {
     /// commit (`Ok(Some(v))`); returns `Ok(None)` for a read transaction
     /// or a write that produced no changes.
     pub async fn commit(mut self) -> Result<Option<i64>, StewardError> {
-        let args_fmt = format!("{:?}", &self.txn_meta.user.args);
+        let args_fmt = format!("{:?}", self.txn_meta.user.args);
         debug!(
             "Committing steward transaction {} {}",
-            &self.txn_meta.user.txn_id, &args_fmt
+            self.txn_meta.user.txn_id, args_fmt
         );
 
         // Calculate duration for recording
@@ -381,7 +381,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     })?;
                 info!(
                     "Steward transaction {} committed (seq={}, version={})",
-                    &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
+                    self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
 
                 // Materialize/reconcile the transparency-log tiles for this
@@ -427,12 +427,12 @@ impl<'a> StewardTransactionGuard<'a> {
                         })?;
                     debug!(
                         "Write-no-op steward transaction {} completed (seq={})",
-                        &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
+                        self.txn_meta.user.txn_id, self.txn_meta.txn_seq
                     );
                 } else {
                     debug!(
                         "Read-only steward transaction {} completed (seq={})",
-                        &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
+                        self.txn_meta.user.txn_id, self.txn_meta.txn_seq
                     );
                 }
                 self.committed = true;
@@ -1116,7 +1116,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 }
                 debug!(
                     "Post-commit factory transaction {} committed (seq={}, version={})",
-                    &metadata.user.txn_id, factory_txn_seq, new_version
+                    metadata.user.txn_id, factory_txn_seq, new_version
                 );
             }
             Ok((None, _persistence)) => {
@@ -1142,7 +1142,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     })?;
                 debug!(
                     "Post-commit factory transaction {} was a write no-op (seq={})",
-                    &metadata.user.txn_id, factory_txn_seq
+                    metadata.user.txn_id, factory_txn_seq
                 );
             }
             Err(commit_err) => {
@@ -1433,7 +1433,7 @@ impl<'a> Drop for StewardTransactionGuard<'a> {
             log::warn!(
                 "Steward transaction guard dropped without commit - transaction will rollback (txn={}, seq={}). \
                  Note: This transaction will show as INCOMPLETE in control table.",
-                &self.txn_meta.user.txn_id,
+                self.txn_meta.user.txn_id,
                 self.txn_meta.txn_seq,
             );
         }

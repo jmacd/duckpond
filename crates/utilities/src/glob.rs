@@ -95,14 +95,11 @@ impl WildcardComponent {
 
                     if !segment.is_empty() {
                         // Find this literal in the remaining name
-                        if let Some(found_at) = name[pos..].find(segment) {
-                            let capture_end = pos + found_at;
-                            // Capture what the wildcard matched
-                            captures.push(name[capture_start..capture_end].to_string());
-                            pos = capture_end + segment.len();
-                        } else {
-                            return None;
-                        }
+                        let found_at = name[pos..].find(segment)?;
+                        let capture_end = pos + found_at;
+                        // Capture what the wildcard matched
+                        captures.push(name[capture_start..capture_end].to_string());
+                        pos = capture_end + segment.len();
                     } else if i == segments.len() - 1 {
                         // Last segment is empty, means pattern ends with * (e.g., "VuLink*")
                         // Capture everything remaining
