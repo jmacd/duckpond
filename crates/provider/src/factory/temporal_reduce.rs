@@ -438,10 +438,6 @@ impl TemporalReduceSqlFile {
             provider_api = provider_api.with_root(root);
         }
 
-        // Paths of partials written this build, used to bound the merged-output
-        // cache recompute to only the output buckets they touch.
-        let mut newly_written: Vec<std::path::PathBuf> = Vec::new();
-
         for node_path in &source_files {
             let file_url_str = node_file_url(scheme, node_path);
             let file_url = crate::Url::parse(&file_url_str).map_other()?;
@@ -512,11 +508,6 @@ impl TemporalReduceSqlFile {
                     &parquet_path,
                 )
                 .await?;
-                newly_written.push(crate::rollup_cache::glob_member_path(
-                    &glob_dir,
-                    &source_node_id,
-                    version,
-                ));
                 // Advance and persist the frontier only after the partial is
                 // durably written, so a later violation in this loop cannot
                 // strand an unrecorded sealed bucket: on retry the persisted
@@ -556,6 +547,15 @@ impl TemporalReduceSqlFile {
         // source versions and reuses the sealed prefix. dirty_lo is the earliest
         // output bucket any new partial falls into; every bucket strictly before
         // it is provably unchanged because no new partial contributes to it.
+        //
+        // The partials directory is shared by every resolution of this site, so
+        // a sibling resolution processed earlier in the same build may already
+        // have written the new partials. Basing freshness on "partials written
+        // by this invocation" would therefore leave every resolution but the
+        // first serving a stale merged cache. Instead each merged cache records,
+        // in a coverage sidecar, exactly which partial members it was built
+        // from; freshness is decided by diffing that record against the partials
+        // actually present, independent of which invocation wrote them.
         let merged_path = crate::rollup_cache::merged_cache_path(
             &cache_dir,
             &cfg_hash,
@@ -563,17 +563,44 @@ impl TemporalReduceSqlFile {
             self.duration.as_secs(),
         );
         let cache_valid = crate::rollup_cache::verify_merged_cache(&merged_path).map_other()?;
-        let dirty_lo = if newly_written.is_empty() {
-            None
+        let current_members = crate::rollup_cache::list_glob_members(&glob_dir).map_other()?;
+        let current_names: std::collections::BTreeSet<String> = current_members
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        let recorded = if cache_valid {
+            crate::rollup_cache::read_merged_coverage(&merged_path).map_other()?
         } else {
-            self.min_output_bucket(&newly_written, self.duration)
-                .await?
+            None
         };
 
-        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = if cache_valid
-            && dirty_lo.is_none()
-        {
-            // No source version changed: reuse the cached merged output.
+        // reuse: the cache already reflects exactly the current partial set.
+        // dirty_lo Some: the partial set grew by append-only members and the
+        // splice can reuse buckets before the earliest new member. Any other
+        // shape (removed members, or an unknown / absent coverage record) falls
+        // through to a full remerge, which is always correct.
+        let (reuse, dirty_lo) = match &recorded {
+            Some(rec) if *rec == current_names => (true, None),
+            Some(rec) if rec.is_subset(&current_names) => {
+                let new_members: Vec<std::path::PathBuf> = current_members
+                    .iter()
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| !rec.contains(n.to_string_lossy().as_ref()))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                (
+                    false,
+                    self.min_output_bucket(&new_members, self.duration).await?,
+                )
+            }
+            _ => (false, None),
+        };
+
+        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = if reuse {
+            // Cache already reflects every current partial: reuse it as-is.
             crate::rollup_cache::listing_table_for_file(&merged_path)
                 .await
                 .map_other()?
@@ -623,6 +650,11 @@ impl TemporalReduceSqlFile {
             let schema = stream.schema();
             let mapped = stream.map(|r| r.map_err(|e| crate::error::Error::Arrow(e.to_string())));
             crate::rollup_cache::write_merged_cache(&merged_path, schema, Box::pin(mapped))
+                .await
+                .map_other()?;
+            // Record the partial set this merged cache now reflects, so the next
+            // build can decide freshness without re-merging.
+            crate::rollup_cache::write_merged_coverage(&merged_path, &current_members)
                 .await
                 .map_other()?;
             crate::rollup_cache::listing_table_for_file(&merged_path)
@@ -3643,5 +3675,152 @@ mod tests {
                 emax
             );
         }
+    }
+
+    /// Regression: partials are shared by every resolution, so when a later
+    /// build appends a source version the FIRST resolution read writes the new
+    /// shared partial. A coarser resolution read afterward must still reflect
+    /// the appended data. Before the coverage-based freshness check, the coarser
+    /// resolution saw no partial written by its own invocation and served a
+    /// stale merged cache, freezing coarse charts while the finest stayed fresh.
+    #[tokio::test]
+    async fn test_merged_cache_coarse_resolution_reflects_sibling_append() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+
+        async fn append_day(root: &tinyfs::WD, path: &str, day: u32) {
+            use tokio::io::AsyncWriteExt;
+            let mut csv = String::from("timestamp,temperature\n");
+            for hour in 0..24u32 {
+                let ts = format!("1970-01-{:02}T{:02}:00:00", day, hour);
+                let temp = 20.5 + hour as f64 + day as f64 * 100.0;
+                csv.push_str(&format!("{},{}\n", ts, temp));
+            }
+            let mut w = root
+                .async_writer_path_with_type(path, EntryType::FilePhysicalSeries)
+                .await
+                .unwrap();
+            w.write_all(csv.as_bytes()).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+            append_day(&root, "/ingest/weather.csv", 1).await;
+        }
+
+        let config = || TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1h".to_string(), "1d".to_string()],
+            aggregations: vec![agg(AggregationType::Max, &["temperature"])],
+            transforms: None,
+        };
+
+        let make_ctx = |cache: std::path::PathBuf| {
+            let session = Arc::new(datafusion::prelude::SessionContext::new());
+            let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+                .expect("register object store");
+            crate::ProviderContext::new(session, Arc::new(persistence.clone()))
+                .with_cache_dir(cache)
+        };
+
+        async fn collect_res(
+            provider_context: &crate::ProviderContext,
+            config: TemporalReduceConfig,
+            res_file: &str,
+        ) -> Vec<f64> {
+            let context = test_context(provider_context, FileID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+            let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+            let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+                panic!("expected directory");
+            };
+            let node = weather_dir.get(res_file).await.unwrap().unwrap();
+            let file_id = node.id;
+            let NodeType::File(file_handle) = &node.node_type else {
+                panic!("expected file node");
+            };
+            let file_arc = file_handle.get_file().await;
+            let file_guard = file_arc.lock().await;
+            let queryable = file_guard.as_queryable().expect("queryable");
+            let table_provider = queryable
+                .as_table_provider(file_id, provider_context)
+                .await
+                .expect("table provider");
+            drop(file_guard);
+            let ctx = &provider_context.datafusion_session;
+            let table = format!("t_{}", res_file.replace(['=', '.'], "_"));
+            _ = ctx.register_table(&table, table_provider).unwrap();
+            let batches = ctx
+                .sql(&format!(
+                    "SELECT \"temperature.max\" FROM {} ORDER BY timestamp",
+                    table
+                ))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let mut rows = Vec::new();
+            for b in &batches {
+                let col = b
+                    .column_by_name("temperature.max")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .clone();
+                for i in 0..b.num_rows() {
+                    rows.push(col.value(i));
+                }
+            }
+            rows
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // Build 1: seed BOTH resolutions' merged caches with day 1 only.
+        let daily1 = collect_res(&make_ctx(cache_dir.clone()), config(), "res=1d.series").await;
+        let hourly1 = collect_res(&make_ctx(cache_dir.clone()), config(), "res=1h.series").await;
+        assert_eq!(daily1.len(), 1, "one daily bucket after build 1");
+        assert_eq!(hourly1.len(), 24, "24 hourly buckets after build 1");
+
+        // Append day 2 as a new source version.
+        {
+            let root = fs.root().await.unwrap();
+            append_day(&root, "/ingest/weather.csv", 2).await;
+        }
+
+        // Build 2: read the FINEST resolution first. This writes the new shared
+        // finest partial and refreshes only the 1h merged cache.
+        let ctx2 = make_ctx(cache_dir.clone());
+        let hourly2 = collect_res(&ctx2, config(), "res=1h.series").await;
+        assert_eq!(hourly2.len(), 48, "48 hourly buckets after append");
+
+        // The COARSE resolution is read next. Its own invocation writes no
+        // partial, yet it must reflect the appended day 2.
+        let daily2 = collect_res(&ctx2, config(), "res=1d.series").await;
+        assert_eq!(
+            daily2.len(),
+            2,
+            "coarse resolution must reflect the sibling-written append, got {:?}",
+            daily2
+        );
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(
+            approx(daily2[0], 143.5) && approx(daily2[1], 243.5),
+            "coarse daily max wrong after append: {:?}",
+            daily2
+        );
     }
 }
