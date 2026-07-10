@@ -42,6 +42,7 @@ use datafusion::parquet::file::properties::WriterProperties;
 use futures::StreamExt;
 use futures::stream::Stream;
 use parquet::arrow::AsyncArrowWriter;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -555,6 +556,66 @@ pub async fn write_merged_cache(
     tokio::fs::write(&digest_tmp, digest.as_bytes()).await?;
     tokio::fs::rename(&digest_tmp, &digest_path).await?;
     log::debug!("[SAVE] Merged rollup cache: wrote {}", cache_path.display());
+    Ok(())
+}
+
+/// Sidecar path recording which partial members a merged-output cache was built
+/// from: `{cache_path}.coverage`.
+fn merged_coverage_path(cache_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.coverage", cache_path.display()))
+}
+
+/// List the per-source-version partial member files (`*.parquet`) currently
+/// present in a glob dir. These are the partials merged into every resolution's
+/// output; the returned paths are sorted for deterministic diffing.
+pub fn list_glob_members(glob_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(glob_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    };
+    for entry in rd {
+        let path = entry.map_err(crate::error::Error::Io)?.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Read the set of partial member file names a merged-output cache was built
+/// from. `Ok(None)` when the sidecar is absent, which callers treat as "coverage
+/// unknown, force a full remerge" so a cache published before this record
+/// existed cannot be reused without proof it reflects the current partials.
+pub fn read_merged_coverage(cache_path: &Path) -> Result<Option<BTreeSet<String>>> {
+    match std::fs::read_to_string(merged_coverage_path(cache_path)) {
+        Ok(s) => Ok(Some(
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(ToString::to_string)
+                .collect(),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(crate::error::Error::Io(e)),
+    }
+}
+
+/// Record the partial member file names incorporated into a merged-output
+/// cache. Written after the cache Parquet is published, atomically via
+/// tmp + rename, so a crash leaves either the old record or the new one.
+pub async fn write_merged_coverage(cache_path: &Path, members: &[PathBuf]) -> Result<()> {
+    let mut names: Vec<String> = members
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    let cov_path = merged_coverage_path(cache_path);
+    let tmp = PathBuf::from(format!("{}.tmp", cov_path.display()));
+    tokio::fs::write(&tmp, names.join("\n").as_bytes()).await?;
+    tokio::fs::rename(&tmp, &cov_path).await?;
     Ok(())
 }
 
