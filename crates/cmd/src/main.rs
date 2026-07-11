@@ -84,7 +84,7 @@ enum ConfigCommand {
 }
 
 #[derive(Parser)]
-#[command(author, version, about = "Watertown - A very small data lake")]
+#[command(author, version = env!("WATERTOWN_VERSION"), about = "Watertown - A very small data lake")]
 #[command(name = "pond")]
 struct Cli {
     /// Pond path override (defaults to POND env var)
