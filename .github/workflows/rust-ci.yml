@@ -211,9 +211,13 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
+    # The deb is installed on Debian 12 bookworm hosts, which ship glibc 2.36.
+    # Building on Ubuntu 22.04 links the binary against glibc 2.35, a safe floor
+    # that runs on bookworm. Ubuntu 24.04 links against glibc 2.39 and produces a
+    # binary that fails at load time on bookworm with "GLIBC_2.39 not found".
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -264,6 +268,24 @@ jobs:
           # matches the deb version.
           WATERTOWN_VERSION: ${{ needs.version.outputs.version }}
         run: cargo deb -p cmd --deb-version "${{ needs.version.outputs.version }}"
+
+      - name: Verify binary glibc requirement is bookworm-compatible
+        run: |
+          set -euo pipefail
+          # The deb is deployed on Debian 12 bookworm (glibc 2.36). Fail hard if
+          # the built binary requires a newer glibc than bookworm provides, so a
+          # runner-image bump can never silently ship an unloadable binary again.
+          MAX_GLIBC="2.36"
+          BIN=target/release/pond
+          NEED=$(objdump -T "$BIN" \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' \
+            | sort -V | tail -1)
+          echo "max glibc required by pond: ${NEED} (target ceiling ${MAX_GLIBC})"
+          if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$NEED" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+            echo "::error::pond requires glibc ${NEED} > ${MAX_GLIBC}; it will not load on Debian 12 bookworm" >&2
+            exit 1
+          fi
 
       - name: Extract metadata
         id: meta
