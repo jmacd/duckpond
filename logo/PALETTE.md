@@ -21,8 +21,7 @@ Derived from `caspar_watertown.jpg` and matched to the brand blue in
 - `watertown-scene-badge.svg` - rounded square badge: grey-blue sky, distant ocean,
   treeline, pond with a depth gradient, grassy peninsula, and a small duck sitting
   in the water with concentric ripples. The primary mark.
-- `watertown-banner.svg`      - front-page wordmark (1200x420) on white: a large
-  `Watertown` (Arial Bold, outlined to vector paths) filled with the badge's grey-blue
-  sky gradient and a thin brand-blue outline, over a large pond that fills the word
-  footprint; the duck swims behind the word and shows through the bowl of the `p`,
-  with reeds at the pond's left edge.
+- `watertown-banner.svg`      - wide banner (1722x300) on a transparent background:
+  the scene badge on the left, followed by the wordmark `watertown` set all
+  lowercase in Montserrat Bold, solid brand navy (#00325a), vertically centered
+  on the badge.
