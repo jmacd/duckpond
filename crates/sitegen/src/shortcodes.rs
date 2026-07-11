@@ -113,10 +113,19 @@ pub struct PondStatus {
     /// it as a "Last run" row but the health classifier ignores it.
     pub last_run_seconds_ago: Option<i64>,
     /// Latest value of `timer.interval_s` from the perf series
-    /// (`OnUnitActiveSec` in seconds).  Drives the staleness threshold
-    /// (`2 * timer_interval_s`) for the yellow/green boundary.  `None`
-    /// or `Some(0)` keeps the card at `Health::Unknown` for staleness.
+    /// (`OnUnitActiveSec` in seconds).  Combined with `run_wall_s` it
+    /// drives the staleness threshold for the yellow/green boundary.
+    /// `None` or `Some(0)` keeps the card at `Health::Unknown` for
+    /// staleness.
     pub timer_interval_s: Option<i64>,
+    /// Latest value of `run.wall_s` from the perf series -- the full
+    /// wall-clock duration of the unit's most recent service run
+    /// (`ExecMainExitTimestamp - ExecMainStartTimestamp`), in seconds.
+    /// The staleness threshold is `2 * (timer_interval_s + run_wall_s)`
+    /// so a unit whose run takes longer than its timer interval is not
+    /// misreported as overdue.  `None` or `Some(0)` falls back to a
+    /// threshold of `2 * timer_interval_s`.
+    pub run_wall_s: Option<i64>,
     /// Computed health classification (green/yellow/red/unknown).
     /// Assigned by `factory::run_status_grid_queries` from `classify`.
     pub health: Health,
@@ -131,11 +140,12 @@ pub struct PondStatus {
 /// background per state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
-    /// Last successful run is recent (within `2 * timer_interval_s`)
-    /// and there is no fresher failure.
+    /// Last successful run is recent (within the staleness threshold,
+    /// `2 * (timer_interval_s + run_wall_s)`) and there is no fresher
+    /// failure.
     Green,
-    /// Last successful run is older than `2 * timer_interval_s` --
-    /// the unit is overdue.
+    /// Last successful run is older than the staleness threshold,
+    /// `2 * (timer_interval_s + run_wall_s)` -- the unit is overdue.
     Yellow,
     /// Most recent terminal event was a failure
     /// (`last_err_us > last_ok_us` or no `last_ok_us` at all), or the
@@ -173,7 +183,12 @@ impl Health {
 ///      None or `last_err_us > last_ok_us` (most recent terminal
 ///      event was a failure).
 ///   3. `Yellow` when we know the interval and `last_ok_us` is older
-///      than `2 * timer_interval_s` ("overdue").
+///      than the staleness threshold `2 * (timer_interval_s +
+///      run_wall_s)` ("overdue").  Including the run's own wall-clock
+///      duration keeps a unit whose run takes longer than its timer
+///      interval from being misreported as overdue, since with
+///      `OnUnitActiveSec` the true period between successful runs is
+///      `interval + run duration`.
 ///   4. `Green` when we have a `last_ok_us` and a positive
 ///      `timer_interval_s` and the staleness check above passed.
 ///   5. `Unknown` otherwise (e.g. perf data missing, no successful
@@ -184,6 +199,7 @@ pub fn classify(
     last_err_us: Option<i64>,
     timer_active: Option<bool>,
     timer_interval_s: Option<i64>,
+    run_wall_s: Option<i64>,
 ) -> Health {
     if matches!(timer_active, Some(false)) {
         return Health::Red;
@@ -199,7 +215,13 @@ pub fn classify(
     let Some(ok_us) = last_ok_us else {
         return Health::Unknown;
     };
-    let stale_threshold_us = interval_s.saturating_mul(2).saturating_mul(1_000_000);
+    // True period between successful runs under `OnUnitActiveSec` is
+    // `interval + run duration`; allow two periods before overdue.
+    let run_wall_s = run_wall_s.filter(|&s| s > 0).unwrap_or(0);
+    let stale_threshold_us = interval_s
+        .saturating_add(run_wall_s)
+        .saturating_mul(2)
+        .saturating_mul(1_000_000);
     if now_us.saturating_sub(ok_us) > stale_threshold_us {
         Health::Yellow
     } else {
@@ -2411,6 +2433,7 @@ mod tests {
             None,
             Some(true),
             Some(600), // 10min interval -> 20min stale threshold
+            None,
         );
         assert_eq!(h, Health::Green);
     }
@@ -2423,6 +2446,38 @@ mod tests {
             None,
             Some(true),
             Some(600), // 20min threshold
+            None,
+        );
+        assert_eq!(h, Health::Yellow);
+    }
+
+    #[test]
+    fn classify_green_when_run_wall_extends_threshold() {
+        // interval 60s alone -> 2min threshold would flag this 3min-old
+        // ok as overdue, but a 120s run wall extends the period to
+        // interval+run=180s and the threshold to 2*180s=6min -> Green.
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 3 * ONE_MIN_US), // last_ok 3min ago
+            None,
+            Some(true),
+            Some(60),  // 1min interval
+            Some(120), // 2min run wall
+        );
+        assert_eq!(h, Health::Green);
+    }
+
+    #[test]
+    fn classify_yellow_ignores_zero_run_wall() {
+        // With run_wall 0, threshold is the plain 2*interval; a 3min-old
+        // ok against a 1min interval (2min threshold) is overdue.
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 3 * ONE_MIN_US),
+            None,
+            Some(true),
+            Some(60),
+            Some(0),
         );
         assert_eq!(h, Health::Yellow);
     }
@@ -2435,6 +2490,7 @@ mod tests {
             Some(NOW_US - ONE_MIN_US),
             Some(true),
             Some(600),
+            None,
         );
         assert_eq!(h, Health::Red);
     }
@@ -2447,6 +2503,7 @@ mod tests {
             Some(NOW_US - ONE_MIN_US),
             Some(true),
             Some(600),
+            None,
         );
         assert_eq!(h, Health::Red);
     }
@@ -2459,25 +2516,40 @@ mod tests {
             None,
             Some(false),
             Some(600),
+            None,
         );
         assert_eq!(h, Health::Red);
     }
 
     #[test]
     fn classify_unknown_without_interval() {
-        let h = classify(NOW_US, Some(NOW_US - ONE_MIN_US), None, Some(true), None);
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - ONE_MIN_US),
+            None,
+            Some(true),
+            None,
+            None,
+        );
         assert_eq!(h, Health::Unknown);
     }
 
     #[test]
     fn classify_unknown_with_zero_interval() {
-        let h = classify(NOW_US, Some(NOW_US - ONE_MIN_US), None, Some(true), Some(0));
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - ONE_MIN_US),
+            None,
+            Some(true),
+            Some(0),
+            None,
+        );
         assert_eq!(h, Health::Unknown);
     }
 
     #[test]
     fn classify_unknown_without_last_ok() {
-        let h = classify(NOW_US, None, None, Some(true), Some(600));
+        let h = classify(NOW_US, None, None, Some(true), Some(600), None);
         assert_eq!(h, Health::Unknown);
     }
 
@@ -2491,6 +2563,7 @@ mod tests {
             None,
             Some(false),
             Some(600),
+            None,
         );
         assert_eq!(h, Health::Red);
     }
@@ -2510,6 +2583,7 @@ mod tests {
             timer_active: Some(true),
             last_run_seconds_ago: Some(30),
             timer_interval_s: Some(60),
+            run_wall_s: Some(30),
             health,
         }
     }

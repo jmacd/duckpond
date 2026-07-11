@@ -725,6 +725,7 @@ async fn run_status_grid_queries(
             status.last_err_us,
             status.timer_active,
             status.timer_interval_s,
+            status.run_wall_s,
         );
 
         statuses.push(status);
@@ -806,6 +807,26 @@ async fn populate_perf_fields(
     }
     .await;
 
+    // `run.wall_s` was added to measure-pond.sh after the other perf
+    // fields, so a perf series written by an older probe lacks the
+    // column entirely and this SELECT would fail schema resolution.
+    // Query it separately and best-effort so that during a deploy the
+    // established liveness fields above are never lost -- a missing
+    // `run.wall_s` just falls the staleness threshold back to
+    // `2 * timer_interval_s`.
+    let run_wall_result = async {
+        let df = ctx
+            .sql(&format!(
+                "SELECT \"run.wall_s\" AS run_wall_s \
+                 FROM {} \
+                 ORDER BY timestamp DESC LIMIT 1",
+                perf_table
+            ))
+            .await?;
+        df.collect().await
+    }
+    .await;
+
     let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(perf_table.as_str()));
 
     let batches = match result {
@@ -816,25 +837,32 @@ async fn populate_perf_fields(
         }
     };
 
-    let get_i64 = |col: usize| -> Option<i64> {
-        batches.iter().find_map(|b| {
-            if b.num_rows() == 0 {
-                return None;
-            }
-            let arr = b.column(col).as_any().downcast_ref::<Int64Array>()?;
-            if arr.is_null(0) {
-                None
-            } else {
-                Some(arr.value(0))
-            }
-        })
-    };
+    let scalar_i64 =
+        |batches: &[datafusion::arrow::array::RecordBatch], col: usize| -> Option<i64> {
+            batches.iter().find_map(|b| {
+                if b.num_rows() == 0 {
+                    return None;
+                }
+                let arr = b.column(col).as_any().downcast_ref::<Int64Array>()?;
+                if arr.is_null(0) {
+                    None
+                } else {
+                    Some(arr.value(0))
+                }
+            })
+        };
+
+    let get_i64 = |col: usize| -> Option<i64> { scalar_i64(&batches, col) };
 
     if let Some(v) = get_i64(0) {
         status.timer_active = Some(v != 0);
     }
     status.last_run_seconds_ago = get_i64(1);
     status.timer_interval_s = get_i64(2).filter(|&v| v > 0);
+    status.run_wall_s = run_wall_result
+        .ok()
+        .and_then(|b| scalar_i64(&b, 0))
+        .filter(|&v| v > 0);
 }
 
 /// Run the per-unit DataFusion queries for the status grid.
@@ -967,6 +995,7 @@ async fn query_pond_status(
         timer_active: None,
         last_run_seconds_ago: None,
         timer_interval_s: None,
+        run_wall_s: None,
         health: Health::Unknown,
     })
 }
