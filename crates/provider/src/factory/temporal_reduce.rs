@@ -611,7 +611,12 @@ impl TemporalReduceSqlFile {
         // A different allowed_lateness moves the watermark, invalidating the
         // sealed layout: discard the res dir and rebuild from retained partials.
         let manifest = match crate::rollup_cache::read_sealed_manifest(&res_dir).map_other()? {
-            Some(m) if m.allowed_lateness_secs == lateness_secs => Some(m),
+            Some(m)
+                if m.allowed_lateness_secs == lateness_secs
+                    && m.format == crate::rollup_cache::SEALED_FORMAT =>
+            {
+                Some(m)
+            }
             Some(_) => {
                 crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
                 None
@@ -697,6 +702,7 @@ impl TemporalReduceSqlFile {
                         crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
                         (
                             crate::rollup_cache::SealedManifest {
+                                format: crate::rollup_cache::SEALED_FORMAT.to_string(),
                                 allowed_lateness_secs: lateness_secs,
                                 ..Default::default()
                             },
@@ -720,7 +726,7 @@ impl TemporalReduceSqlFile {
                 if let Some(wm) = watermark
                     && m.sealed_hi_secs.is_none_or(|sh| wm > sh)
                 {
-                    let seal_sql = pieces.merge_sql(
+                    let seal_sql = pieces.merge_partials_sql(
                         self.duration,
                         &ts,
                         &partials_table,
@@ -750,7 +756,7 @@ impl TemporalReduceSqlFile {
                 // Recompute the open hot window [sealed_hi, inf) from the current
                 // partials -- this is where new appends and within-window late
                 // data land. Bounded to ~allowed_lateness worth of buckets.
-                let hot_sql = pieces.merge_sql(
+                let hot_sql = pieces.merge_partials_sql(
                     self.duration,
                     &ts,
                     &partials_table,
@@ -771,6 +777,38 @@ impl TemporalReduceSqlFile {
                 (provider, digest, changed_since)
             }
         };
+
+        // The sealed runs + hot file now store mergeable partials
+        // (SEALED_FORMAT = partials-v1); reconstruct the output columns at read
+        // time so consumers see identical output (same names, order, values,
+        // including Avg = Sum / Count) while the on-disk runs stay associatively
+        // foldable for a future coarser-from-finer rollup (design §3 / Phase 3
+        // step 1). The reconstruction is a passthrough-projection view over the
+        // partials listing table: the timestamp column flows through unchanged so
+        // the scan's declared ordering (the streaming, O(1)-memory read path) is
+        // preserved. The listing provider is embedded in the view's logical plan,
+        // so the view resolves in any consumer session, then deregistered here to
+        // avoid leaking a table into the shared session.
+        let read_name = format!(
+            "__rollup_reconstruct_{}_{}_{}",
+            cfg_hash,
+            sanitized_id,
+            self.duration.as_secs()
+        );
+        let _ = ctx
+            .register_table(read_name.as_str(), table_provider)
+            .map_other()?;
+        let recon_sql = pieces.reconstruct_sql(&ts, &read_name);
+        let recon_plan = ctx
+            .sql(&recon_sql)
+            .await
+            .map_other_context("rollup reconstruction planning failed")?
+            .logical_plan()
+            .clone();
+        let _ = ctx.deregister_table(read_name.as_str()).map_other()?;
+        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(
+            datafusion::catalog::view::ViewTable::new(recon_plan, Some(recon_sql)),
+        );
 
         let cache_key = crate::TableProviderKey::new(id, crate::VersionSelection::LatestVersion)
             .to_cache_string();
@@ -1687,6 +1725,12 @@ impl AggSqlPieces {
     /// exact because every partial row in one output bucket shares the same
     /// `date_bin` value, so no output bucket straddles a bound. `None`/`None`
     /// aggregates all history (cold rebuild after a cache miss).
+    ///
+    /// Retained as the reference definition of the reconstructed output and as
+    /// the equivalence oracle in tests; production now writes mergeable partials
+    /// via [`merge_partials_sql`] and reconstructs at read time via
+    /// [`reconstruct_sql`], whose composition is exactly this query.
+    #[cfg(test)]
     fn merge_sql(
         &self,
         output_interval: Duration,
@@ -1729,9 +1773,89 @@ impl AggSqlPieces {
             select_exprs = self.reconstruct_exprs.join(",\n          "),
         )
     }
-}
 
-/// Dynamic directory for temporal reduce operations
+    /// Comma-separated list of the stored partial columns (`__p_*` aliases), in
+    /// declaration order. This is the on-disk column set of a sealed run / hot
+    /// file under [`crate::rollup_cache::SEALED_FORMAT`] = `partials-v1`, and the
+    /// input columns the read-time reconstruction ([`reconstruct_sql`]) consumes.
+    fn partial_column_list(&self) -> String {
+        self.partials
+            .iter()
+            .map(|p| format!("\"{}\"", p.alias))
+            .collect::<Vec<_>>()
+            .join(",\n          ")
+    }
+
+    /// Like [`merge_sql`], but the final projection emits the *merged partial*
+    /// columns instead of the reconstructed output columns. This is what the
+    /// Phase 2 sealed runs and hot file store (design §3 / Phase 3 step 1): keeping
+    /// the mergeable partials (sum/count/min/max) on disk — rather than a
+    /// reconstructed, non-associative `Avg` — lets a coarser resolution correctly
+    /// fold a finer resolution's runs (Phase 3 step 2) and preserves exact
+    /// cross-version/cross-run merge semantics. Output columns are rebuilt at read
+    /// time by [`reconstruct_sql`]. Bounds behave exactly as in [`merge_sql`].
+    fn merge_partials_sql(
+        &self,
+        output_interval: Duration,
+        ts: &str,
+        partials_table: &str,
+        lower_bound: Option<i64>,
+        upper_bound: Option<i64>,
+    ) -> String {
+        let interval = duration_to_sql_interval(output_interval);
+        let bin = date_bin_expr(&interval, "time_bucket");
+        let mut preds: Vec<String> = Vec::new();
+        if let Some(lo) = lower_bound {
+            preds.push(format!("CAST(EXTRACT(EPOCH FROM {bin}) AS BIGINT) >= {lo}"));
+        }
+        if let Some(hi) = upper_bound {
+            preds.push(format!("CAST(EXTRACT(EPOCH FROM {bin}) AS BIGINT) < {hi}"));
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", preds.join(" AND "))
+        };
+        format!(
+            r#"
+        WITH merged AS (
+          SELECT 
+            {bin} AS time_bucket,
+            {merge_exprs}
+          FROM {partials_table}
+          {where_clause}
+          GROUP BY {bin}
+        )
+        SELECT 
+          COALESCE(CAST(time_bucket AS TIMESTAMP), CAST(0 AS TIMESTAMP)) AS {ts},
+          {partial_cols}
+        FROM merged
+        ORDER BY time_bucket
+        "#,
+            merge_exprs = self.merge_partial_exprs().join(",\n            "),
+            partial_cols = self.partial_column_list(),
+        )
+    }
+
+    /// Read-time reconstruction over a table of stored partials: reproduce the
+    /// output columns (identical names, order, and values to [`merge_sql`]'s
+    /// projection, including `Avg = Sum / Count`) from the merged partial columns
+    /// written by [`merge_partials_sql`]. `partials_table` is the registered
+    /// listing table over the sealed runs + hot file; `ts` passes the timestamp
+    /// column through unchanged so the scan's declared ordering (the streaming
+    /// read path) is preserved.
+    fn reconstruct_sql(&self, ts: &str, partials_table: &str) -> String {
+        format!(
+            r#"
+        SELECT 
+          "{ts}",
+          {select_exprs}
+        FROM {partials_table}
+        "#,
+            select_exprs = self.reconstruct_exprs.join(",\n          "),
+        )
+    }
+}
 pub struct TemporalReduceDirectory {
     config: TemporalReduceConfig,
     context: crate::FactoryContext,
@@ -4146,6 +4270,64 @@ mod tests {
         Ok(rows)
     }
 
+    /// Like [`daily_max`] but reads an arbitrary output column, for aggregations
+    /// other than Max (e.g. verifying `temperature.avg` reconstructs at read).
+    async fn daily_max_col(
+        provider_context: &crate::ProviderContext,
+        config: TemporalReduceConfig,
+        column: &str,
+    ) -> Result<Vec<f64>, String> {
+        let context = test_context(provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+        let table_provider = match queryable
+            .as_table_provider(file_id, provider_context)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => return Err(e.to_string()),
+        };
+        drop(file_guard);
+        let ctx = &provider_context.datafusion_session;
+        _ = ctx.register_table("reduced", table_provider).unwrap();
+        let batches = ctx
+            .sql(&format!(
+                "SELECT \"{column}\" FROM reduced ORDER BY timestamp"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for b in &batches {
+            let col = b
+                .column_by_name(column)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .clone();
+            for i in 0..b.num_rows() {
+                rows.push(col.value(i));
+            }
+        }
+        _ = ctx.deregister_table("reduced").unwrap();
+        Ok(rows)
+    }
+
     fn walk_find(dir: &std::path::Path, pred: &dyn Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -4162,6 +4344,108 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Phase 3 step 1 invariant: sealed run + hot files store the *mergeable
+    /// partials* (`__p_*`: sum/count/min/max), not the reconstructed output
+    /// columns. This is what makes a run associatively foldable (so a coarser
+    /// resolution can later be built from a finer one without corrupting `Avg`),
+    /// while consumers still read reconstructed output via the read-time view.
+    #[tokio::test]
+    async fn test_sealed_runs_store_partials_not_output() {
+        let _ = env_logger::try_init();
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone()).await.unwrap();
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // An Avg aggregation is the discriminating case: reconstructed `avg` is
+        // not foldable, but the stored sum+count partials are.
+        let config = || TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations: vec![agg(AggregationType::Avg, &["temperature"])],
+            transforms: None,
+            allowed_lateness: Some("1d".to_string()),
+        };
+
+        // Grow history so the watermark advances and buckets seal into runs.
+        for day in 1..=4u32 {
+            append_day_series(&fs, "/ingest/weather.csv", day).await;
+            let context = test_context(&reduce_ctx(&persistence, &cache_dir), FileID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config(), context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+            let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+            let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+                panic!("expected directory");
+            };
+            let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+            let file_id = daily_node.id;
+            let NodeType::File(file_handle) = &daily_node.node_type else {
+                panic!("expected file node");
+            };
+            let file_arc = file_handle.get_file().await;
+            let file_guard = file_arc.lock().await;
+            let queryable = file_guard.as_queryable().expect("queryable");
+            let pctx = reduce_ctx(&persistence, &cache_dir);
+            // Rebuild against a fresh cache_dir-backed context each iteration.
+            let _ = queryable.as_table_provider(file_id, &pctx).await;
+        }
+
+        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        assert!(!runs.is_empty(), "expected at least one sealed run file");
+
+        // Inspect the on-disk schema of a sealed run file.
+        let inspect = datafusion::prelude::SessionContext::new();
+        inspect
+            .register_parquet(
+                "run",
+                runs[0].to_string_lossy().as_ref(),
+                datafusion::prelude::ParquetReadOptions::default(),
+            )
+            .await
+            .unwrap();
+        let schema = inspect.table("run").await.unwrap().schema().clone();
+        let cols: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+
+        assert!(
+            cols.iter().any(|c| c == "timestamp"),
+            "run must carry the timestamp column, got {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c.starts_with("__p_sum_")),
+            "run must store the sum partial, got {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c.starts_with("__p_count_")),
+            "run must store the count partial, got {cols:?}"
+        );
+        assert!(
+            !cols.iter().any(|c| c == "temperature.avg"),
+            "run must NOT store the reconstructed output column, got {cols:?}"
+        );
+
+        // And the read-time view still reconstructs the output column correctly.
+        let rows = daily_max_col(
+            &reduce_ctx(&persistence, &cache_dir),
+            config(),
+            "temperature.avg",
+        )
+        .await
+        .unwrap();
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert_eq!(rows.len(), 4);
+        for (i, day) in (1..=4u32).enumerate() {
+            // Daily mean of temps 20.5+hour+day*100 over hours 0..24.
+            let expected = 20.5 + 11.5 + day as f64 * 100.0;
+            assert!(approx(rows[i], expected), "day {day} avg wrong: {rows:?}");
+        }
     }
 
     /// As history grows by append-only versions, the watermark advances and

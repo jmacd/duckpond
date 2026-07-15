@@ -287,7 +287,7 @@ forever.
 |---|---|---|
 | 1 | Hot-window GROUP BY + order-preserving concat read (cache-compatible) | **Implemented** |
 | 2 | Watermark + sealed immutable runs + bounded hot window; ListingTable read | **Implemented** |
-| 3 | Hierarchical rollup (cheaper coarse history; retains all data) | Proposed |
+| 3 | Hierarchical rollup (cheaper coarse history; retains all data) | **Step 1 implemented** (partials-in-runs + read-time reconstruction); step 2 (coarser-from-finer fold) proposed |
 
 ### Phase 1 implementation notes
 
@@ -376,3 +376,52 @@ forever.
   `read_merged_digest`, `{read,write}_merged_coverage`, `listing_table_for_file`
   and their `.blake3`/`.coverage` sidecars) are fully superseded by the
   sealed-runs manifest and were deleted.
+
+### Phase 3 implementation notes (step 1: partials-in-runs + read-time reconstruction)
+
+Phase 3 lets a coarser resolution be built by folding a finer resolution's
+sealed runs (exponentially cheaper coarse history) instead of re-scanning the
+finest partials. That fold is only correct if the runs store **associatively
+mergeable** quantities: `Sum`, `Count`, `Min`, `Max` fold, but a reconstructed
+`Avg` does **not** (`avg(avg) ≠ avg` without count weighting). Step 1 makes the
+on-disk runs foldable without changing any observable output; the cross-level
+fold itself (step 2) is a follow-up.
+
+- **Runs store partials, not output.** `SealedManifest` gained a `format` field
+  (`SEALED_FORMAT = "partials-v1"`). Sealed runs and `hot.parquet` are now
+  written by `AggSqlPieces::merge_partials_sql`, whose final projection emits the
+  **merged partial columns** (`__p_sum_*`, `__p_count_*`, `__p_min_*`,
+  `__p_max_*`, `__p_cstar_*`) plus the timestamp — the same `merged` CTE as
+  `merge_sql`, just without the reconstruction step. This is verified by
+  `test_sealed_runs_store_partials_not_output`, which asserts a run's parquet
+  schema carries `__p_sum_*`/`__p_count_*` and **not** `temperature.avg`.
+- **Reconstruction at read time.** `try_rollup_table_provider` wraps the
+  partials `ListingTable` in a `ViewTable` whose plan is
+  `AggSqlPieces::reconstruct_sql` = `SELECT ts, <reconstruct_exprs> FROM
+  <partials>`. This reproduces the exact output columns (names, order, values,
+  including `Avg = Sum / Count`) that `merge_sql` produced directly, so every
+  consumer sees identical results. The listing provider is embedded in the
+  view's logical plan (it is registered, planned, then deregistered), so the view
+  resolves in any consumer session.
+- **Streaming read preserved.** The reconstruction projection passes the
+  timestamp column through unchanged, so the scan's declared `output_ordering`
+  (the Phase-2 hardening) still satisfies a consumer's `ORDER BY timestamp`
+  without a `SortExec`. `test_sealed_read_uses_sort_preserving_merge` now
+  exercises the full path through the view (in a separate consumer session) and
+  still asserts no `SortExec`.
+- **Migration.** The `format` mismatch is handled like `allowed_lateness`:
+  a manifest whose `format` differs from `SEALED_FORMAT` (including legacy
+  manifests, which deserialize to `""`) wipes and rebuilds the resolution's res
+  dir from the retained finest partials — a single cold rebuild, no re-ingest.
+- **`merge_sql` retained (test-only).** It stays as the reference definition of
+  the reconstructed output and as the equivalence oracle in tests; production no
+  longer calls it. `merge_partials_sql` + `reconstruct_sql` compose to exactly
+  `merge_sql`.
+
+**Remaining (step 2).** Coarser resolutions still fold the shared finest
+partials each build (bounded by Phase 2, but O(finest) I/O per level). Step 2
+will build `res=600` from sealed `res=60` runs, `res=3600` from `res=600`, etc.,
+turning each level into a bounded fold over the level below. The runs are now in
+the foldable form that makes that correct; the remaining work is the
+cross-resolution build ordering/dependency (today resolutions build
+independently).

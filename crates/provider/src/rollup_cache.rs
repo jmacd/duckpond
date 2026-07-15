@@ -502,11 +502,23 @@ pub struct SealedRun {
     pub digest: String,
 }
 
+/// On-disk format of the sealed run + hot files. Bumped when their column
+/// layout changes so an older cache is discarded and rebuilt rather than
+/// misread. `partials-v1` stores the *mergeable partials* (sum/count/min/max)
+/// with output columns reconstructed at read time (design §3 / Phase 3 step 1);
+/// legacy caches that stored already-reconstructed output deserialize with an
+/// empty `format` and are wiped + rebuilt.
+pub const SEALED_FORMAT: &str = "partials-v1";
+
 /// Manifest describing the sealed-runs cache for one output resolution. Its
 /// serialized bytes are the export-hint digest, so it must serialize
 /// deterministically (fixed field order; `covered` is an ordered set).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SealedManifest {
+    /// On-disk file format (see [`SEALED_FORMAT`]). Absent in legacy manifests,
+    /// which deserialize to `""` and are treated as a format mismatch (rebuild).
+    #[serde(default)]
+    pub format: String,
     /// The `allowed_lateness` (seconds) this cache was built under. A build with
     /// a different value discards and rebuilds the res dir.
     pub allowed_lateness_secs: i64,
