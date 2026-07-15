@@ -557,6 +557,23 @@ impl TemporalReduceSqlFile {
         }
 
         let ctx = &context.datafusion_session;
+
+        // Let a consumer's full-history `ORDER BY {ts}` over the reduced series
+        // stream via a k-way `SortPreservingMergeExec` of the sealed runs + hot
+        // file (each declared pre-sorted in `listing_table_for_res_dir`) instead
+        // of a `SortExec` that buffers the whole series in memory. DataFusion only
+        // splits a ListingTable's files into per-partition, statistics-ordered
+        // groups (a prerequisite for that merge) when this execution option is
+        // set; it is off by default. The rollup provider is built and later
+        // queried on this same shared session, so enabling it here reaches the
+        // export/sitegen read path (design §3 O(1)-memory read).
+        ctx.state_ref()
+            .write()
+            .config_mut()
+            .options_mut()
+            .execution
+            .split_file_groups_by_statistics = true;
+
         let sanitized_id: String = site_node_id
             .to_string()
             .chars()
@@ -647,7 +664,7 @@ impl TemporalReduceSqlFile {
         ) = match &plan {
             Plan::Reuse => {
                 let m = manifest.as_ref().expect("reuse implies a manifest");
-                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, m)
+                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, m, &ts)
                     .await
                     .map_other()?;
                 let digest = crate::rollup_cache::sealed_manifest_digest(m).map_other()?;
@@ -748,7 +765,7 @@ impl TemporalReduceSqlFile {
                 let digest = crate::rollup_cache::write_sealed_manifest(&res_dir, &m)
                     .await
                     .map_other()?;
-                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, &m)
+                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, &m, &ts)
                     .await
                     .map_other()?;
                 (provider, digest, changed_since)
@@ -4288,5 +4305,130 @@ mod tests {
             m2["allowed_lateness_secs"], 259200,
             "manifest reflects the new 3d window after reset"
         );
+    }
+
+    /// Read-path memory bound: the sealed runs + hot file are declared sorted on
+    /// the timestamp column, so a full-history `ORDER BY timestamp` over a
+    /// multi-run reduced series is satisfied by a streaming k-way merge, never a
+    /// `SortExec` that buffers the whole series. This is the O(1)-memory read
+    /// path from design §3. We assert the physical plan of a fresh consumer
+    /// session (target_partitions high enough that each file is its own
+    /// partition) contains a `SortPreservingMergeExec` and no `SortExec`.
+    #[tokio::test]
+    async fn test_sealed_read_uses_sort_preserving_merge() {
+        let _ = env_logger::try_init();
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone()).await.unwrap();
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // Grow history to several days under a 1-day window so multiple sealed
+        // runs plus a hot file coexist.
+        for day in 1..=6u32 {
+            append_day_series(&fs, "/ingest/weather.csv", day).await;
+            _ = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
+                .await
+                .unwrap();
+        }
+        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        assert!(
+            runs.len() >= 2,
+            "test needs multiple sealed runs to exercise the merge, got {}",
+            runs.len()
+        );
+
+        // Acquire the reduced table provider (built during the last rollup).
+        let provider_context = reduce_ctx(&persistence, &cache_dir);
+        let context = test_context(&provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(lateness_config(Some("1d")), context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+        let table_provider = queryable
+            .as_table_provider(file_id, &provider_context)
+            .await
+            .unwrap();
+        drop(file_guard);
+
+        // Fresh consumer session, independent of the build session, with enough
+        // target partitions that each sealed run + hot lands in its own scan
+        // partition, and statistics-based file-group splitting enabled (as the
+        // rollup build enables on the shared production session) so the declared
+        // per-file ordering is honored.
+        let mut config = datafusion::prelude::SessionConfig::new().with_target_partitions(8);
+        config
+            .options_mut()
+            .execution
+            .split_file_groups_by_statistics = true;
+        let consumer = datafusion::prelude::SessionContext::new_with_config(config);
+        _ = consumer.register_table("reduced", table_provider).unwrap();
+        let plan = consumer
+            .sql("SELECT * FROM reduced ORDER BY \"timestamp\"")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let plan_str = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(
+            !plan_str.contains("SortExec"),
+            "full-history ORDER BY must NOT buffer via a global SortExec; plan was:\n{plan_str}"
+        );
+        // The ORDER BY must be satisfied by streaming: either a k-way
+        // `SortPreservingMergeExec` across per-file partitions, or directly by the
+        // scan's declared `output_ordering` when the disjoint, individually-sorted
+        // run/hot files collapse into a single ordered file group. Both are
+        // O(1)-memory (no whole-series buffering).
+        assert!(
+            plan_str.contains("SortPreservingMergeExec") || plan_str.contains("output_ordering"),
+            "full-history ORDER BY must stream (SortPreservingMergeExec or scan output_ordering); plan was:\n{plan_str}"
+        );
+
+        // The plan must still produce correct, fully-ordered output.
+        let batches = consumer
+            .sql("SELECT \"temperature.max\" FROM reduced ORDER BY \"timestamp\"")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for b in &batches {
+            let col = b
+                .column_by_name("temperature.max")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .clone();
+            for i in 0..b.num_rows() {
+                rows.push(col.value(i));
+            }
+        }
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert_eq!(rows.len(), 6, "six daily buckets");
+        for (i, day) in (1..=6u32).enumerate() {
+            assert!(
+                approx(rows[i], 43.5 + day as f64 * 100.0),
+                "day {day} max wrong: {:?}",
+                rows
+            );
+        }
     }
 }

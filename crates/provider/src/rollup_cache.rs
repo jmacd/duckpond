@@ -645,6 +645,7 @@ pub async fn write_parquet_atomic(
 pub async fn listing_table_for_res_dir(
     res_dir: &Path,
     manifest: &SealedManifest,
+    ts_column: &str,
 ) -> Result<Arc<dyn TableProvider>> {
     for run in &manifest.runs {
         let p = run_path(res_dir, &run.name);
@@ -666,8 +667,21 @@ pub async fn listing_table_for_res_dir(
     }
     let dir_url = format!("file://{}/", res_dir.display());
     let table_url = ListingTableUrl::parse(&dir_url)?;
-    let listing_options =
-        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
+    // Every run and the hot file is written by a query ending in
+    // `ORDER BY time_bucket`, so each file is individually sorted ascending on
+    // the timestamp column, and the runs' bucket ranges are disjoint. Declaring
+    // that file-level ordering lets the physical planner satisfy a consumer's
+    // `ORDER BY {ts}` with a streaming `SortPreservingMergeExec` (k-way merge of
+    // the already-sorted runs + hot) instead of a `SortExec` that buffers the
+    // whole reduced series in memory -- the O(1)-memory read path from the design
+    // §3. Parquet statistics (collected by default) give the planner the per-file
+    // min/max it needs to order the file groups.
+    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+        .with_file_extension(".parquet")
+        .with_collect_stat(true)
+        .with_file_sort_order(vec![vec![
+            datafusion::prelude::col(ts_column).sort(true, false),
+        ]]);
     let merged_schema = merge_parquet_schemas_in_dir(res_dir).await?;
     let config = ListingTableConfig::new(table_url)
         .with_listing_options(listing_options)

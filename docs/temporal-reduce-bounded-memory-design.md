@@ -348,9 +348,26 @@ forever.
   an immutable run; this is a hard error suggesting `--rebuild`, never a silent
   unbounded backfill. Within-window backfill (older than nothing sealed) merges
   normally.
-- **Read path.** `listing_table_for_res_dir` serves a `ListingTable` over all
-  runs + `hot.parquet`; consumers apply their own `ORDER BY timestamp`. Missing
-  manifest runs or a missing hot file are hard `CacheCorrupt` errors.
+- **Read path (bounded, streaming).** `listing_table_for_res_dir` serves a
+  `ListingTable` over all runs + `hot.parquet`; consumers apply their own
+  `ORDER BY timestamp`. Missing manifest runs or a missing hot file are hard
+  `CacheCorrupt` errors. To keep a whole-series `ORDER BY timestamp` at **O(1)**
+  memory (design §3) rather than an O(N) buffering `SortExec`, three things line
+  up: (1) each run/hot file is written internally sorted on the bucket timestamp
+  (`write_merge_to` ends `ORDER BY time_bucket`) and the files are disjoint /
+  totally ordered (runs cover `[lo,hi)` spans, hot covers `[sealed_hi, ∞)`);
+  (2) `listing_table_for_res_dir` declares this by setting
+  `with_collect_stat(true)` + `with_file_sort_order([ts ASC])` on the
+  `ListingOptions`; and (3) `try_rollup_table_provider` enables
+  `execution.split_file_groups_by_statistics` on the shared provider session
+  (off by default). With statistics collected and that option on, DataFusion
+  emits the ordered scan as either a single ordered file group (scan
+  `output_ordering`, sequential streaming read) or a k-way
+  `SortPreservingMergeExec` across per-file partitions — both stream without
+  buffering the series. Because the reduced provider is built and later queried
+  on that same session (export, sitegen), the option reaches all production read
+  paths. Verified by `test_sealed_read_uses_sort_preserving_merge`, which EXPLAINs
+  a full-history `ORDER BY` over a multi-run resolution and asserts no `SortExec`.
 - **Export hint.** digest = manifest digest (stable when unchanged);
   `changed_since = Some(dirty_lo_secs)` on incremental builds, `None` on
   rebuild/reuse.
