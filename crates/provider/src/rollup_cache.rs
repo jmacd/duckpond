@@ -42,6 +42,7 @@ use datafusion::parquet::file::properties::WriterProperties;
 use futures::StreamExt;
 use futures::stream::Stream;
 use parquet::arrow::AsyncArrowWriter;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -207,31 +208,7 @@ pub async fn listing_table_from_dir(
     Ok(Arc::new(table))
 }
 
-/// Build a `ListingTable` over a single Parquet file, reading its schema from
-/// the file's own metadata. Used to serve the merged-output cache as a table
-/// provider without unioning sibling resolution files that share its directory.
-pub async fn listing_table_for_file(path: &Path) -> Result<Arc<dyn TableProvider>> {
-    let file = tokio::fs::File::open(path).await?;
-    let builder = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(file)
-        .await
-        .map_err(|e| {
-            crate::error::Error::Arrow(format!(
-                "Failed to read parquet metadata from '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-    let schema = builder.schema().clone();
-
-    let table_url = ListingTableUrl::parse(format!("file://{}", path.display()))?;
-    let listing_options =
-        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
-    let config = ListingTableConfig::new(table_url)
-        .with_listing_options(listing_options)
-        .with_schema(schema);
-    let table = ListingTable::try_new(config)?;
-    Ok(Arc::new(table))
-}
+// A `ListingTable` reads all partials in the glob dir together. There is one
 // partial file per (source node, input version). The source pattern can match
 // many rotated input files, each its own node with its own versions; keying the
 // partial filename by the source node id keeps them collision-free while all
@@ -430,139 +407,12 @@ pub fn merged_dir(cache_dir: &Path, cfg_hash: &str, node_id: &tinyfs::NodeID) ->
     cache_dir.join(format!("merged_{}_{}", cfg_hash, node_id))
 }
 
-/// Path of the merged-output cache Parquet for one output resolution:
-/// `{merged_dir}/res{interval_secs}.parquet`.
-#[must_use]
-pub fn merged_cache_path(
-    cache_dir: &Path,
-    cfg_hash: &str,
-    node_id: &tinyfs::NodeID,
-    output_interval_secs: u64,
-) -> PathBuf {
-    merged_dir(cache_dir, cfg_hash, node_id).join(format!("res{}.parquet", output_interval_secs))
-}
-
-/// Sidecar path holding the hex blake3 digest of a merged-output cache file.
-#[must_use]
-fn merged_digest_path(cache_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.blake3", cache_path.display()))
-}
-
 /// Compute the hex blake3 digest of a file's bytes.
 fn file_blake3(path: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut file = std::fs::File::open(path).map_err(crate::error::Error::Io)?;
     let _copied = std::io::copy(&mut file, &mut hasher).map_err(crate::error::Error::Io)?;
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-/// Verify the merged-output cache at `cache_path`.
-///
-/// - `Ok(false)`: the file is absent or was only partially published (its digest
-///   sidecar is missing). The caller recomputes a full merge and republishes.
-/// - `Ok(true)`: the file is present and its bytes match the recorded digest.
-/// - `Err(CacheCorrupt)`: the file is present but its bytes do not match the
-///   recorded digest, indicating tampering or bit-rot. This is a hard failure
-///   recovered with `--rebuild`, never a silent serve of wrong aggregates.
-pub fn verify_merged_cache(cache_path: &Path) -> Result<bool> {
-    if !cache_path.exists() {
-        return Ok(false);
-    }
-    let digest_path = merged_digest_path(cache_path);
-    let recorded = match std::fs::read_to_string(&digest_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(crate::error::Error::Io(e)),
-    };
-    let actual = file_blake3(cache_path)?;
-    if actual != recorded {
-        return Err(crate::error::Error::CacheCorrupt(format!(
-            "merged-output cache '{}' does not match its recorded digest \
-             (expected {}, found {}); the rollup cache is corrupt or was modified \
-             without the pond's knowledge. Re-run the export with --rebuild to \
-             recompute it from scratch.",
-            cache_path.display(),
-            recorded,
-            actual
-        )));
-    }
-    Ok(true)
-}
-
-/// Read the recorded content digest of a merged-output cache, if present.
-///
-/// Returns `Ok(None)` when the cache or its digest sidecar is absent. Callers
-/// use this to publish an export hint identifying the current merged content
-/// after a build that reused the cache without rewriting it.
-pub fn read_merged_digest(cache_path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(merged_digest_path(cache_path)) {
-        Ok(s) => Ok(Some(s.trim().to_string())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(crate::error::Error::Io(e)),
-    }
-}
-
-/// Write the merged-output cache atomically and record its content digest.
-///
-/// Publish order guarantees the only crash window leaves the Parquet present
-/// with no digest sidecar, which [`verify_merged_cache`] treats as self-heal
-/// rather than a false corruption: the stale digest is removed before the new
-/// Parquet is renamed into place, and the fresh digest is written last.
-pub async fn write_merged_cache(
-    cache_path: &Path,
-    schema: SchemaRef,
-    stream: Pin<
-        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
-    >,
-) -> Result<()> {
-    if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp_path = PathBuf::from(format!("{}.tmp", cache_path.display()));
-    let file = tokio::fs::File::create(&tmp_path).await?;
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
-        .build();
-    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
-        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
-
-    let mut stream = stream;
-    while let Some(batch) = stream.next().await {
-        let batch = batch?;
-        writer
-            .write(&batch)
-            .await
-            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
-    }
-    let _metadata = writer
-        .close()
-        .await
-        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
-
-    let digest = file_blake3(&tmp_path)?;
-    let digest_path = merged_digest_path(cache_path);
-
-    // Remove any stale digest first, so a crash after the Parquet rename leaves
-    // "Parquet present, digest absent" (self-heal) and never "Parquet new,
-    // digest stale" (false corruption).
-    match std::fs::remove_file(&digest_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(crate::error::Error::Io(e)),
-    }
-    tokio::fs::rename(&tmp_path, cache_path).await?;
-
-    let digest_tmp = PathBuf::from(format!("{}.tmp", digest_path.display()));
-    tokio::fs::write(&digest_tmp, digest.as_bytes()).await?;
-    tokio::fs::rename(&digest_tmp, &digest_path).await?;
-    log::debug!("[SAVE] Merged rollup cache: wrote {}", cache_path.display());
-    Ok(())
-}
-
-/// Sidecar path recording which partial members a merged-output cache was built
-/// from: `{cache_path}.coverage`.
-fn merged_coverage_path(cache_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.coverage", cache_path.display()))
 }
 
 /// List the per-source-version partial member files (`*.parquet`) currently
@@ -583,40 +433,6 @@ pub fn list_glob_members(glob_dir: &Path) -> Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
-}
-
-/// Read the set of partial member file names a merged-output cache was built
-/// from. `Ok(None)` when the sidecar is absent, which callers treat as "coverage
-/// unknown, force a full remerge" so a cache published before this record
-/// existed cannot be reused without proof it reflects the current partials.
-pub fn read_merged_coverage(cache_path: &Path) -> Result<Option<BTreeSet<String>>> {
-    match std::fs::read_to_string(merged_coverage_path(cache_path)) {
-        Ok(s) => Ok(Some(
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(ToString::to_string)
-                .collect(),
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(crate::error::Error::Io(e)),
-    }
-}
-
-/// Record the partial member file names incorporated into a merged-output
-/// cache. Written after the cache Parquet is published, atomically via
-/// tmp + rename, so a crash leaves either the old record or the new one.
-pub async fn write_merged_coverage(cache_path: &Path, members: &[PathBuf]) -> Result<()> {
-    let mut names: Vec<String> = members
-        .iter()
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-    names.sort();
-    let cov_path = merged_coverage_path(cache_path);
-    let tmp = PathBuf::from(format!("{}.tmp", cov_path.display()));
-    tokio::fs::write(&tmp, names.join("\n").as_bytes()).await?;
-    tokio::fs::rename(&tmp, &cov_path).await?;
-    Ok(())
 }
 
 /// via `Schema::try_merge`, giving UNION-ALL-BY-NAME semantics across versions.
@@ -655,6 +471,209 @@ async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {
     })?;
 
     Ok(Arc::new(merged))
+}
+
+// --- Sealed-runs merged cache (Phase 2: watermark + immutable runs) ----------
+//
+// Phase 1's merged cache is a single mutable Parquet whose sealed prefix is
+// rewritten on every build (O(history) I/O). Phase 2 replaces it with a
+// directory of immutable, append-only *sealed run* files plus one recomputed
+// *hot* file, separated by a watermark derived from `allowed_lateness`:
+//
+//   {merged_dir}/res{secs}/
+//       run-00000000.parquet   immutable sealed run (buckets [lo, hi))
+//       run-00000001.parquet   ...
+//       hot.parquet            open buckets >= watermark, recomputed each build
+//       manifest.json          watermark + run ranges + coverage + digests
+//
+// Buckets below the watermark are frozen once and never rescanned, so per-build
+// cost is bounded to the hot window (~allowed_lateness). The read provider is a
+// `ListingTable` over the whole res dir (runs ⧺ hot); consumers apply their own
+// `ORDER BY`.
+
+/// One immutable sealed run file and the half-open output-bucket range it
+/// covers, in epoch seconds. `lo_secs` is `None` for the genesis run (unbounded
+/// below); `hi_secs` is exclusive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SealedRun {
+    pub name: String,
+    pub lo_secs: Option<i64>,
+    pub hi_secs: i64,
+    pub digest: String,
+}
+
+/// Manifest describing the sealed-runs cache for one output resolution. Its
+/// serialized bytes are the export-hint digest, so it must serialize
+/// deterministically (fixed field order; `covered` is an ordered set).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SealedManifest {
+    /// The `allowed_lateness` (seconds) this cache was built under. A build with
+    /// a different value discards and rebuilds the res dir.
+    pub allowed_lateness_secs: i64,
+    /// Exclusive upper bound (epoch seconds) of the sealed region: every output
+    /// bucket with start `< sealed_hi_secs` lives in some run. `None` before any
+    /// bucket has been sealed.
+    pub sealed_hi_secs: Option<i64>,
+    /// Next sealed-run sequence number for file naming.
+    pub next_seq: u64,
+    /// Sealed run files in ascending bucket order.
+    pub runs: Vec<SealedRun>,
+    /// blake3 digest of `hot.parquet`.
+    pub hot_digest: Option<String>,
+    /// Partial member file names this cache reflects (freshness key; identical
+    /// role to the Phase 1 coverage sidecar).
+    pub covered: BTreeSet<String>,
+}
+
+/// Per-resolution sealed-runs directory: `{merged_dir}/res{interval_secs}/`.
+#[must_use]
+pub fn sealed_res_dir(merged_dir: &Path, interval_secs: u64) -> PathBuf {
+    merged_dir.join(format!("res{}", interval_secs))
+}
+
+fn sealed_manifest_path(res_dir: &Path) -> PathBuf {
+    res_dir.join("manifest.json")
+}
+
+/// Path of the recomputed hot-window Parquet in a res dir.
+#[must_use]
+pub fn hot_path(res_dir: &Path) -> PathBuf {
+    res_dir.join("hot.parquet")
+}
+
+/// Path of a sealed run file by name in a res dir.
+#[must_use]
+pub fn run_path(res_dir: &Path, name: &str) -> PathBuf {
+    res_dir.join(name)
+}
+
+/// Read the sealed-runs manifest. `Ok(None)` when absent (fresh cache). A
+/// present-but-unparseable manifest is a hard error rather than a silent
+/// rebuild, matching the frontier/merged-cache corruption discipline.
+pub fn read_sealed_manifest(res_dir: &Path) -> Result<Option<SealedManifest>> {
+    let path = sealed_manifest_path(res_dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+        crate::error::Error::CacheCorrupt(format!(
+            "sealed-runs manifest '{}' is present but unparseable ({}); the rollup \
+             cache is corrupt. Re-run the export with --rebuild to recompute it.",
+            path.display(),
+            e
+        ))
+    })
+}
+
+/// Compute the export-hint digest of a manifest without writing it (used on the
+/// reuse path, where the res dir is served unchanged).
+pub fn sealed_manifest_digest(manifest: &SealedManifest) -> Result<String> {
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| crate::error::Error::Arrow(format!("serialize sealed manifest: {}", e)))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+/// Persist the sealed-runs manifest atomically (tmp + rename) and return the
+/// blake3 digest of its serialized bytes, which callers use as the export-hint
+/// digest for the whole resolution.
+pub async fn write_sealed_manifest(res_dir: &Path, manifest: &SealedManifest) -> Result<String> {
+    tokio::fs::create_dir_all(res_dir).await?;
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| {
+        crate::error::Error::Arrow(format!("serialize sealed manifest: {}", e))
+    })?;
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    let path = sealed_manifest_path(res_dir);
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(digest)
+}
+
+/// Remove an entire res dir (used when `allowed_lateness` changes or the
+/// coverage shrinks, forcing a rebuild from the retained partials).
+pub fn wipe_sealed_res_dir(res_dir: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(res_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(crate::error::Error::Io(e)),
+    }
+}
+
+/// Stream a record batch stream to `path` atomically (tmp + rename) and return
+/// the blake3 digest of the written Parquet bytes. Used for both sealed runs and
+/// the hot file; the digest is recorded in the manifest rather than a sidecar.
+pub async fn write_parquet_atomic(
+    path: &Path,
+    schema: SchemaRef,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
+) -> Result<String> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+    let file = tokio::fs::File::create(&tmp_path).await?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+        .build();
+    let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    let mut stream = stream;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        writer
+            .write(&batch)
+            .await
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    }
+    let _ = writer
+        .close()
+        .await
+        .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
+    let digest = file_blake3(&tmp_path)?;
+    tokio::fs::rename(&tmp_path, path).await?;
+    Ok(digest)
+}
+
+/// Build the read provider for a res dir: a `ListingTable` over all sealed runs
+/// plus the hot file. Verifies every manifest run and the hot file are present
+/// on disk first; a missing member is a hard error (corrupt cache), never a
+/// silent hole in the series.
+pub async fn listing_table_for_res_dir(
+    res_dir: &Path,
+    manifest: &SealedManifest,
+) -> Result<Arc<dyn TableProvider>> {
+    for run in &manifest.runs {
+        let p = run_path(res_dir, &run.name);
+        if !p.exists() {
+            return Err(crate::error::Error::CacheCorrupt(format!(
+                "sealed run '{}' recorded in the manifest is missing on disk; the \
+                 rollup cache is corrupt. Re-run the export with --rebuild.",
+                p.display()
+            )));
+        }
+    }
+    let hot = hot_path(res_dir);
+    if !hot.exists() {
+        return Err(crate::error::Error::CacheCorrupt(format!(
+            "sealed-runs hot file '{}' is missing; the rollup cache is corrupt. \
+             Re-run the export with --rebuild.",
+            hot.display()
+        )));
+    }
+    let dir_url = format!("file://{}/", res_dir.display());
+    let table_url = ListingTableUrl::parse(&dir_url)?;
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
+    let merged_schema = merge_parquet_schemas_in_dir(res_dir).await?;
+    let config = ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .with_schema(merged_schema);
+    let table = ListingTable::try_new(config)?;
+    Ok(Arc::new(table))
 }
 
 #[cfg(test)]
@@ -865,67 +884,21 @@ mod tests {
         drop_node_namespace(cache_dir, "cfg", &node_id).unwrap();
     }
 
-    async fn write_test_merged(cache_dir: &Path, node_id: &tinyfs::NodeID) -> PathBuf {
-        let schema = partials_schema();
-        let batch = partials_batch(&schema, &[0, 1], &[10.0, 5.0], &[2, 1]);
-        let path = merged_cache_path(cache_dir, "cfg", node_id, 60);
-        let stream: Pin<
-            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
-        > = Box::pin(futures::stream::iter(vec![Ok(batch)]));
-        write_merged_cache(&path, schema, stream).await.unwrap();
-        path
-    }
-
-    #[tokio::test]
-    async fn test_merged_cache_absent_and_valid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_id = test_node_id();
-        let path = merged_cache_path(tmp.path(), "cfg", &node_id, 60);
-        // Absent -> self-heal signal.
-        assert!(!verify_merged_cache(&path).unwrap());
-        // After a clean write, present and valid.
-        let path = write_test_merged(tmp.path(), &node_id).await;
-        assert!(verify_merged_cache(&path).unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_merged_cache_missing_digest_self_heals() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_id = test_node_id();
-        let path = write_test_merged(tmp.path(), &node_id).await;
-        // Simulate a crash between the Parquet rename and the digest write.
-        std::fs::remove_file(merged_digest_path(&path)).unwrap();
-        assert!(
-            !verify_merged_cache(&path).unwrap(),
-            "Parquet present with no digest must self-heal, not hard-fail"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_merged_cache_tamper_is_hard_fail() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_id = test_node_id();
-        let path = write_test_merged(tmp.path(), &node_id).await;
-        // Modify the Parquet bytes without updating the digest.
-        let mut bytes = std::fs::read(&path).unwrap();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0xff;
-        std::fs::write(&path, &bytes).unwrap();
-        let err = verify_merged_cache(&path).unwrap_err();
-        assert!(
-            matches!(err, crate::error::Error::CacheCorrupt(_)),
-            "tampered merged cache must be a hard CacheCorrupt error, got {err:?}"
-        );
-    }
-
     #[tokio::test]
     async fn test_merged_cache_drop_all_removes_merged_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let node_id = test_node_id();
-        let path = write_test_merged(tmp.path(), &node_id).await;
-        assert!(path.exists());
+        // Materialize a sealed-runs res dir so drop_all has a merged_* dir to
+        // remove.
+        let res_dir = sealed_res_dir(&merged_dir(tmp.path(), "cfg", &node_id), 60);
+        let manifest = SealedManifest {
+            allowed_lateness_secs: 86400,
+            ..Default::default()
+        };
+        let _ = write_sealed_manifest(&res_dir, &manifest).await.unwrap();
+        assert!(res_dir.exists());
         let dropped = drop_all(tmp.path()).unwrap();
         assert!(dropped >= 1);
-        assert!(!path.exists());
+        assert!(!res_dir.exists());
     }
 }

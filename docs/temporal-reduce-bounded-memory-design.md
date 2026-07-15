@@ -1,6 +1,7 @@
 # Bounded-Memory Temporal Reduce: Sealed Runs + Hot Window
 
-> **Status:** Proposed. Motivated by the watershop **selfmon** deployment, which
+> **Status:** Phases 1 & 2 **implemented** (Phase 3 proposed). Motivated by the
+> watershop **selfmon** deployment, which
 > was run deliberately as a long-lived stressor and exposed unbounded memory
 > growth in the `temporal-reduce` read path. This note proposes reorganizing the
 > reduced-series materialization so that **no operator ever holds state
@@ -232,10 +233,15 @@ future version can contribute to it. Options:
   maximal sealing.
 - **C. Per-factory config** (`allowed_lateness: <duration>`), defaulting to B.
 
-Recommendation: **C defaulting to B**, since selfmon's inputs are monotonic in
-time. Everything else in §3–4 follows mechanically once this is fixed. Note this
-is purely about *when a bucket stops changing* (so it can be sealed) — it does
-**not** bound retention; sealed buckets are kept forever.
+**Decided: C, defaulting to a 1-day window** (`allowed_lateness`, humantime;
+default `DEFAULT_ALLOWED_LATENESS = 1d`). Data arriving older than the sealed
+watermark (beyond `allowed_lateness`) is a **hard error** suggesting `--rebuild`,
+never a silent drop or unbounded backfill — consistent with the project's
+prefer-hard-failures stance. Changing `allowed_lateness` (recorded in the
+manifest, not `cfg_hash`) resets the resolution's cache and rebuilds from the
+retained partials. Note this is purely about *when a bucket stops changing* (so
+it can be sealed) — it does **not** bound retention; sealed buckets are kept
+forever.
 
 ## 6. Compatibility & migration
 
@@ -279,6 +285,77 @@ is purely about *when a bucket stops changing* (so it can be sealed) — it does
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Hot-window GROUP BY + order-preserving concat read (cache-compatible) | Proposed |
-| 2 | Watermark + sealed immutable runs + bounded hot window; SortPreservingMerge read | Proposed |
+| 1 | Hot-window GROUP BY + order-preserving concat read (cache-compatible) | **Implemented** |
+| 2 | Watermark + sealed immutable runs + bounded hot window; ListingTable read | **Implemented** |
 | 3 | Hierarchical rollup (cheaper coarse history; retains all data) | Proposed |
+
+### Phase 1 implementation notes
+
+- `AggSqlPieces::merge_sql` gained an optional `lower_bound` (epoch seconds).
+  When set, `WHERE CAST(EXTRACT(EPOCH FROM date_bin(...)) AS BIGINT) >= lo` is
+  pushed *into* the partials scan, so the `GROUP BY` hash table only ever holds
+  the hot window (§1a). The full-rebuild arm (cache miss) still passes `None`.
+- The splice's cached branch is registered with a declared `file_sort_order` on
+  the timestamp column and `optimizer.prefer_existing_sort = true`, so the outer
+  `ORDER BY` is satisfied by a streaming `SortPreservingMergeExec` over the
+  already-sorted sealed prefix instead of a buffering `Sort` over all N rows
+  (§1b). Verified via `EXPLAIN`: the sealed-prefix `DataSourceExec` carries
+  `output_ordering=[timestamp ASC]` with no `SortExec`; only the bounded hot
+  tail is sorted. `ORDER BY` is retained for correctness (a bare `UNION ALL`
+  would let `CoalescePartitions` interleave the branches).
+- **Latent-bug fix.** All ts boundary comparisons now use
+  `CAST(EXTRACT(EPOCH FROM ts) AS BIGINT)`. Previously the splice compared the
+  merged cache's nanosecond `timestamp` against the epoch-seconds `dirty_lo`
+  with `CAST(ts AS BIGINT)`, so the `ts < lo` prefix branch was *always empty*;
+  the incremental splice silently full-remerged every build via the tail branch
+  (still correct output, but no prefix reuse). Phase 1 both scopes the tail and
+  makes prefix reuse actually happen.
+
+### Phase 2 implementation notes
+
+- **Config.** `TemporalReduceConfig` gained `allowed_lateness: Option<String>`
+  (humantime, e.g. `"1d"`, `"36h"`), defaulting to **1 day**
+  (`DEFAULT_ALLOWED_LATENESS`). It is **not** part of `cfg_hash`; instead the
+  value is recorded in the per-resolution manifest. Changing it is detected as a
+  manifest mismatch, which wipes the resolution's cache dir and rebuilds from the
+  retained partials (partials are unaffected, so no re-ingest).
+- **On-disk layout.** Each resolution lives in
+  `{cache}/merged_{cfg}_{node}/res{secs}/`:
+  - `run-{seq:08}.parquet` — immutable sealed runs, written once, never rewritten.
+  - `hot.parquet` — the open window, recomputed every build.
+  - `manifest.json` — `{ allowed_lateness_secs, sealed_hi_secs, next_seq,
+    runs[{name,lo_secs,hi_secs,digest}], hot_digest, covered[] }`. Its serialized
+    bytes' blake3 is the export-hint digest (deterministic: fixed serde field
+    order + `BTreeSet` for `covered`).
+- **Watermark.** `watermark = align_down(max_output_bucket_secs − allowed_lateness,
+  interval)`, using `div_euclid` so negative watermarks (short history) align
+  correctly. Buckets that start `< watermark` are sealed; buckets `>= watermark`
+  are hot. `max_output_bucket_secs` is a single bounded `MAX(EXTRACT(EPOCH …))`
+  scan over the partials — no per-bucket state.
+- **Build classification** (against `manifest.covered` vs the current partial set):
+  *Reuse* (equal → serve as-is), *Incremental* (superset → advance watermark,
+  seal `[old_sealed_hi, watermark)` into a new run if non-empty, recompute
+  `hot.parquet` from `[sealed_hi, ∞)`), or *Rebuild* (any other shape, or a
+  missing/mismatched manifest → wipe + full rebuild). Sealing and the hot
+  recompute both read the **current** partials, so within-window late data lands
+  in `hot.parquet`.
+- **Bounded per-build cost.** Sealed runs are never re-read or rewritten; each
+  build only re-merges the hot window (`~allowed_lateness` of buckets) plus at
+  most one newly-sealed span. This removes the O(N) per-tick I/O that Phase 1
+  still paid to copy the sealed prefix through the merged cache.
+- **Hard-fail on beyond-window backfill (§5, decision C).** If an incremental
+  build's earliest new output bucket precedes `sealed_hi_secs`, it would reopen
+  an immutable run; this is a hard error suggesting `--rebuild`, never a silent
+  unbounded backfill. Within-window backfill (older than nothing sealed) merges
+  normally.
+- **Read path.** `listing_table_for_res_dir` serves a `ListingTable` over all
+  runs + `hot.parquet`; consumers apply their own `ORDER BY timestamp`. Missing
+  manifest runs or a missing hot file are hard `CacheCorrupt` errors.
+- **Export hint.** digest = manifest digest (stable when unchanged);
+  `changed_since = Some(dirty_lo_secs)` on incremental builds, `None` on
+  rebuild/reuse.
+- **Removed Phase-1 code.** The single-file merged-output cache helpers
+  (`merged_cache_path`, `write_merged_cache`, `verify_merged_cache`,
+  `read_merged_digest`, `{read,write}_merged_coverage`, `listing_table_for_file`
+  and their `.blake3`/`.coverage` sidecars) are fully superseded by the
+  sealed-runs manifest and were deleted.

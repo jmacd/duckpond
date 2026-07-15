@@ -139,6 +139,39 @@ pub struct TemporalReduceConfig {
     /// Each transform is a path like "/etc/hydro_rename"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transforms: Option<Vec<String>>,
+
+    /// Maximum allowed lateness for the sealed-runs rollup cache: how far behind
+    /// the newest bucket a late/backfilled sample may still land before its
+    /// output bucket is treated as sealed. Buckets older than
+    /// `newest_bucket - allowed_lateness` are frozen into immutable run files and
+    /// never recomputed, which bounds the rollup's working set to this window
+    /// instead of all history. Parsed with `humantime::parse_duration`; defaults
+    /// to one day. Data arriving older than the sealed watermark is a hard error
+    /// (re-run with `--rebuild`). Changing this value invalidates the merged
+    /// (sealed-runs) cache, which is rebuilt from the retained partials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_lateness: Option<String>,
+}
+
+/// Default maximum allowed lateness when `allowed_lateness` is unset: one day.
+const DEFAULT_ALLOWED_LATENESS: Duration = Duration::from_secs(24 * 60 * 60);
+
+impl TemporalReduceConfig {
+    /// Resolve the configured maximum allowed lateness as whole seconds,
+    /// defaulting to [`DEFAULT_ALLOWED_LATENESS`]. Parsing failures are a hard
+    /// error so a malformed duration surfaces instead of silently defaulting.
+    fn allowed_lateness_secs(&self) -> TinyFSResult<i64> {
+        let dur = match &self.allowed_lateness {
+            Some(s) => humantime::parse_duration(s).map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "temporal-reduce: invalid allowed_lateness '{}': {}",
+                    s, e
+                ))
+            })?,
+            None => DEFAULT_ALLOWED_LATENESS,
+        };
+        Ok(dur.as_secs() as i64)
+    }
 }
 
 /// Convert Duration to SQL interval string compatible with DuckDB
@@ -540,126 +573,186 @@ impl TemporalReduceSqlFile {
         }
 
         let ts = filled.time_column.clone();
-        let merge_sql = pieces.merge_sql(self.duration, &ts, &partials_table);
 
-        // Merged-output cache: materialize the reconstructed series so a rebuild
-        // recomputes only the suffix of output buckets touched by newly-added
-        // source versions and reuses the sealed prefix. dirty_lo is the earliest
-        // output bucket any new partial falls into; every bucket strictly before
-        // it is provably unchanged because no new partial contributes to it.
+        // Sealed-runs merged cache (Phase 2): freeze output buckets below a
+        // watermark into immutable, append-only run files and recompute only the
+        // open hot window each build, so per-build cost is bounded to
+        // ~allowed_lateness instead of all history.
+        //
+        // The watermark is `newest_bucket - allowed_lateness`, aligned down to
+        // this resolution: any bucket that starts before it can no longer
+        // receive data within the lateness contract and is sealed forever. Data
+        // arriving older than the sealed boundary is a hard error (§5).
         //
         // The partials directory is shared by every resolution of this site, so
-        // a sibling resolution processed earlier in the same build may already
-        // have written the new partials. Basing freshness on "partials written
-        // by this invocation" would therefore leave every resolution but the
-        // first serving a stale merged cache. Instead each merged cache records,
-        // in a coverage sidecar, exactly which partial members it was built
-        // from; freshness is decided by diffing that record against the partials
-        // actually present, independent of which invocation wrote them.
-        let merged_path = crate::rollup_cache::merged_cache_path(
-            &cache_dir,
-            &cfg_hash,
-            &site_node_id,
-            self.duration.as_secs(),
-        );
-        let cache_valid = crate::rollup_cache::verify_merged_cache(&merged_path).map_other()?;
+        // freshness is keyed on the partial member set actually present (the
+        // manifest's `covered`), independent of which invocation wrote them.
+        let lateness_secs = filled.allowed_lateness_secs()?;
+        let merged_dir = crate::rollup_cache::merged_dir(&cache_dir, &cfg_hash, &site_node_id);
+        let res_dir = crate::rollup_cache::sealed_res_dir(&merged_dir, self.duration.as_secs());
+
+        // A different allowed_lateness moves the watermark, invalidating the
+        // sealed layout: discard the res dir and rebuild from retained partials.
+        let manifest = match crate::rollup_cache::read_sealed_manifest(&res_dir).map_other()? {
+            Some(m) if m.allowed_lateness_secs == lateness_secs => Some(m),
+            Some(_) => {
+                crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
+                None
+            }
+            None => None,
+        };
+
         let current_members = crate::rollup_cache::list_glob_members(&glob_dir).map_other()?;
         let current_names: std::collections::BTreeSet<String> = current_members
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .collect();
-        let recorded = if cache_valid {
-            crate::rollup_cache::read_merged_coverage(&merged_path).map_other()?
-        } else {
-            None
-        };
 
-        // reuse: the cache already reflects exactly the current partial set.
-        // dirty_lo Some: the partial set grew by append-only members and the
-        // splice can reuse buckets before the earliest new member. Any other
-        // shape (removed members, or an unknown / absent coverage record) falls
-        // through to a full remerge, which is always correct.
-        let (reuse, dirty_lo) = match &recorded {
-            Some(rec) if *rec == current_names => (true, None),
-            Some(rec) if rec.is_subset(&current_names) => {
+        // Classify the build against the cached coverage:
+        //  - Reuse: coverage matches exactly -> serve the existing res dir.
+        //  - Incremental: coverage grew by append-only members -> advance the
+        //    watermark, seal newly frozen buckets, recompute the hot window.
+        //  - Rebuild: any other shape (removed members / no manifest) -> wipe and
+        //    rebuild the res dir from all partials.
+        enum Plan {
+            Reuse,
+            Incremental { dirty_lo_secs: Option<i64> },
+            Rebuild,
+        }
+        let plan = match &manifest {
+            Some(m) if m.covered == current_names => Plan::Reuse,
+            Some(m) if m.covered.is_subset(&current_names) => {
                 let new_members: Vec<std::path::PathBuf> = current_members
                     .iter()
                     .filter(|p| {
                         p.file_name()
-                            .map(|n| !rec.contains(n.to_string_lossy().as_ref()))
+                            .map(|n| !m.covered.contains(n.to_string_lossy().as_ref()))
                             .unwrap_or(false)
                     })
                     .cloned()
                     .collect();
-                (
-                    false,
-                    self.min_output_bucket(&new_members, self.duration).await?,
-                )
+                let dirty_lo_secs = self
+                    .min_output_bucket(&new_members, self.duration)
+                    .await?
+                    .map(|(_native, secs)| secs);
+                Plan::Incremental { dirty_lo_secs }
             }
-            _ => (false, None),
+            _ => Plan::Rebuild,
         };
 
-        let table_provider: Arc<dyn datafusion::catalog::TableProvider> = if reuse {
-            // Cache already reflects every current partial: reuse it as-is.
-            crate::rollup_cache::listing_table_for_file(&merged_path)
-                .await
-                .map_other()?
-        } else {
-            let write_sql = match (cache_valid, dirty_lo) {
-                (true, Some((lo, _lo_secs))) => {
-                    // Incremental splice: cached buckets before lo (unchanged)
-                    // UNION ALL freshly merged buckets from lo onward. A single
-                    // UNION ALL lets DataFusion unify the two schemas and stream
-                    // one ordered result. The cached file is fully read before
-                    // write_merged_cache renames the new file into its place.
-                    let old_table = format!("__merged_old_{}_{}", cfg_hash, sanitized_id);
-                    if ctx.table_exist(old_table.as_str()).unwrap_or(false) {
-                        _ = ctx.deregister_table(old_table.as_str()).map_other()?;
-                    }
-                    ctx.register_parquet(
-                        &old_table,
-                        merged_path.to_string_lossy().as_ref(),
-                        datafusion::prelude::ParquetReadOptions::default(),
-                    )
+        let (table_provider, digest, changed_since): (
+            Arc<dyn datafusion::catalog::TableProvider>,
+            String,
+            Option<i64>,
+        ) = match &plan {
+            Plan::Reuse => {
+                let m = manifest.as_ref().expect("reuse implies a manifest");
+                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, m)
                     .await
-                    .map_other_context("register merged cache for incremental splice")?;
-                    format!(
-                        "SELECT * FROM ( \
-                               SELECT * FROM {old} WHERE CAST(\"{ts}\" AS BIGINT) < {lo} \
-                               UNION ALL \
-                               SELECT * FROM ({merge}) WHERE CAST(\"{ts}\" AS BIGINT) >= {lo} \
-                             ) ORDER BY \"{ts}\"",
-                        old = old_table,
-                        merge = merge_sql,
-                    )
-                }
-                _ => {
-                    // No usable cache (first build or dropped/corrupt cache):
-                    // full merge of all cached partials.
-                    merge_sql.clone()
-                }
-            };
+                    .map_other()?;
+                let digest = crate::rollup_cache::sealed_manifest_digest(m).map_other()?;
+                (provider, digest, None)
+            }
+            Plan::Rebuild | Plan::Incremental { .. } => {
+                // Starting manifest for this build. Rebuild starts from empty;
+                // Incremental continues the existing sealed state.
+                let (mut m, changed_since) = match &plan {
+                    Plan::Incremental { dirty_lo_secs } => {
+                        let m = manifest.expect("incremental implies a manifest");
+                        // Hard-fail on data older than the sealed watermark: it
+                        // would reopen an immutable bucket beyond allowed_lateness.
+                        if let (Some(sealed_hi), Some(dl)) = (m.sealed_hi_secs, *dirty_lo_secs)
+                            && dl < sealed_hi
+                        {
+                            return Err(tinyfs::Error::Other(format!(
+                                "temporal-reduce rollup: source data backfills an \
+                                 already-sealed bucket (earliest new output bucket {}s \
+                                 precedes the sealed watermark {}s; allowed_lateness = \
+                                 {}s). Data older than the watermark cannot reopen a \
+                                 sealed run. Re-run the export with --rebuild to \
+                                 recompute the rollup cache from scratch.",
+                                dl, sealed_hi, lateness_secs
+                            )));
+                        }
+                        (m, *dirty_lo_secs)
+                    }
+                    _ => {
+                        crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
+                        (
+                            crate::rollup_cache::SealedManifest {
+                                allowed_lateness_secs: lateness_secs,
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                    }
+                };
 
-            let stream = ctx
-                .sql(&write_sql)
-                .await
-                .map_other_context("rollup merged-cache SQL planning failed")?
-                .execute_stream()
-                .await
-                .map_other_context("rollup merged-cache SQL execution failed")?;
-            let schema = stream.schema();
-            let mapped = stream.map(|r| r.map_err(|e| crate::error::Error::Arrow(e.to_string())));
-            crate::rollup_cache::write_merged_cache(&merged_path, schema, Box::pin(mapped))
-                .await
-                .map_other()?;
-            // Record the partial set this merged cache now reflects, so the next
-            // build can decide freshness without re-merging.
-            crate::rollup_cache::write_merged_coverage(&merged_path, &current_members)
-                .await
-                .map_other()?;
-            crate::rollup_cache::listing_table_for_file(&merged_path)
-                .await
-                .map_other()?
+                // Event-time frontier: newest output bucket over ALL partials
+                // (epoch seconds). Bounded MAX scan, no per-bucket state.
+                let data_hi_secs = self
+                    .max_output_bucket_secs(ctx, &partials_table)
+                    .await?;
+                let interval_secs = self.duration.as_secs() as i64;
+                let watermark = data_hi_secs.map(|hi| {
+                    (hi - lateness_secs).div_euclid(interval_secs) * interval_secs
+                });
+
+                // Seal buckets [sealed_hi, watermark) into a new immutable run
+                // when the watermark advances. Bounded to the newly-frozen span.
+                if let Some(wm) = watermark
+                    && m.sealed_hi_secs.is_none_or(|sh| wm > sh)
+                {
+                    let seal_sql = pieces.merge_sql(
+                        self.duration,
+                        &ts,
+                        &partials_table,
+                        m.sealed_hi_secs,
+                        Some(wm),
+                    );
+                    let name = format!("run-{:08}.parquet", m.next_seq);
+                    let run_file = crate::rollup_cache::run_path(&res_dir, &name);
+                    let (run_digest, rows) =
+                        self.write_merge_to(ctx, &seal_sql, &run_file).await?;
+                    if rows > 0 {
+                        m.runs.push(crate::rollup_cache::SealedRun {
+                            name,
+                            lo_secs: m.sealed_hi_secs,
+                            hi_secs: wm,
+                            digest: run_digest,
+                        });
+                        m.next_seq += 1;
+                    } else {
+                        // Empty span (a gap with no data): advance the watermark
+                        // without recording an empty run file.
+                        tokio::fs::remove_file(&run_file).await.map_other()?;
+                    }
+                    m.sealed_hi_secs = Some(wm);
+                }
+
+                // Recompute the open hot window [sealed_hi, inf) from the current
+                // partials -- this is where new appends and within-window late
+                // data land. Bounded to ~allowed_lateness worth of buckets.
+                let hot_sql = pieces.merge_sql(
+                    self.duration,
+                    &ts,
+                    &partials_table,
+                    m.sealed_hi_secs,
+                    None,
+                );
+                let hot_file = crate::rollup_cache::hot_path(&res_dir);
+                let (hot_digest, _rows) = self.write_merge_to(ctx, &hot_sql, &hot_file).await?;
+                m.hot_digest = Some(hot_digest);
+                m.covered = current_names;
+
+                let digest = crate::rollup_cache::write_sealed_manifest(&res_dir, &m)
+                    .await
+                    .map_other()?;
+                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, &m)
+                    .await
+                    .map_other()?;
+                (provider, digest, changed_since)
+            }
         };
 
         let cache_key = crate::TableProviderKey::new(id, crate::VersionSelection::LatestVersion)
@@ -668,23 +761,16 @@ impl TemporalReduceSqlFile {
 
         // Publish an export hint so the sitegen export layer can skip rewriting
         // output partitions whose buckets did not change this build. The digest
-        // identifies the current merged content; `changed_since` is the earliest
-        // changed output bucket, or None when the merge was fully rebuilt (cache
-        // miss) and every partition must be rewritten.
-        if let Some(digest) = crate::rollup_cache::read_merged_digest(&merged_path).map_other()? {
-            let changed_since = if cache_valid {
-                dirty_lo.map(|(_native, secs)| secs)
-            } else {
-                None
-            };
-            context.set_export_hint(
-                &id,
-                tinyfs::ExportHint {
-                    digest,
-                    changed_since,
-                },
-            )?;
-        }
+        // is the manifest digest (stable when content is unchanged); the export
+        // reuses partitions strictly before `changed_since`, or rewrites all when
+        // it is None (full rebuild or unchanged reuse).
+        context.set_export_hint(
+            &id,
+            tinyfs::ExportHint {
+                digest,
+                changed_since,
+            },
+        )?;
 
         Ok(Some(table_provider))
     }
@@ -817,6 +903,79 @@ impl TemporalReduceSqlFile {
         }
         Ok(global)
     }
+
+    /// Newest output-bucket start (epoch seconds) over all partials -- the
+    /// event-time frontier that drives the watermark. A single bounded MAX scan;
+    /// no per-bucket accumulator. `None` when the partials hold no rows.
+    async fn max_output_bucket_secs(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        partials_table: &str,
+    ) -> TinyFSResult<Option<i64>> {
+        let interval = duration_to_sql_interval(self.duration);
+        let bin = date_bin_expr(&interval, "time_bucket");
+        let sql = format!(
+            "SELECT CAST(MAX(EXTRACT(EPOCH FROM {bin})) AS BIGINT) AS hi_secs \
+             FROM {partials_table}"
+        );
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_other_context("max-output-bucket SQL planning failed")?
+            .collect()
+            .await
+            .map_other_context("max-output-bucket SQL execution failed")?;
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            if let Some(hi) = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+            {
+                use arrow::array::Array;
+                if !hi.is_null(0) {
+                    return Ok(Some(hi.value(0)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Plan and execute `sql`, streaming the result to `path` atomically. Returns
+    /// the written file's blake3 digest and its row count. The row count lets the
+    /// caller drop empty sealed runs (gaps with no data) rather than record an
+    /// empty run file, while still advancing the watermark.
+    async fn write_merge_to(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        sql: &str,
+        path: &std::path::Path,
+    ) -> TinyFSResult<(String, u64)> {
+        let stream = ctx
+            .sql(sql)
+            .await
+            .map_other_context("rollup sealed-cache SQL planning failed")?
+            .execute_stream()
+            .await
+            .map_other_context("rollup sealed-cache SQL execution failed")?;
+        let schema = stream.schema();
+        let rows = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rows_w = rows.clone();
+        let mapped = stream.map(move |r| {
+            r.inspect(|batch| {
+                let _ = rows_w
+                    .fetch_add(batch.num_rows() as u64, std::sync::atomic::Ordering::Relaxed);
+            })
+            .map_err(|e| crate::error::Error::Arrow(e.to_string()))
+        });
+        let digest = crate::rollup_cache::write_parquet_atomic(path, schema, Box::pin(mapped))
+            .await
+            .map_other()?;
+        Ok((digest, rows.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+
     async fn write_version_partial(
         &self,
         pieces: &AggSqlPieces,
@@ -1496,9 +1655,43 @@ impl AggSqlPieces {
     /// partials into the coarser bucket. When `output_interval` equals the
     /// partial interval the re-bin is an identity because the partial
     /// `time_bucket` values are already aligned to that interval.
-    fn merge_sql(&self, output_interval: Duration, ts: &str, partials_table: &str) -> String {
+    ///
+    /// `lower_bound` / `upper_bound` scope the aggregate to a bucket window: when
+    /// `lower_bound` is `Some(lo)`, only partials whose output bucket is `>= lo`
+    /// are fed to the `GROUP BY`; when `upper_bound` is `Some(hi)`, only those
+    /// `< hi` (exclusive). Both are in **epoch seconds** (matching
+    /// `min_output_bucket`'s `lo_secs`), so the comparison is independent of the
+    /// partials' timestamp unit. Bounding the aggregate keeps the hash table to
+    /// one accumulator per bucket in the window instead of one per bucket over
+    /// all history (design §1a / Phase 1), and lets Phase 2 compute a sealed run
+    /// `[lo, hi)` and the open hot window `[hi, ∞)` as two bounded merges. The
+    /// predicate is pushed *into* the partials scan (a `WHERE` before the
+    /// `GROUP BY`) so it prunes input rows rather than aggregation output. It is
+    /// exact because every partial row in one output bucket shares the same
+    /// `date_bin` value, so no output bucket straddles a bound. `None`/`None`
+    /// aggregates all history (cold rebuild after a cache miss).
+    fn merge_sql(
+        &self,
+        output_interval: Duration,
+        ts: &str,
+        partials_table: &str,
+        lower_bound: Option<i64>,
+        upper_bound: Option<i64>,
+    ) -> String {
         let interval = duration_to_sql_interval(output_interval);
         let bin = date_bin_expr(&interval, "time_bucket");
+        let mut preds: Vec<String> = Vec::new();
+        if let Some(lo) = lower_bound {
+            preds.push(format!("CAST(EXTRACT(EPOCH FROM {bin}) AS BIGINT) >= {lo}"));
+        }
+        if let Some(hi) = upper_bound {
+            preds.push(format!("CAST(EXTRACT(EPOCH FROM {bin}) AS BIGINT) < {hi}"));
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", preds.join(" AND "))
+        };
         format!(
             r#"
         WITH merged AS (
@@ -1506,6 +1699,7 @@ impl AggSqlPieces {
             {bin} AS time_bucket,
             {merge_exprs}
           FROM {partials_table}
+          {where_clause}
           GROUP BY {bin}
         )
         SELECT 
@@ -1976,6 +2170,9 @@ fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
     // exact.
     _ = parse_nesting_resolutions(&temporal_config.resolutions)?;
 
+    // Surface a malformed allowed_lateness at config time, not mid-build.
+    _ = temporal_config.allowed_lateness_secs()?;
+
     Ok(config_value)
 }
 
@@ -2009,6 +2206,7 @@ mod tests {
             resolutions: vec!["1d".to_string()],
             aggregations,
             transforms: None,
+            allowed_lateness: None,
         }
     }
 
@@ -2172,7 +2370,7 @@ mod tests {
         _ = ctx
             .register_table("partials", Arc::new(partials_table))
             .unwrap();
-        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials");
+        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials", None, None);
         let merged = ctx.sql(&merge_sql).await.unwrap().collect().await.unwrap();
 
         let full = arrow::compute::concat_batches(&full[0].schema(), &full).unwrap();
@@ -2293,7 +2491,7 @@ mod tests {
         _ = ctx
             .register_table("partials", Arc::new(partials_table))
             .unwrap();
-        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials");
+        let merge_sql = pieces.merge_sql(interval, "timestamp", "partials", None, None);
         let merged = ctx.sql(&merge_sql).await.unwrap().collect().await.unwrap();
         let merged = arrow::compute::concat_batches(&merged[0].schema(), &merged).unwrap();
 
@@ -2418,6 +2616,7 @@ mod tests {
                     },
                 ],
                 transforms: None,
+                allowed_lateness: None,
             };
 
             let context = test_context(&provider_context, FileID::root());
@@ -2627,6 +2826,7 @@ mod tests {
                 resolutions: vec!["1h".to_string()],
                 aggregations: vec![],
                 transforms: None,
+                allowed_lateness: None,
             };
             TemporalReduceSqlFile::new(
                 config,
@@ -2756,6 +2956,7 @@ mod tests {
                     },
                 ],
                 transforms: None,
+                allowed_lateness: None,
             };
 
             let context = test_context(&provider_context, FileID::root());
@@ -2915,6 +3116,7 @@ mod tests {
                 agg(AggregationType::Max, &["temperature"]),
             ],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let make_ctx = |cache: Option<std::path::PathBuf>| {
@@ -3102,6 +3304,7 @@ mod tests {
                 agg(AggregationType::Max, &["temperature"]),
             ],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let make_ctx = |cache: Option<std::path::PathBuf>| {
@@ -3303,6 +3506,7 @@ mod tests {
             resolutions: vec!["1d".to_string()],
             aggregations: vec![agg(AggregationType::Avg, &["temperature"])],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3400,6 +3604,7 @@ mod tests {
                 agg(AggregationType::Max, &["temperature"]),
             ],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3482,9 +3687,9 @@ mod tests {
 
     /// Merged-output cache incremental splice: after a first build seeds the
     /// cache, a later build that appends a NEWER version splices the cached
-    /// prefix with a freshly merged suffix, and a build that BACKFILLS an
-    /// earlier version recomputes from the earlier dirty_lo. Both must equal a
-    /// full single-pass recompute over the same versions.
+    /// prefix with a freshly merged suffix. A build that BACKFILLS a version
+    /// older than the sealed watermark (beyond allowed_lateness) is a hard error
+    /// suggesting --rebuild, since it would reopen an immutable sealed run.
     #[tokio::test]
     async fn test_merged_cache_incremental_splice_append_and_backfill() {
         let _ = env_logger::try_init();
@@ -3529,6 +3734,7 @@ mod tests {
                 agg(AggregationType::Max, &["temperature"]),
             ],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let make_ctx = |cache: Option<std::path::PathBuf>| {
@@ -3643,38 +3849,40 @@ mod tests {
             "append splice watermark should be day 3 in epoch seconds"
         );
 
-        // Build 3 (BACKFILL): add day 1 (earliest) -> dirty_lo precedes cache min.
+        // Build 3 (BACKFILL beyond the lateness window): add day 1 (earliest).
+        // With the default allowed_lateness of 1 day, day 2 has already been
+        // sealed (watermark = day2), so day-1 data would reopen an immutable
+        // sealed bucket. The new contract is a hard error suggesting --rebuild,
+        // not a silent unbounded backfill.
         {
             let root = fs.root().await.unwrap();
             append_day(&root, "/ingest/weather.csv", 1).await;
         }
-        let (rows3, hint3) = collect_daily(&make_ctx(Some(cache_dir.clone())), config()).await;
-        // Backfill moves the watermark earlier to day 1.
-        let hint3 = hint3.expect("build 3 publishes an export hint");
-        assert_eq!(
-            hint3.changed_since,
-            Some(0),
-            "backfill splice watermark should be day 1 (epoch 0)"
+        let provider_context = make_ctx(Some(cache_dir.clone()));
+        let context = test_context(&provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(config(), context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+        let err = queryable
+            .as_table_provider(file_id, &provider_context)
+            .await
+            .expect_err("backfill beyond allowed_lateness must hard-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sealed") && msg.contains("--rebuild"),
+            "backfill error should mention the sealed watermark and --rebuild: {msg}"
         );
-
-        // Ground truth is computed by hand: for day d, avg = 32 + d*100 (mean
-        // hour 11.5 plus 20.5 base), min = 20.5 + d*100 (hour 0), max = 43.5 +
-        // d*100 (hour 23). A no-cache single-pass cannot serve as the oracle here
-        // because it reads the appended per-version CSV headers as data rows.
-        assert_eq!(rows3.len(), 3, "three daily buckets: days 1,2,3");
-        let expected = |d: f64| (32.0 + d * 100.0, 20.5 + d * 100.0, 43.5 + d * 100.0);
-        for (i, d) in [1.0, 2.0, 3.0].into_iter().enumerate() {
-            let (ea, emin, emax) = expected(d);
-            assert!(
-                approx(rows3[i].0, ea) && approx(rows3[i].1, emin) && approx(rows3[i].2, emax),
-                "backfill splice day {} wrong: got {:?}, want ({}, {}, {})",
-                d as u32,
-                rows3[i],
-                ea,
-                emin,
-                emax
-            );
-        }
     }
 
     /// Regression: partials are shared by every resolution, so when a later
@@ -3722,6 +3930,7 @@ mod tests {
             resolutions: vec!["1h".to_string(), "1d".to_string()],
             aggregations: vec![agg(AggregationType::Max, &["temperature"])],
             transforms: None,
+            allowed_lateness: None,
         };
 
         let make_ctx = |cache: std::path::PathBuf| {
@@ -3821,6 +4030,263 @@ mod tests {
             approx(daily2[0], 143.5) && approx(daily2[1], 243.5),
             "coarse daily max wrong after append: {:?}",
             daily2
+        );
+    }
+
+    // ---- Phase 2 sealed-runs / allowed_lateness tests ---------------------
+
+    async fn append_day_series(fs: &tinyfs::FS, path: &str, day: u32) {
+        use tokio::io::AsyncWriteExt;
+        let root = fs.root().await.unwrap();
+        let mut csv = String::from("timestamp,temperature\n");
+        for hour in 0..24u32 {
+            let ts = format!("1970-01-{:02}T{:02}:00:00", day, hour);
+            let temp = 20.5 + hour as f64 + day as f64 * 100.0;
+            csv.push_str(&format!("{},{}\n", ts, temp));
+        }
+        let mut w = root
+            .async_writer_path_with_type(path, EntryType::FilePhysicalSeries)
+            .await
+            .unwrap();
+        w.write_all(csv.as_bytes()).await.unwrap();
+        w.flush().await.unwrap();
+        w.shutdown().await.unwrap();
+    }
+
+    fn lateness_config(lateness: Option<&str>) -> TemporalReduceConfig {
+        TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1d".to_string()],
+            aggregations: vec![agg(AggregationType::Max, &["temperature"])],
+            transforms: None,
+            allowed_lateness: lateness.map(str::to_string),
+        }
+    }
+
+    fn reduce_ctx(
+        persistence: &tinyfs::MemoryPersistence,
+        cache_dir: &std::path::Path,
+    ) -> crate::ProviderContext {
+        let session = Arc::new(datafusion::prelude::SessionContext::new());
+        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+            .expect("register object store");
+        crate::ProviderContext::new(session, Arc::new(persistence.clone()))
+            .with_cache_dir(cache_dir.to_path_buf())
+    }
+
+    async fn daily_max(
+        provider_context: &crate::ProviderContext,
+        config: TemporalReduceConfig,
+    ) -> Result<Vec<f64>, String> {
+        let context = test_context(provider_context, FileID::root());
+        let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+        let temporal_handle = temporal_dir.create_handle();
+        let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+        let NodeType::Directory(weather_dir) = &weather_node.node_type else {
+            panic!("expected directory");
+        };
+        let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+        let file_id = daily_node.id;
+        let NodeType::File(file_handle) = &daily_node.node_type else {
+            panic!("expected file node");
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+        let queryable = file_guard.as_queryable().expect("queryable");
+        let table_provider = match queryable
+            .as_table_provider(file_id, provider_context)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => return Err(e.to_string()),
+        };
+        drop(file_guard);
+        let ctx = &provider_context.datafusion_session;
+        _ = ctx.register_table("reduced", table_provider).unwrap();
+        let batches = ctx
+            .sql("SELECT \"temperature.max\" FROM reduced ORDER BY timestamp")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for b in &batches {
+            let col = b
+                .column_by_name("temperature.max")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .clone();
+            for i in 0..b.num_rows() {
+                rows.push(col.value(i));
+            }
+        }
+        _ = ctx.deregister_table("reduced").unwrap();
+        Ok(rows)
+    }
+
+    fn walk_find(dir: &std::path::Path, pred: &dyn Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk_find(&path, pred));
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && pred(name)
+            {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// As history grows by append-only versions, the watermark advances and
+    /// output buckets that fall out of the allowed_lateness window are frozen
+    /// into immutable `run-*.parquet` files; the query output still spans all
+    /// days. This is the mechanism that bounds per-build memory to the hot
+    /// window instead of all history.
+    #[tokio::test]
+    async fn test_sealed_runs_advance_as_history_grows() {
+        let _ = env_logger::try_init();
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone()).await.unwrap();
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // Append days 1..=4 as successive newer versions, rebuilding each time.
+        for day in 1..=4u32 {
+            append_day_series(&fs, "/ingest/weather.csv", day).await;
+            let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
+                .await
+                .expect("append within lateness window must succeed");
+            assert_eq!(rows.len(), day as usize, "day {day}: one bucket per day");
+        }
+
+        // The watermark (data_hi - 1d) has advanced past the earliest days, so
+        // at least one sealed run file must exist on disk.
+        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        assert!(
+            !runs.is_empty(),
+            "expected sealed run files after history advanced, found none under {}",
+            cache_dir.display()
+        );
+        // A hot file and a manifest must also be present.
+        let hots = walk_find(&cache_dir, &|n| n == "hot.parquet");
+        assert!(!hots.is_empty(), "expected a hot.parquet");
+        let manifests = walk_find(&cache_dir, &|n| n == "manifest.json");
+        assert_eq!(manifests.len(), 1, "one manifest for the single resolution");
+
+        // Final output still spans all four days with correct maxima.
+        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
+            .await
+            .unwrap();
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert_eq!(rows.len(), 4);
+        for (i, day) in (1..=4u32).enumerate() {
+            assert!(
+                approx(rows[i], 43.5 + day as f64 * 100.0),
+                "day {day} max wrong: {:?}",
+                rows
+            );
+        }
+    }
+
+    /// A backfill that lands INSIDE the allowed_lateness window (nothing older
+    /// than it has been sealed yet) is accepted and merged, in contrast to the
+    /// beyond-window backfill that hard-fails. Here a generous 10-day window
+    /// keeps everything hot, so day 1 arriving last still merges cleanly.
+    #[tokio::test]
+    async fn test_within_window_backfill_succeeds() {
+        let _ = env_logger::try_init();
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone()).await.unwrap();
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // Seed with day 5, then backfill day 1 (four days earlier) under a
+        // 10-day lateness window: the watermark is far below day 1, so nothing
+        // is sealed and the backfill is within the hot window.
+        append_day_series(&fs, "/ingest/weather.csv", 5).await;
+        let r1 = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("10d")))
+            .await
+            .unwrap();
+        assert_eq!(r1.len(), 1);
+
+        append_day_series(&fs, "/ingest/weather.csv", 1).await;
+        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("10d")))
+            .await
+            .expect("within-window backfill must succeed");
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert_eq!(rows.len(), 2, "day1 + day5, got {:?}", rows);
+        assert!(
+            approx(rows[0], 143.5) && approx(rows[1], 543.5),
+            "within-window backfill values wrong: {:?}",
+            rows
+        );
+    }
+
+    /// Changing `allowed_lateness` invalidates the sealed layout: the manifest
+    /// records the value it was built under, and a build with a different value
+    /// wipes the res dir and rebuilds from the retained partials. The rebuilt
+    /// manifest reflects the new lateness and the output is still correct.
+    #[tokio::test]
+    async fn test_allowed_lateness_change_resets_cache() {
+        let _ = env_logger::try_init();
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone()).await.unwrap();
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+
+        // Build days 1..=3 under a 1-day window (seals early runs).
+        for day in 1..=3u32 {
+            append_day_series(&fs, "/ingest/weather.csv", day).await;
+            _ = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
+                .await
+                .unwrap();
+        }
+        let manifests = walk_find(&cache_dir, &|n| n == "manifest.json");
+        assert_eq!(manifests.len(), 1);
+        let m: Value =
+            serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
+        assert_eq!(m["allowed_lateness_secs"], 86400, "1d window recorded");
+
+        // Rebuild the SAME data with a 3-day window: mismatch -> reset + rebuild.
+        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("3d")))
+            .await
+            .expect("lateness change resets and rebuilds cleanly");
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert_eq!(rows.len(), 3, "all three days after reset, got {:?}", rows);
+        for (i, day) in (1..=3u32).enumerate() {
+            assert!(
+                approx(rows[i], 43.5 + day as f64 * 100.0),
+                "day {day} max wrong after reset: {:?}",
+                rows
+            );
+        }
+        let m2: Value =
+            serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
+        assert_eq!(
+            m2["allowed_lateness_secs"], 259200,
+            "manifest reflects the new 3d window after reset"
         );
     }
 }
