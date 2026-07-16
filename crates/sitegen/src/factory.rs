@@ -647,6 +647,13 @@ async fn run_status_grid_queries(
     let perf_pattern = grid_cfg.perf_pattern.as_deref();
     let now_us = chrono::Utc::now().timestamp_micros();
 
+    // Event-time lower bound (epoch µs) for the journal series read: prune
+    // versions whose newest event predates `now - hot_window` so per-render
+    // memory stays bounded regardless of retained history. A malformed
+    // configured duration is a hard error.
+    let hot_window_us = grid_cfg.hot_window_secs()? * 1_000_000;
+    let event_time_lo = Some(now_us - hot_window_us);
+
     let mut statuses: Vec<PondStatus> = Vec::new();
 
     for (np, _captures) in &matches {
@@ -661,7 +668,7 @@ async fn run_status_grid_queries(
 
         let table_provider = match journal_matcher
             .provider()
-            .create_table_provider(&file_url, ctx)
+            .create_table_provider_bounded(&file_url, ctx, event_time_lo)
             .await
         {
             Ok(tp) => tp,

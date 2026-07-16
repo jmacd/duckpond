@@ -100,7 +100,23 @@ impl Provider {
     pub async fn create_table_provider(
         &self,
         url_str: &str,
+        ctx: &SessionContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        self.create_table_provider_bounded(url_str, ctx, None).await
+    }
+
+    /// As [`Provider::create_table_provider`], but for append-only series read
+    /// through the format (e.g. `jsonlogs://`) MemTable path, an optional
+    /// `event_time_lo` (epoch µs) prunes versions whose recorded
+    /// `max_event_time` is below the bound, so a windowed reader never
+    /// materializes old history. The bound currently applies to the
+    /// no-cache MemTable path; the cached-`ListingTable` path is unaffected
+    /// (deferred to a later phase).
+    pub async fn create_table_provider_bounded(
+        &self,
+        url_str: &str,
         _ctx: &SessionContext,
+        event_time_lo: Option<i64>,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let url = Url::parse(url_str)?;
 
@@ -178,7 +194,7 @@ impl Provider {
         }
 
         // No cache available -- fall back to MemTable
-        self.create_memtable_from_url(&url, format_provider.as_ref())
+        self.create_memtable_from_url(&url, format_provider.as_ref(), event_time_lo)
             .await
     }
 
@@ -415,9 +431,11 @@ impl Provider {
         &self,
         url: &Url,
         format_provider: &dyn FormatProvider,
+        event_time_lo: Option<i64>,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        // Open file with decompression
-        let reader = self.fs.open_url(url).await?;
+        // Open file with decompression, pruning series versions below the
+        // event-time lower bound when one is supplied.
+        let reader = self.fs.open_url_bounded(url, event_time_lo).await?;
 
         // Stream data with format provider
         let (schema, mut stream) = format_provider.open_stream(reader, url).await?;

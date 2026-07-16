@@ -664,9 +664,25 @@ impl WD {
         &self,
         path: P,
     ) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
+        self.async_reader_path_bounded(path, None).await
+    }
+
+    /// As [`WD::async_reader_path`], but passes an optional event-time lower
+    /// bound (epoch µs) to the file reader so append-only series nodes can prune
+    /// versions below the bound (see [`crate::file::File::async_reader_bounded`]).
+    pub async fn async_reader_path_bounded<P: AsRef<Path>>(
+        &self,
+        path: P,
+        event_time_lo: Option<i64>,
+    ) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
         let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => node.as_file().await?.async_reader().await,
+            Lookup::Found(node) => {
+                node.as_file()
+                    .await?
+                    .async_reader_bounded(event_time_lo)
+                    .await
+            }
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
             Lookup::Empty(_) => Err(Error::empty_path()),
         }

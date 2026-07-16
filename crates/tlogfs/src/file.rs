@@ -99,6 +99,31 @@ impl File for OpLogFile {
         Ok(reader)
     }
 
+    async fn async_reader_bounded(
+        &self,
+        event_time_lo: Option<i64>,
+    ) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        // Check transaction state
+        let state = self.transaction_state.read().await;
+        if let TransactionWriteState::WritingInTransaction = *state {
+            return Err(tinyfs::Error::Other(
+                "File is being written in active transaction".to_string(),
+            ));
+        }
+        drop(state);
+
+        // For FilePhysicalSeries this prunes versions whose recorded
+        // max_event_time is below the bound before concatenation; for other
+        // node types the bound is ignored by the persistence layer.
+        let reader = self
+            .state
+            .async_file_reader_bounded(self.id, event_time_lo)
+            .await
+            .map_other()?;
+
+        Ok(reader)
+    }
+
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
         self.build_writer(false).await
     }

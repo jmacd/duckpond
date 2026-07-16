@@ -197,6 +197,21 @@ pub struct ReconstructedTxn {
     pub timestamp_micros: i64,
 }
 
+/// Decide whether a `FilePhysicalSeries` version is retained by an optional
+/// event-time lower bound (epoch µs).
+///
+/// - `event_time_lo == None`: read the full series; every version is retained.
+/// - `event_time_lo == Some(lo)`: retain the version iff its recorded
+///   `max_event_time` is at or above `lo`. A version with no recorded bound
+///   (`max_event_time == None`) is **always retained**: a missing bound must
+///   never silently drop data.
+fn series_version_in_window(max_event_time: Option<i64>, event_time_lo: Option<i64>) -> bool {
+    match event_time_lo {
+        Some(lo) => max_event_time.is_none_or(|max_ts| max_ts >= lo),
+        None => true,
+    }
+}
+
 impl OpLogPersistence {
     /// Get the Delta table for query operations
     #[must_use]
@@ -1432,6 +1447,21 @@ impl State {
         self.inner.lock().await.async_file_reader(id).await
     }
 
+    /// As [`Self::async_file_reader`], but prunes `FilePhysicalSeries` versions
+    /// whose recorded `max_event_time` is below `event_time_lo` (epoch µs).
+    /// See [`InnerState::async_file_reader_bounded`].
+    pub(crate) async fn async_file_reader_bounded(
+        &self,
+        id: FileID,
+        event_time_lo: Option<i64>,
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .async_file_reader_bounded(id, event_time_lo)
+            .await
+    }
+
     /// Add an arbitrary OplogEntry record to pending transaction state
     /// This is used for metadata-only operations like temporal bounds setting
     pub async fn add_oplog_entry(&self, entry: OplogEntry) -> Result<(), TLogFSError> {
@@ -2575,13 +2605,27 @@ impl InnerState {
         &mut self,
         id: FileID,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        self.async_file_reader_bounded(id, None).await
+    }
+
+    /// As [`Self::async_file_reader`], but for `FilePhysicalSeries` nodes an
+    /// optional `event_time_lo` (epoch microseconds) prunes versions whose
+    /// recorded `max_event_time` is strictly below the bound before
+    /// concatenation, so a windowed reader never opens old history. Versions
+    /// lacking recorded event-time bounds are always retained (a missing bound
+    /// must never drop data). `None` reads the full series, unchanged.
+    pub async fn async_file_reader_bounded(
+        &mut self,
+        id: FileID,
+        event_time_lo: Option<i64>,
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
 
         // Check if this is a FilePhysicalSeries - concatenate all versions oldest-to-newest
         if let Some(first_record) = records.first()
             && first_record.file_type == EntryType::FilePhysicalSeries
         {
-            return self.async_file_reader_series(&records).await;
+            return self.async_file_reader_series(&records, event_time_lo).await;
         }
 
         // Find the latest record with actual content (skip empty temporal override versions)
@@ -2613,6 +2657,7 @@ impl InnerState {
     async fn async_file_reader_series(
         &self,
         records: &[OplogEntry],
+        event_time_lo: Option<i64>,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         use tinyfs::chained_reader::ChainedReader;
 
@@ -2628,6 +2673,11 @@ impl InnerState {
             .iter()
             .filter(|r| r.size.unwrap_or(0) > 0) // Skip 0-byte versions
             .filter(|r| collapsed_through.is_none_or(|k| r.version > k))
+            // Event-time pruning: when a lower bound is requested, skip versions
+            // whose recorded `max_event_time` is strictly below it. Versions
+            // without a recorded `max_event_time` are retained (a missing bound
+            // must never drop data).
+            .filter(|r| series_version_in_window(r.max_event_time, event_time_lo))
             .collect();
         valid_records.reverse(); // Now oldest-first
 
@@ -4494,5 +4544,37 @@ mod node_factory {
         // The node will be automatically cached when returned
 
         Ok(node)
+    }
+}
+
+#[cfg(test)]
+mod event_time_window_tests {
+    use super::series_version_in_window;
+
+    #[test]
+    fn no_bound_retains_all_versions() {
+        // A None lower bound reads the full series regardless of recorded bounds.
+        assert!(series_version_in_window(Some(0), None));
+        assert!(series_version_in_window(Some(i64::MAX), None));
+        assert!(series_version_in_window(None, None));
+    }
+
+    #[test]
+    fn bound_prunes_versions_strictly_below() {
+        let lo = 1_000;
+        // Below the bound: pruned.
+        assert!(!series_version_in_window(Some(999), Some(lo)));
+        // At the bound: retained (inclusive).
+        assert!(series_version_in_window(Some(1_000), Some(lo)));
+        // Above the bound: retained.
+        assert!(series_version_in_window(Some(1_001), Some(lo)));
+    }
+
+    #[test]
+    fn null_bound_versions_are_always_retained() {
+        // Critical invariant: a version without a recorded max_event_time must
+        // never be pruned, or windowed reads would silently drop data.
+        assert!(series_version_in_window(None, Some(1_000)));
+        assert!(series_version_in_window(None, Some(i64::MAX)));
     }
 }

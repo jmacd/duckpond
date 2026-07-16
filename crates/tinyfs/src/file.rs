@@ -42,6 +42,18 @@ pub trait File: Metadata + Send + Sync {
     /// Create a reader stream - implementation specific
     async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>>;
 
+    /// Create a reader stream that, for append-only series files, may prune
+    /// versions whose recorded maximum event time is strictly below
+    /// `event_time_lo` (epoch microseconds). Backends without event-time
+    /// metadata (and non-series files) ignore the bound. The default delegates
+    /// to [`File::async_reader`], reading the full content.
+    async fn async_reader_bounded(
+        &self,
+        _event_time_lo: Option<i64>,
+    ) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        self.async_reader().await
+    }
+
     /// Create a writer stream - implementation specific
     /// Returns a writer that can optionally accept metadata via FileMetadataWriter trait
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn FileMetadataWriter>>>;
@@ -94,6 +106,16 @@ impl Handle {
     pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let file = self.0.lock().await;
         file.async_reader().await
+    }
+
+    /// Get an async reader that may prune series versions below `event_time_lo`
+    /// (epoch µs) - delegated to implementation (see [`File::async_reader_bounded`]).
+    pub async fn async_reader_bounded(
+        &self,
+        event_time_lo: Option<i64>,
+    ) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        let file = self.0.lock().await;
+        file.async_reader_bounded(event_time_lo).await
     }
 
     /// Get an async writer - delegated to implementation  
