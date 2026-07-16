@@ -503,12 +503,13 @@ pub struct SealedRun {
 }
 
 /// On-disk format of the sealed run + hot files. Bumped when their column
-/// layout changes so an older cache is discarded and rebuilt rather than
-/// misread. `partials-v1` stores the *mergeable partials* (sum/count/min/max)
-/// with output columns reconstructed at read time (design §3 / Phase 3 step 1);
-/// legacy caches that stored already-reconstructed output deserialize with an
-/// empty `format` and are wiped + rebuilt.
-pub const SEALED_FORMAT: &str = "partials-v1";
+/// layout or the manifest's build semantics change so an older cache is
+/// discarded and rebuilt rather than misread. `partials-v2` stores the
+/// *mergeable partials* (sum/count/min/max) with output columns reconstructed at
+/// read time (design §3 / Phase 3 step 1) AND may derive a coarser resolution by
+/// folding the next-finer resolution's runs (`source_digest`; Phase 3 step 2);
+/// legacy caches deserialize with an empty `format` and are wiped + rebuilt.
+pub const SEALED_FORMAT: &str = "partials-v2";
 
 /// Manifest describing the sealed-runs cache for one output resolution. Its
 /// serialized bytes are the export-hint digest, so it must serialize
@@ -533,8 +534,17 @@ pub struct SealedManifest {
     /// blake3 digest of `hot.parquet`.
     pub hot_digest: Option<String>,
     /// Partial member file names this cache reflects (freshness key; identical
-    /// role to the Phase 1 coverage sidecar).
+    /// role to the Phase 1 coverage sidecar). Used only by the finest resolution,
+    /// which folds the shared finest partials directly; empty for coarser
+    /// resolutions, which key freshness on `source_digest` instead.
     pub covered: BTreeSet<String>,
+    /// For a coarser resolution built by folding the next-finer resolution's
+    /// runs (Phase 3 step 2): the finer resolution's manifest digest this cache
+    /// was folded from. `None` for the finest resolution (which folds the shared
+    /// partials and uses `covered`). A change in the finer digest triggers a
+    /// coarse rebuild/advance.
+    #[serde(default)]
+    pub source_digest: Option<String>,
 }
 
 /// Per-resolution sealed-runs directory: `{merged_dir}/res{interval_secs}/`.

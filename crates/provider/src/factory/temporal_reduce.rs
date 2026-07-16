@@ -178,6 +178,21 @@ impl TemporalReduceConfig {
 /// Deferred SQL file that generates temporal reduction SQL when schema is discovered
 /// This avoids the marker-based approach by deferring SQL generation until
 /// the source schema can be properly discovered
+/// Result of building one resolution level of the sealed-runs cache. The
+/// `partials_provider` is the `ListingTable` over that level's runs + hot (in
+/// mergeable-partials form), which the next-coarser level folds and which the
+/// final level wraps in a read-time reconstruction view. `digest` is the level's
+/// manifest digest (the coarser level records it as its `source_digest`);
+/// `changed_since` feeds the export hint; `rebuilt` is true when this level was
+/// wiped and rebuilt from scratch (a non-append change), which forces the next
+/// coarser level to rebuild too.
+struct LevelBuild {
+    partials_provider: Arc<dyn datafusion::catalog::TableProvider>,
+    digest: String,
+    changed_since: Option<i64>,
+    rebuilt: bool,
+}
+
 pub struct TemporalReduceSqlFile {
     config: TemporalReduceConfig,
     duration: Duration,
@@ -591,201 +606,98 @@ impl TemporalReduceSqlFile {
 
         let ts = filled.time_column.clone();
 
-        // Sealed-runs merged cache (Phase 2): freeze output buckets below a
-        // watermark into immutable, append-only run files and recompute only the
-        // open hot window each build, so per-build cost is bounded to
-        // ~allowed_lateness instead of all history.
+        // Sealed-runs merged cache (Phase 2) + hierarchical rollup (Phase 3
+        // step 2). Each output resolution freezes buckets below a watermark into
+        // immutable append-only runs and recomputes only the open hot window, so
+        // per-build cost is bounded to ~allowed_lateness instead of all history.
         //
-        // The watermark is `newest_bucket - allowed_lateness`, aligned down to
-        // this resolution: any bucket that starts before it can no longer
-        // receive data within the lateness contract and is sealed forever. Data
-        // arriving older than the sealed boundary is a hard error (§5).
-        //
-        // The partials directory is shared by every resolution of this site, so
-        // freshness is keyed on the partial member set actually present (the
-        // manifest's `covered`), independent of which invocation wrote them.
+        // Resolutions form a nesting chain (finest .. coarsest). The finest
+        // resolution folds the shared finest partials directly; every coarser
+        // resolution is built by folding the *next-finer resolution's* runs +
+        // hot (exponentially less input than rescanning the finest partials),
+        // which is exact because the stored partials are associative and the
+        // intervals nest. We build the chain finest-first up to this file's
+        // resolution, so a consumer of any resolution transparently materializes
+        // the finer levels it depends on. Each level reuses its cache when
+        // unchanged, so this is cheap after the first cold build.
         let lateness_secs = filled.allowed_lateness_secs()?;
         let merged_dir = crate::rollup_cache::merged_dir(&cache_dir, &cfg_hash, &site_node_id);
-        let res_dir = crate::rollup_cache::sealed_res_dir(&merged_dir, self.duration.as_secs());
 
-        // A different allowed_lateness moves the watermark, invalidating the
-        // sealed layout: discard the res dir and rebuild from retained partials.
-        let manifest = match crate::rollup_cache::read_sealed_manifest(&res_dir).map_other()? {
-            Some(m)
-                if m.allowed_lateness_secs == lateness_secs
-                    && m.format == crate::rollup_cache::SEALED_FORMAT =>
-            {
-                Some(m)
-            }
-            Some(_) => {
-                crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
-                None
-            }
-            None => None,
-        };
-
-        let current_members = crate::rollup_cache::list_glob_members(&glob_dir).map_other()?;
-        let current_names: std::collections::BTreeSet<String> = current_members
+        // Levels to build: finest .. this file's resolution (inclusive).
+        let levels: Vec<Duration> = resolution_durations
             .iter()
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .copied()
+            .filter(|d| *d <= self.duration)
             .collect();
 
-        // Classify the build against the cached coverage:
-        //  - Reuse: coverage matches exactly -> serve the existing res dir.
-        //  - Incremental: coverage grew by append-only members -> advance the
-        //    watermark, seal newly frozen buckets, recompute the hot window.
-        //  - Rebuild: any other shape (removed members / no manifest) -> wipe and
-        //    rebuild the res dir from all partials.
-        enum Plan {
-            Reuse,
-            Incremental { dirty_lo_secs: Option<i64> },
-            Rebuild,
-        }
-        let plan = match &manifest {
-            Some(m) if m.covered == current_names => Plan::Reuse,
-            Some(m) if m.covered.is_subset(&current_names) => {
-                let new_members: Vec<std::path::PathBuf> = current_members
-                    .iter()
-                    .filter(|p| {
-                        p.file_name()
-                            .map(|n| !m.covered.contains(n.to_string_lossy().as_ref()))
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect();
-                let dirty_lo_secs = self
-                    .min_output_bucket(&new_members, self.duration)
-                    .await?
-                    .map(|(_native, secs)| secs);
-                Plan::Incremental { dirty_lo_secs }
-            }
-            _ => Plan::Rebuild,
-        };
+        let mut finer: Option<(String, Arc<dyn datafusion::catalog::TableProvider>)> = None;
+        let mut finer_rebuilt = false;
+        let mut final_level: Option<LevelBuild> = None;
 
-        let (table_provider, digest, changed_since): (
-            Arc<dyn datafusion::catalog::TableProvider>,
-            String,
-            Option<i64>,
-        ) = match &plan {
-            Plan::Reuse => {
-                let m = manifest.as_ref().expect("reuse implies a manifest");
-                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, m, &ts)
-                    .await
-                    .map_other()?;
-                let digest = crate::rollup_cache::sealed_manifest_digest(m).map_other()?;
-                (provider, digest, None)
-            }
-            Plan::Rebuild | Plan::Incremental { .. } => {
-                // Starting manifest for this build. Rebuild starts from empty;
-                // Incremental continues the existing sealed state.
-                let (mut m, changed_since) = match &plan {
-                    Plan::Incremental { dirty_lo_secs } => {
-                        let m = manifest.expect("incremental implies a manifest");
-                        // Hard-fail on data older than the sealed watermark: it
-                        // would reopen an immutable bucket beyond allowed_lateness.
-                        if let (Some(sealed_hi), Some(dl)) = (m.sealed_hi_secs, *dirty_lo_secs)
-                            && dl < sealed_hi
-                        {
-                            return Err(tinyfs::Error::Other(format!(
-                                "temporal-reduce rollup: source data backfills an \
-                                 already-sealed bucket (earliest new output bucket {}s \
-                                 precedes the sealed watermark {}s; allowed_lateness = \
-                                 {}s). Data older than the watermark cannot reopen a \
-                                 sealed run. Re-run the export with --rebuild to \
-                                 recompute the rollup cache from scratch.",
-                                dl, sealed_hi, lateness_secs
-                            )));
-                        }
-                        (m, *dirty_lo_secs)
-                    }
-                    _ => {
-                        crate::rollup_cache::wipe_sealed_res_dir(&res_dir).map_other()?;
-                        (
-                            crate::rollup_cache::SealedManifest {
-                                format: crate::rollup_cache::SEALED_FORMAT.to_string(),
-                                allowed_lateness_secs: lateness_secs,
-                                ..Default::default()
-                            },
-                            None,
-                        )
-                    }
-                };
-
-                // Event-time frontier: newest output bucket over ALL partials
-                // (epoch seconds). Bounded MAX scan, no per-bucket state.
-                let data_hi_secs = self
-                    .max_output_bucket_secs(ctx, &partials_table)
-                    .await?;
-                let interval_secs = self.duration.as_secs() as i64;
-                let watermark = data_hi_secs.map(|hi| {
-                    (hi - lateness_secs).div_euclid(interval_secs) * interval_secs
-                });
-
-                // Seal buckets [sealed_hi, watermark) into a new immutable run
-                // when the watermark advances. Bounded to the newly-frozen span.
-                if let Some(wm) = watermark
-                    && m.sealed_hi_secs.is_none_or(|sh| wm > sh)
-                {
-                    let seal_sql = pieces.merge_partials_sql(
-                        self.duration,
-                        &ts,
-                        &partials_table,
-                        m.sealed_hi_secs,
-                        Some(wm),
-                    );
-                    let name = format!("run-{:08}.parquet", m.next_seq);
-                    let run_file = crate::rollup_cache::run_path(&res_dir, &name);
-                    let (run_digest, rows) =
-                        self.write_merge_to(ctx, &seal_sql, &run_file).await?;
-                    if rows > 0 {
-                        m.runs.push(crate::rollup_cache::SealedRun {
-                            name,
-                            lo_secs: m.sealed_hi_secs,
-                            hi_secs: wm,
-                            digest: run_digest,
-                        });
-                        m.next_seq += 1;
-                    } else {
-                        // Empty span (a gap with no data): advance the watermark
-                        // without recording an empty run file.
-                        tokio::fs::remove_file(&run_file).await.map_other()?;
-                    }
-                    m.sealed_hi_secs = Some(wm);
-                }
-
-                // Recompute the open hot window [sealed_hi, inf) from the current
-                // partials -- this is where new appends and within-window late
-                // data land. Bounded to ~allowed_lateness worth of buckets.
-                let hot_sql = pieces.merge_partials_sql(
-                    self.duration,
+        for (idx, level) in levels.iter().copied().enumerate() {
+            let res_dir = crate::rollup_cache::sealed_res_dir(&merged_dir, level.as_secs());
+            let built = if idx == 0 {
+                // Finest resolution: fold the shared finest partials.
+                self.build_level_from_partials(
+                    ctx,
+                    &pieces,
                     &ts,
+                    level,
+                    &res_dir,
                     &partials_table,
-                    m.sealed_hi_secs,
-                    None,
+                    &glob_dir,
+                    lateness_secs,
+                )
+                .await?
+            } else {
+                // Coarser resolution: fold the next-finer resolution's runs+hot.
+                let (finer_digest, finer_provider) =
+                    finer.take().expect("non-finest level has a finer level");
+                let finer_table = format!(
+                    "__rollup_finer_{}_{}_{}",
+                    cfg_hash,
+                    sanitized_id,
+                    level.as_secs()
                 );
-                let hot_file = crate::rollup_cache::hot_path(&res_dir);
-                let (hot_digest, _rows) = self.write_merge_to(ctx, &hot_sql, &hot_file).await?;
-                m.hot_digest = Some(hot_digest);
-                m.covered = current_names;
-
-                let digest = crate::rollup_cache::write_sealed_manifest(&res_dir, &m)
-                    .await
+                let _ = ctx
+                    .register_table(finer_table.as_str(), finer_provider)
                     .map_other()?;
-                let provider = crate::rollup_cache::listing_table_for_res_dir(&res_dir, &m, &ts)
-                    .await
-                    .map_other()?;
-                (provider, digest, changed_since)
-            }
-        };
+                let out = self
+                    .build_level_from_finer(
+                        ctx,
+                        &pieces,
+                        &ts,
+                        level,
+                        &res_dir,
+                        &finer_table,
+                        &finer_digest,
+                        finer_rebuilt,
+                        lateness_secs,
+                    )
+                    .await;
+                let _ = ctx.deregister_table(finer_table.as_str()).map_other()?;
+                out?
+            };
+            finer_rebuilt = built.rebuilt;
+            finer = Some((built.digest.clone(), built.partials_provider.clone()));
+            final_level = Some(built);
+        }
 
-        // The sealed runs + hot file now store mergeable partials
-        // (SEALED_FORMAT = partials-v1); reconstruct the output columns at read
+        let final_level = final_level.expect("at least the finest level is always built");
+        let (table_provider, digest, changed_since) = (
+            final_level.partials_provider,
+            final_level.digest,
+            final_level.changed_since,
+        );
+
+        // The sealed runs + hot file store mergeable partials
+        // (SEALED_FORMAT = partials-v2); reconstruct the output columns at read
         // time so consumers see identical output (same names, order, values,
         // including Avg = Sum / Count) while the on-disk runs stay associatively
-        // foldable for a future coarser-from-finer rollup (design §3 / Phase 3
-        // step 1). The reconstruction is a passthrough-projection view over the
-        // partials listing table: the timestamp column flows through unchanged so
-        // the scan's declared ordering (the streaming, O(1)-memory read path) is
+        // foldable for the coarser-from-finer rollup (design §3 / Phase 3). The
+        // reconstruction is a passthrough-projection view over the partials
+        // listing table: the timestamp column flows through unchanged so the
+        // scan's declared ordering (the streaming, O(1)-memory read path) is
         // preserved. The listing provider is embedded in the view's logical plan,
         // so the view resolves in any consumer session, then deregistered here to
         // avoid leaking a table into the shared session.
@@ -959,19 +871,24 @@ impl TemporalReduceSqlFile {
         Ok(global)
     }
 
-    /// Newest output-bucket start (epoch seconds) over all partials -- the
-    /// event-time frontier that drives the watermark. A single bounded MAX scan;
-    /// no per-bucket accumulator. `None` when the partials hold no rows.
+    /// Newest output-bucket start (epoch seconds) over `table`, re-binning its
+    /// `bucket_col` to `output_interval` -- the event-time frontier that drives
+    /// the watermark. A single bounded MAX scan; no per-bucket accumulator.
+    /// `None` when the table holds no rows. `bucket_col` is `time_bucket` for the
+    /// shared finest partials or the output `ts` column for a finer resolution's
+    /// runs+hot.
     async fn max_output_bucket_secs(
         &self,
         ctx: &datafusion::prelude::SessionContext,
-        partials_table: &str,
+        table: &str,
+        bucket_col: &str,
+        output_interval: Duration,
     ) -> TinyFSResult<Option<i64>> {
-        let interval = duration_to_sql_interval(self.duration);
-        let bin = date_bin_expr(&interval, "time_bucket");
+        let interval = duration_to_sql_interval(output_interval);
+        let bin = date_bin_expr(&interval, bucket_col);
         let sql = format!(
             "SELECT CAST(MAX(EXTRACT(EPOCH FROM {bin})) AS BIGINT) AS hi_secs \
-             FROM {partials_table}"
+             FROM {table}"
         );
         let batches = ctx
             .sql(&sql)
@@ -996,6 +913,329 @@ impl TemporalReduceSqlFile {
             }
         }
         Ok(None)
+    }
+
+    /// Advance the sealed layout in `res_dir` by folding `input_table` (its
+    /// bucket-timestamp column is `in_bucket_col`) into `output_interval`: seal
+    /// buckets that have crossed the watermark into a new immutable run, then
+    /// recompute the open hot window. Mutates and persists nothing but the run /
+    /// hot files; updates `m.sealed_hi_secs`, `m.runs`, `m.next_seq`,
+    /// `m.hot_digest`. Bounded to the newly-frozen span + the hot window. Shared
+    /// by the finest fold (input = shared partials, `time_bucket`) and every
+    /// coarser fold (input = the next-finer runs+hot, `ts`).
+    async fn seal_and_recompute(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        pieces: &AggSqlPieces,
+        ts: &str,
+        output_interval: Duration,
+        res_dir: &std::path::Path,
+        input_table: &str,
+        in_bucket_col: &str,
+        m: &mut crate::rollup_cache::SealedManifest,
+    ) -> TinyFSResult<()> {
+        // Event-time frontier: newest output bucket over the input (epoch
+        // seconds). Bounded MAX scan, no per-bucket state.
+        let data_hi_secs = self
+            .max_output_bucket_secs(ctx, input_table, in_bucket_col, output_interval)
+            .await?;
+        let interval_secs = output_interval.as_secs() as i64;
+        let watermark = data_hi_secs
+            .map(|hi| (hi - m.allowed_lateness_secs).div_euclid(interval_secs) * interval_secs);
+
+        // Seal buckets [sealed_hi, watermark) into a new immutable run when the
+        // watermark advances. Bounded to the newly-frozen span.
+        if let Some(wm) = watermark
+            && m.sealed_hi_secs.is_none_or(|sh| wm > sh)
+        {
+            let seal_sql = pieces.merge_partials_sql(
+                output_interval,
+                ts,
+                input_table,
+                in_bucket_col,
+                m.sealed_hi_secs,
+                Some(wm),
+            );
+            let name = format!("run-{:08}.parquet", m.next_seq);
+            let run_file = crate::rollup_cache::run_path(res_dir, &name);
+            let (run_digest, rows) = self.write_merge_to(ctx, &seal_sql, &run_file).await?;
+            if rows > 0 {
+                m.runs.push(crate::rollup_cache::SealedRun {
+                    name,
+                    lo_secs: m.sealed_hi_secs,
+                    hi_secs: wm,
+                    digest: run_digest,
+                });
+                m.next_seq += 1;
+            } else {
+                // Empty span (a gap with no data): advance the watermark without
+                // recording an empty run file.
+                tokio::fs::remove_file(&run_file).await.map_other()?;
+            }
+            m.sealed_hi_secs = Some(wm);
+        }
+
+        // Recompute the open hot window [sealed_hi, inf) from the current input --
+        // where new appends and within-window late data land. Bounded to
+        // ~allowed_lateness worth of buckets.
+        let hot_sql = pieces.merge_partials_sql(
+            output_interval,
+            ts,
+            input_table,
+            in_bucket_col,
+            m.sealed_hi_secs,
+            None,
+        );
+        let hot_file = crate::rollup_cache::hot_path(res_dir);
+        let (hot_digest, _rows) = self.write_merge_to(ctx, &hot_sql, &hot_file).await?;
+        m.hot_digest = Some(hot_digest);
+        Ok(())
+    }
+
+    /// Build the finest resolution level by folding the shared finest partials.
+    /// Freshness is keyed on the partial member set (`covered`): unchanged →
+    /// Reuse; an append-only superset → Incremental (advance watermark, seal,
+    /// recompute hot); any other shape → Rebuild. A backfill older than the
+    /// sealed watermark is a hard error (§5).
+    #[allow(clippy::too_many_arguments)]
+    async fn build_level_from_partials(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        pieces: &AggSqlPieces,
+        ts: &str,
+        output_interval: Duration,
+        res_dir: &std::path::Path,
+        partials_table: &str,
+        glob_dir: &std::path::Path,
+        lateness_secs: i64,
+    ) -> TinyFSResult<LevelBuild> {
+        let manifest = match crate::rollup_cache::read_sealed_manifest(res_dir).map_other()? {
+            Some(m)
+                if m.allowed_lateness_secs == lateness_secs
+                    && m.format == crate::rollup_cache::SEALED_FORMAT =>
+            {
+                Some(m)
+            }
+            Some(_) => {
+                crate::rollup_cache::wipe_sealed_res_dir(res_dir).map_other()?;
+                None
+            }
+            None => None,
+        };
+
+        let current_members = crate::rollup_cache::list_glob_members(glob_dir).map_other()?;
+        let current_names: std::collections::BTreeSet<String> = current_members
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+
+        enum Plan {
+            Reuse,
+            Incremental { dirty_lo_secs: Option<i64> },
+            Rebuild,
+        }
+        let plan = match &manifest {
+            Some(m) if m.covered == current_names => Plan::Reuse,
+            Some(m) if m.covered.is_subset(&current_names) => {
+                let new_members: Vec<std::path::PathBuf> = current_members
+                    .iter()
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| !m.covered.contains(n.to_string_lossy().as_ref()))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                let dirty_lo_secs = self
+                    .min_output_bucket(&new_members, output_interval)
+                    .await?
+                    .map(|(_native, secs)| secs);
+                Plan::Incremental { dirty_lo_secs }
+            }
+            _ => Plan::Rebuild,
+        };
+
+        if let Plan::Reuse = plan {
+            let m = manifest.as_ref().expect("reuse implies a manifest");
+            let provider = crate::rollup_cache::listing_table_for_res_dir(res_dir, m, ts)
+                .await
+                .map_other()?;
+            let digest = crate::rollup_cache::sealed_manifest_digest(m).map_other()?;
+            return Ok(LevelBuild {
+                partials_provider: provider,
+                digest,
+                changed_since: None,
+                rebuilt: false,
+            });
+        }
+
+        let rebuilt = matches!(plan, Plan::Rebuild);
+        let (mut m, changed_since) = match plan {
+            Plan::Incremental { dirty_lo_secs } => {
+                let m = manifest.expect("incremental implies a manifest");
+                // Hard-fail on data older than the sealed watermark: it would
+                // reopen an immutable bucket beyond allowed_lateness.
+                if let (Some(sealed_hi), Some(dl)) = (m.sealed_hi_secs, dirty_lo_secs)
+                    && dl < sealed_hi
+                {
+                    return Err(tinyfs::Error::Other(format!(
+                        "temporal-reduce rollup: source data backfills an \
+                         already-sealed bucket (earliest new output bucket {}s \
+                         precedes the sealed watermark {}s; allowed_lateness = \
+                         {}s). Data older than the watermark cannot reopen a \
+                         sealed run. Re-run the export with --rebuild to \
+                         recompute the rollup cache from scratch.",
+                        dl, sealed_hi, lateness_secs
+                    )));
+                }
+                (m, dirty_lo_secs)
+            }
+            _ => {
+                crate::rollup_cache::wipe_sealed_res_dir(res_dir).map_other()?;
+                (
+                    crate::rollup_cache::SealedManifest {
+                        format: crate::rollup_cache::SEALED_FORMAT.to_string(),
+                        allowed_lateness_secs: lateness_secs,
+                        ..Default::default()
+                    },
+                    None,
+                )
+            }
+        };
+
+        self.seal_and_recompute(
+            ctx,
+            pieces,
+            ts,
+            output_interval,
+            res_dir,
+            partials_table,
+            "time_bucket",
+            &mut m,
+        )
+        .await?;
+        m.covered = current_names;
+        m.source_digest = None;
+
+        let digest = crate::rollup_cache::write_sealed_manifest(res_dir, &m)
+            .await
+            .map_other()?;
+        let provider = crate::rollup_cache::listing_table_for_res_dir(res_dir, &m, ts)
+            .await
+            .map_other()?;
+        Ok(LevelBuild {
+            partials_provider: provider,
+            digest,
+            changed_since,
+            rebuilt,
+        })
+    }
+
+    /// Build a coarser resolution level by folding the next-finer level's runs +
+    /// hot (`finer_table`, bucket column `ts`) into `output_interval` (Phase 3
+    /// step 2). Freshness is keyed on the finer level's manifest digest
+    /// (`finer_digest`) plus whether it was rebuilt:
+    ///  - finer reused and its digest unchanged → Reuse;
+    ///  - finer appended (not rebuilt) → advance this level (bounded seal + hot);
+    ///  - finer rebuilt, or no compatible manifest → rebuild this level.
+    ///
+    /// No beyond-window hard-fail is needed here: this level's watermark aligns
+    /// down at least as far as the finer level's (coarser interval, same
+    /// lateness), so `coarse_sealed_hi ≤ finer_sealed_hi`, and the finest level
+    /// already enforces the append-only contract for the whole chain.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_level_from_finer(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        pieces: &AggSqlPieces,
+        ts: &str,
+        output_interval: Duration,
+        res_dir: &std::path::Path,
+        finer_table: &str,
+        finer_digest: &str,
+        finer_rebuilt: bool,
+        lateness_secs: i64,
+    ) -> TinyFSResult<LevelBuild> {
+        let manifest = match crate::rollup_cache::read_sealed_manifest(res_dir).map_other()? {
+            Some(m)
+                if m.allowed_lateness_secs == lateness_secs
+                    && m.format == crate::rollup_cache::SEALED_FORMAT =>
+            {
+                Some(m)
+            }
+            Some(_) => {
+                crate::rollup_cache::wipe_sealed_res_dir(res_dir).map_other()?;
+                None
+            }
+            None => None,
+        };
+
+        // Reuse: the finer level was reused (not rebuilt) and its digest matches
+        // what this level last folded, so nothing downstream changed.
+        if !finer_rebuilt
+            && let Some(m) = &manifest
+            && m.source_digest.as_deref() == Some(finer_digest)
+        {
+            let provider = crate::rollup_cache::listing_table_for_res_dir(res_dir, m, ts)
+                .await
+                .map_other()?;
+            let digest = crate::rollup_cache::sealed_manifest_digest(m).map_other()?;
+            return Ok(LevelBuild {
+                partials_provider: provider,
+                digest,
+                changed_since: None,
+                rebuilt: false,
+            });
+        }
+
+        // Advance in place when the finer level only appended (its sealed history
+        // below our watermark is immutable, so our sealed runs stay valid);
+        // otherwise rebuild from empty.
+        let can_advance = !finer_rebuilt && manifest.is_some();
+        let (mut m, changed_since, rebuilt) = if can_advance {
+            let m = manifest.expect("can_advance implies a manifest");
+            // Earliest coarse bucket that the hot recompute may change.
+            let changed_since = m.sealed_hi_secs;
+            (m, changed_since, false)
+        } else {
+            crate::rollup_cache::wipe_sealed_res_dir(res_dir).map_other()?;
+            (
+                crate::rollup_cache::SealedManifest {
+                    format: crate::rollup_cache::SEALED_FORMAT.to_string(),
+                    allowed_lateness_secs: lateness_secs,
+                    ..Default::default()
+                },
+                None,
+                true,
+            )
+        };
+
+        self.seal_and_recompute(
+            ctx,
+            pieces,
+            ts,
+            output_interval,
+            res_dir,
+            finer_table,
+            ts,
+            &mut m,
+        )
+        .await?;
+        m.covered = std::collections::BTreeSet::new();
+        m.source_digest = Some(finer_digest.to_string());
+
+        let digest = crate::rollup_cache::write_sealed_manifest(res_dir, &m)
+            .await
+            .map_other()?;
+        let provider = crate::rollup_cache::listing_table_for_res_dir(res_dir, &m, ts)
+            .await
+            .map_other()?;
+        Ok(LevelBuild {
+            partials_provider: provider,
+            digest,
+            changed_since,
+            rebuilt,
+        })
     }
 
     /// Plan and execute `sql`, streaming the result to `path` atomically. Returns
@@ -1794,16 +2034,24 @@ impl AggSqlPieces {
     /// fold a finer resolution's runs (Phase 3 step 2) and preserves exact
     /// cross-version/cross-run merge semantics. Output columns are rebuilt at read
     /// time by [`reconstruct_sql`]. Bounds behave exactly as in [`merge_sql`].
+    ///
+    /// `in_bucket_col` is the input table's bucket-timestamp column: `time_bucket`
+    /// when folding the shared finest partials (finest resolution), or the output
+    /// timestamp column (`ts`) when folding a finer resolution's runs+hot, whose
+    /// stored bucket column is that `ts`. Both are TIMESTAMP-typed and already
+    /// aligned to the finer interval, so `date_bin` re-buckets them exactly into
+    /// the coarser output interval (nesting guarantees no split).
     fn merge_partials_sql(
         &self,
         output_interval: Duration,
         ts: &str,
         partials_table: &str,
+        in_bucket_col: &str,
         lower_bound: Option<i64>,
         upper_bound: Option<i64>,
     ) -> String {
         let interval = duration_to_sql_interval(output_interval);
-        let bin = date_bin_expr(&interval, "time_bucket");
+        let bin = date_bin_expr(&interval, in_bucket_col);
         let mut preds: Vec<String> = Vec::new();
         if let Some(lo) = lower_bound {
             preds.push(format!("CAST(EXTRACT(EPOCH FROM {bin}) AS BIGINT) >= {lo}"));
@@ -3581,6 +3829,99 @@ mod tests {
         assert_eq!(hourly, single_1h, "1h cascade == single-pass");
         assert_eq!(six_hourly, single_6h, "6h cascade == single-pass");
         assert_eq!(daily, single_1d, "1d cascade == single-pass");
+    }
+
+    /// Phase 3 step 2: requesting only the coarsest resolution transparently
+    /// materializes the finer levels it folds from. The finest level folds the
+    /// shared partials; each coarser level folds the next-finer level's sealed
+    /// runs + hot (not the raw partials), so every intermediate `res{secs}` dir
+    /// must exist on disk with its own manifest + hot file, and the coarse
+    /// manifest must record the finer digest it folded (`source_digest`).
+    #[tokio::test]
+    async fn test_rollup_cascade_materializes_finer_levels_on_disk() {
+        let _ = env_logger::try_init();
+
+        let persistence = tinyfs::MemoryPersistence::default();
+        let fs = tinyfs::FS::new(persistence.clone())
+            .await
+            .expect("create FS");
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+        }
+        // Three days of hourly data so the coarse watermark advances and seals.
+        for day in 1..=3u32 {
+            append_day_series(&fs, "/ingest/weather.csv", day).await;
+        }
+
+        let config = TemporalReduceConfig {
+            in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+            out_pattern: "weather".to_string(),
+            time_column: "timestamp".to_string(),
+            resolutions: vec!["1h".to_string(), "6h".to_string(), "1d".to_string()],
+            aggregations: vec![agg(AggregationType::Max, &["temperature"])],
+            transforms: None,
+            allowed_lateness: Some("1d".to_string()),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_path_buf();
+        let ctx = reduce_ctx(&persistence, &cache_dir);
+
+        // Read ONLY the coarsest resolution. This must build 1h -> 6h -> 1d.
+        let daily = daily_max(&ctx, config).await.unwrap();
+        assert_eq!(daily.len(), 3, "3 daily buckets");
+
+        // Every level's res dir must exist with a manifest + hot file.
+        let manifests = walk_find(&cache_dir, &|n| n == "manifest.json");
+        let mut res_secs: Vec<u64> = manifests
+            .iter()
+            .filter_map(|p| {
+                p.parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_prefix("res"))
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .collect();
+        res_secs.sort_unstable();
+        assert_eq!(
+            res_secs,
+            vec![3600, 21600, 86400],
+            "cascade must materialize the 1h, 6h and 1d levels on disk"
+        );
+        let hots = walk_find(&cache_dir, &|n| n == "hot.parquet");
+        assert_eq!(hots.len(), 3, "each level recomputes its own hot window");
+
+        // The finest level folds raw partials (source_digest == None); each
+        // coarser level records the finer manifest digest it folded.
+        for m_path in &manifests {
+            let res_dir = m_path.parent().unwrap();
+            let secs: u64 = res_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("res"))
+                .and_then(|s| s.parse().ok())
+                .unwrap();
+            let m = crate::rollup_cache::read_sealed_manifest(res_dir)
+                .unwrap()
+                .unwrap();
+            if secs == 3600 {
+                assert!(
+                    m.source_digest.is_none(),
+                    "finest level folds shared partials, not a finer level"
+                );
+                assert!(
+                    !m.covered.is_empty(),
+                    "finest level tracks its partial member set"
+                );
+            } else {
+                assert!(
+                    m.source_digest.is_some(),
+                    "coarse level {secs}s must record the finer digest it folded"
+                );
+            }
+        }
     }
 
     /// Phase 3: non-nesting resolution sets are rejected so cascaded rollups can

@@ -1,6 +1,6 @@
 # Bounded-Memory Temporal Reduce: Sealed Runs + Hot Window
 
-> **Status:** Phases 1 & 2 **implemented** (Phase 3 proposed). Motivated by the
+> **Status:** Phases 1, 2 & 3 **implemented**. Motivated by the
 > watershop **selfmon** deployment, which
 > was run deliberately as a long-lived stressor and exposed unbounded memory
 > growth in the `temporal-reduce` read path. This note proposes reorganizing the
@@ -287,7 +287,7 @@ forever.
 |---|---|---|
 | 1 | Hot-window GROUP BY + order-preserving concat read (cache-compatible) | **Implemented** |
 | 2 | Watermark + sealed immutable runs + bounded hot window; ListingTable read | **Implemented** |
-| 3 | Hierarchical rollup (cheaper coarse history; retains all data) | **Step 1 implemented** (partials-in-runs + read-time reconstruction); step 2 (coarser-from-finer fold) proposed |
+| 3 | Hierarchical rollup (cheaper coarse history; retains all data) | **Implemented** (step 1: partials-in-runs + read-time reconstruction; step 2: coarser-from-finer cascade fold) |
 
 ### Phase 1 implementation notes
 
@@ -418,10 +418,58 @@ fold itself (step 2) is a follow-up.
   longer calls it. `merge_partials_sql` + `reconstruct_sql` compose to exactly
   `merge_sql`.
 
-**Remaining (step 2).** Coarser resolutions still fold the shared finest
-partials each build (bounded by Phase 2, but O(finest) I/O per level). Step 2
-will build `res=600` from sealed `res=60` runs, `res=3600` from `res=600`, etc.,
-turning each level into a bounded fold over the level below. The runs are now in
-the foldable form that makes that correct; the remaining work is the
-cross-resolution build ordering/dependency (today resolutions build
-independently).
+**Remaining (step 2): implemented.** See the notes below.
+
+### Phase 3 implementation notes (step 2: coarser-from-finer cascade fold)
+
+Step 2 turns each coarser resolution into a **bounded fold over the level below**
+instead of re-scanning the shared finest partials every build. Because the stored
+partials are associative (step 1) and the configured resolutions nest (each
+coarser interval is an integer multiple of the next-finer one, enforced by
+`parse_nesting_resolutions`), folding a coarse bucket from the next-finer runs +
+hot yields exactly the same result as folding it from the finest partials — the
+output is unchanged; only the I/O per level changes.
+
+- **Cascade build.** `try_rollup_table_provider` builds the chain
+  finest → this file's resolution. The finest level folds the shared partials
+  (`build_level_from_partials`, input bucket column `time_bucket`); each coarser
+  level folds the next-finer level's `ListingTable` (runs + hot) via
+  `build_level_from_finer` (input bucket column = the timestamp column). The
+  finer provider is registered as a temporary `__rollup_finer_*` table, folded,
+  then deregistered. A consumer of any resolution transparently materializes the
+  finer levels it depends on, and each level reuses its cache when unchanged, so
+  the cascade is cheap after the first cold build.
+- **Shared seal + hot.** Both level builders call `seal_and_recompute`, which
+  computes the watermark from a bounded `MAX` over the input, seals
+  `[sealed_hi, watermark)` into a new immutable run (skipping empty spans), and
+  recomputes the open hot window `[sealed_hi, ∞)`. All fold SQL is
+  `merge_partials_sql`, generalized in step 2 to take the input bucket column so
+  it can re-bin either `time_bucket` (finest) or the finer level's timestamp.
+- **Bounded advance.** A coarse level's watermark aligns down at least as far as
+  the finer level's (coarser interval, same `allowed_lateness`), so
+  `coarse_sealed_hi ≤ finer_sealed_hi`: the finer history below a coarse sealed
+  bucket is already immutable, so the coarse sealed runs stay valid and the level
+  can **advance** in place (seal newly-frozen buckets, recompute hot) rather than
+  rebuild. The hot recompute reads only `< coarse_interval + allowed_lateness` of
+  finer input, so per-build cost stays bounded.
+- **Freshness keys per level.** The finest level keys freshness on its partial
+  member set (`covered`) and hard-fails on a backfill older than its watermark
+  (Phase 2). A coarse level instead records the finer manifest digest it folded
+  (`source_digest`) and whether the finer level was rebuilt (`finer_rebuilt`,
+  threaded down the chain): it **reuses** when the finer level was reused and its
+  digest is unchanged, **advances** when the finer level only appended, and
+  **rebuilds** (wipe + fold from empty) when the finer level was rebuilt (e.g. a
+  member removal) or no compatible manifest exists. No beyond-window hard-fail is
+  needed at coarse levels — the finest level already enforces the append-only
+  contract for the whole chain.
+- **Manifest format.** `SEALED_FORMAT` was bumped to `"partials-v2"` and
+  `SealedManifest` gained `source_digest: Option<String>`. A format mismatch
+  wipes and rebuilds the level (single cold rebuild, no re-ingest), as with
+  `allowed_lateness` and the step-1 migration.
+- **Verification.** `test_rollup_cascading_resolutions_share_finest_partials`
+  remains the correctness oracle (cascade output == single-pass for Avg/Min/Max
+  across `1h`/`6h`/`1d`, with the raw source scanned only once).
+  `test_rollup_cascade_materializes_finer_levels_on_disk` asserts that requesting
+  only the coarsest resolution creates every intermediate `res{secs}` dir with
+  its own manifest + hot file and records `source_digest` on the coarse levels
+  (and `None` on the finest).
