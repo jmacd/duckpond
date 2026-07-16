@@ -28,7 +28,9 @@ mod wd;
 // Public exports - Core filesystem API
 pub use context::{ExportHint, FactoryContext, PondMetadata, ProviderContext};
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
-pub use file::{AsyncReadSeek, File, FileMetadataWriter, Handle as FileHandle, QueryableFile};
+pub use file::{
+    AsyncReadSeek, File, FileMetadataWriter, Handle as FileHandle, QueryableFile, SeriesReadBounds,
+};
 pub use fs::FS;
 pub use node::{
     FileID, INDEX_NODE_UUID, LOG_NODE_UUID, Node, NodeID, NodePath, NodeType, PartID, ROOT_UUID,

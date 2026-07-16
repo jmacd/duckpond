@@ -20,6 +20,7 @@ use crate::layouts::{self, LayoutContext};
 use crate::markdown::{preprocess_shortcodes, render_markdown};
 use crate::routes::{self, ContentContext, ContentPage};
 use crate::shortcodes::{self, ExportContext, Health, PondStatus, ShortcodeContext, classify};
+use crate::status_summary;
 use log::{debug, info, warn};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::Deserialize;
@@ -652,7 +653,7 @@ async fn run_status_grid_queries(
     // memory stays bounded regardless of retained history. A malformed
     // configured duration is a hard error.
     let hot_window_us = grid_cfg.hot_window_secs()? * 1_000_000;
-    let event_time_lo = Some(now_us - hot_window_us);
+    let window_bounds = tinyfs::SeriesReadBounds::from_event_time_lo(now_us - hot_window_us);
 
     let mut statuses: Vec<PondStatus> = Vec::new();
 
@@ -665,55 +666,48 @@ async fn run_status_grid_queries(
 
         let path_str = np.path().to_string_lossy().to_string();
         let file_url = format!("{}://{}", scheme, path_str);
+        // Per-file unique table name so concurrent registrations don't collide
+        // and stale registrations don't leak through.
+        let table_name = status_table_name(&unit);
 
-        let table_provider = match journal_matcher
-            .provider()
-            .create_table_provider_bounded(&file_url, ctx, event_time_lo)
-            .await
-        {
-            Ok(tp) => tp,
-            Err(e) => {
-                warn!(
-                    "status_grid: create_table_provider('{}') failed: {}",
-                    file_url, e
-                );
-                continue;
-            }
-        };
-
-        // Use a per-file unique table name so concurrent registrations
-        // don't collide and stale registrations don't leak through.
-        let table_name = format!(
-            "status_grid_{}",
-            unit.replace(
-                [
-                    '@', '.', '-', ':', '/', '\\', ' ', '+', '=', ',', ';', '(', ')',
-                ],
-                "_"
+        // With a filesystem cache available, maintain a durable per-unit summary
+        // via a version watermark (bounded per-build scan, correct for fields
+        // older than the hot window). Without a cache (e.g. memory ponds/tests),
+        // fall back to the bounded hot-window read.
+        let status_res = if let Some(cache_dir) = provider_ctx.cache_dir() {
+            maintain_unit_summary(
+                &journal_matcher,
+                ctx,
+                root,
+                cache_dir,
+                &file_url,
+                &path_str,
+                &unit,
+                &table_name,
+                tail_lines,
+                now_us,
+                hot_window_us,
             )
-        );
-        if let Err(e) = ctx.register_table(
-            datafusion::sql::TableReference::bare(table_name.as_str()),
-            table_provider,
-        ) {
-            warn!(
-                "status_grid: register_table('{}') failed: {}",
-                table_name, e
-            );
-            continue;
-        }
-
-        let mut status = match query_pond_status(ctx, &table_name, &unit, tail_lines).await {
+            .await
+        } else {
+            render_unit_windowed(
+                &journal_matcher,
+                ctx,
+                &file_url,
+                &unit,
+                &table_name,
+                window_bounds,
+                tail_lines,
+            )
+            .await
+        };
+        let mut status = match status_res {
             Ok(s) => s,
             Err(e) => {
-                warn!("status_grid: query for '{}' failed: {}", unit, e);
-                let _ = ctx
-                    .deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()));
+                warn!("status_grid: unit '{}' failed: {}", unit, e);
                 continue;
             }
         };
-
-        let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()));
 
         // Enrich with perf-series data when configured.  Failures are
         // logged at warn level and leave the perf fields as None,
@@ -740,6 +734,151 @@ async fn run_status_grid_queries(
 
     statuses.sort_by(|a, b| a.unit.cmp(&b.unit));
     Ok(Some(statuses))
+}
+
+/// Per-unit journal table name, sanitized to a valid SQL identifier.
+fn status_table_name(unit: &str) -> String {
+    format!(
+        "status_grid_{}",
+        unit.replace(
+            [
+                '@', '.', '-', ':', '/', '\\', ' ', '+', '=', ',', ';', '(', ')',
+            ],
+            "_"
+        )
+    )
+}
+
+/// Create a bounded journal `TableProvider` for `file_url` and register it under
+/// `table_name` in `ctx`.
+async fn register_bounded_journal(
+    journal_matcher: &provider::UrlPatternMatcher,
+    ctx: &datafusion::prelude::SessionContext,
+    file_url: &str,
+    table_name: &str,
+    bounds: tinyfs::SeriesReadBounds,
+) -> Result<(), tinyfs::Error> {
+    let tp = journal_matcher
+        .provider()
+        .create_table_provider_bounded(file_url, ctx, bounds)
+        .await
+        .map_err(|e| {
+            tinyfs::Error::Other(format!("create_table_provider('{}'): {}", file_url, e))
+        })?;
+    ctx.register_table(datafusion::sql::TableReference::bare(table_name), tp)
+        .map_err(|e| tinyfs::Error::Other(format!("register_table('{}'): {}", table_name, e)))?;
+    Ok(())
+}
+
+/// Fallback render path (no filesystem cache): read the bounded hot window and
+/// build the card directly from that scan. Correct for fields within the
+/// window; used for memory ponds / tests where no durable summary is possible.
+async fn render_unit_windowed(
+    journal_matcher: &provider::UrlPatternMatcher,
+    ctx: &datafusion::prelude::SessionContext,
+    file_url: &str,
+    unit: &str,
+    table_name: &str,
+    window_bounds: tinyfs::SeriesReadBounds,
+    tail_lines: usize,
+) -> Result<PondStatus, tinyfs::Error> {
+    register_bounded_journal(journal_matcher, ctx, file_url, table_name, window_bounds).await?;
+    let status = query_pond_status(ctx, table_name, unit, tail_lines).await;
+    let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(table_name));
+    status
+}
+
+/// Maintain the durable per-unit summary via a version watermark, then render
+/// the card from it.
+///
+/// - First run (`processed_version == 0`): a one-time backfill bounded by the
+///   hot window keeps memory bounded on the initial seed.
+/// - Steady state: fold only versions strictly above the watermark (one or a
+///   few per build), so the per-build scan is bounded while the summary keeps
+///   fields older than the window (a unit silent since an error keeps its card).
+#[allow(clippy::too_many_arguments)]
+async fn maintain_unit_summary(
+    journal_matcher: &provider::UrlPatternMatcher,
+    ctx: &datafusion::prelude::SessionContext,
+    root: &tinyfs::WD,
+    cache_dir: &std::path::Path,
+    file_url: &str,
+    path_str: &str,
+    unit: &str,
+    table_name: &str,
+    tail_lines: usize,
+    now_us: i64,
+    hot_window_us: i64,
+) -> Result<PondStatus, tinyfs::Error> {
+    let versions = root
+        .list_file_versions(path_str)
+        .await
+        .map_err(|e| tinyfs::Error::Other(format!("list_file_versions('{}'): {}", path_str, e)))?;
+    let max_version = versions.iter().map(|v| v.version).max().unwrap_or(0);
+
+    let prior = match status_summary::load(cache_dir, unit) {
+        Ok(Some(s)) => s,
+        Ok(None) => status_summary::UnitSummary::default(),
+        Err(e) => {
+            // Corrupt sidecar: re-seed rather than break the dashboard.
+            warn!("status_grid: {} (re-seeding from backfill)", e);
+            status_summary::UnitSummary::default()
+        }
+    };
+
+    if max_version <= prior.processed_version {
+        // No new versions since the last fold -- render from the durable summary.
+        return Ok(summary_to_pond_status(&prior, unit));
+    }
+
+    let bounds = if prior.processed_version == 0 {
+        // One-time backfill: bound the seed read by the hot window so the initial
+        // O(N) build doesn't materialize all of history at once.
+        tinyfs::SeriesReadBounds::from_event_time_lo(now_us - hot_window_us)
+    } else {
+        // Steady state: only versions the summary hasn't seen yet.
+        tinyfs::SeriesReadBounds::from_version_gt(prior.processed_version as i64)
+    };
+
+    register_bounded_journal(journal_matcher, ctx, file_url, table_name, bounds).await?;
+    let fold = fold_unit_versions(ctx, table_name, tail_lines).await;
+    let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(table_name));
+    let fold = fold?;
+
+    let merged = status_summary::merge(prior, fold, max_version, tail_lines);
+    if let Err(e) = status_summary::save(cache_dir, unit, &merged) {
+        warn!("status_grid: save summary for '{}' failed: {}", unit, e);
+    }
+    Ok(summary_to_pond_status(&merged, unit))
+}
+
+/// Build a `PondStatus` (journal-derived fields only; perf/health filled by the
+/// caller) from a durable summary.
+fn summary_to_pond_status(summary: &status_summary::UnitSummary, unit: &str) -> PondStatus {
+    let peak_rss_bytes = summary
+        .last_peak_msg
+        .as_deref()
+        .and_then(parse_peak_memory_bytes);
+    // Summary tail is newest-first; the card renders oldest -> newest.
+    let mut tail = summary.tail.clone();
+    tail.sort_by_key(|a| a.ts_us);
+    let tail_messages = tail.into_iter().map(|t| t.msg).collect();
+
+    PondStatus {
+        unit: unit.to_string(),
+        last_seen_us: summary.last_seen_us,
+        last_ok_us: summary.last_ok_us,
+        last_ok_msg: summary.last_ok_msg.clone(),
+        last_err_us: summary.last_err_us,
+        last_err_msg: summary.last_err_msg.clone(),
+        peak_rss_bytes,
+        tail_messages,
+        timer_active: None,
+        last_run_seconds_ago: None,
+        timer_interval_s: None,
+        run_wall_s: None,
+        health: Health::Unknown,
+    }
 }
 
 /// Extract the bare pond name (the `{pond}` placeholder substitution)
@@ -1016,6 +1155,119 @@ async fn query_pond_status(
         timer_interval_s: None,
         run_wall_s: None,
         health: Health::Unknown,
+    })
+}
+
+/// Fold the currently-registered journal table (already bounded to the versions
+/// above the watermark, or the backfill window) into a
+/// [`status_summary::FoldResult`].
+///
+/// Mirrors [`query_pond_status`] but returns the peak timestamp and per-line
+/// tail timestamps so successive folds can be merged across build boundaries.
+async fn fold_unit_versions(
+    ctx: &datafusion::prelude::SessionContext,
+    table_name: &str,
+    tail_lines: usize,
+) -> Result<status_summary::FoldResult, tinyfs::Error> {
+    use datafusion::arrow::array::{Array, Int64Array, StringArray};
+
+    let to_err = |e: datafusion::error::DataFusionError, q: &str| -> tinyfs::Error {
+        tinyfs::Error::Other(format!("status_grid fold sql ({}): {}", q, e))
+    };
+
+    // Same pairing logic as query_pond_status, plus last_peak_us so folds merge
+    // by timestamp.
+    let status_sql = format!(
+        "SELECT \
+            MAX(ts) AS last_seen, \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN ts END) AS last_ok_us, \
+            first_value(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN ts END DESC NULLS LAST) AS last_ok_msg, \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN ts END) AS last_err_us, \
+            first_value(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN ts END DESC NULLS LAST) AS last_err_msg, \
+            MAX(CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN ts END) AS last_peak_us, \
+            first_value(CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN ts END DESC NULLS LAST) AS last_peak_msg \
+         FROM (SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {}) t",
+        table_name
+    );
+
+    let df = ctx
+        .sql(&status_sql)
+        .await
+        .map_err(|e| to_err(e, "status"))?;
+    let batches = df.collect().await.map_err(|e| to_err(e, "status"))?;
+
+    let get_i64 = |col: usize| -> Option<i64> {
+        batches.iter().find_map(|b| {
+            if b.num_rows() == 0 {
+                return None;
+            }
+            let arr = b.column(col).as_any().downcast_ref::<Int64Array>()?;
+            if arr.is_null(0) {
+                None
+            } else {
+                Some(arr.value(0))
+            }
+        })
+    };
+    let get_str = |col: usize| -> Option<String> {
+        batches.iter().find_map(|b| {
+            if b.num_rows() == 0 {
+                return None;
+            }
+            let arr = b.column(col).as_any().downcast_ref::<StringArray>()?;
+            if arr.is_null(0) {
+                None
+            } else {
+                Some(arr.value(0).to_string())
+            }
+        })
+    };
+
+    // Tail query: newest N (ts, MESSAGE), newest-first, excluding the verbose
+    // memory-profile diagnostic lines (see query_pond_status).
+    let tail_sql = format!(
+        "SELECT ts, MESSAGE FROM (\
+            SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {} \
+            WHERE \"MESSAGE\" NOT LIKE '=== Large Allocations%' \
+              AND \"MESSAGE\" NOT LIKE '=== Total:%large allocations%' \
+              AND \"MESSAGE\" NOT LIKE '  #%MB @ 0x%' \
+            ORDER BY ts DESC LIMIT {}\
+         ) t ORDER BY ts DESC",
+        table_name, tail_lines
+    );
+    let df = ctx.sql(&tail_sql).await.map_err(|e| to_err(e, "tail"))?;
+    let tail_batches = df.collect().await.map_err(|e| to_err(e, "tail"))?;
+    let mut tail: Vec<status_summary::TailLine> = Vec::new();
+    for b in &tail_batches {
+        if b.num_columns() < 2 {
+            continue;
+        }
+        let ts_arr = b.column(0).as_any().downcast_ref::<Int64Array>();
+        let msg_arr = b.column(1).as_any().downcast_ref::<StringArray>();
+        if let (Some(ts_arr), Some(msg_arr)) = (ts_arr, msg_arr) {
+            for i in 0..b.num_rows() {
+                if !ts_arr.is_null(i) && !msg_arr.is_null(i) {
+                    tail.push(status_summary::TailLine {
+                        ts_us: ts_arr.value(i),
+                        msg: msg_arr.value(i).to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(status_summary::FoldResult {
+        last_seen_us: get_i64(0),
+        last_ok_us: get_i64(1),
+        last_ok_msg: get_str(2),
+        last_err_us: get_i64(3),
+        last_err_msg: get_str(4),
+        last_peak_us: get_i64(5),
+        last_peak_msg: get_str(6),
+        tail,
     })
 }
 
@@ -2177,6 +2429,86 @@ mod tests {
         assert_eq!(
             extract_pond_name("user-pond@water-staging"),
             Some("water-staging")
+        );
+    }
+
+    /// End-to-end incremental fold across two "builds" (design §6 acceptance):
+    /// a unit that erred in build #1 and then only emits unrelated heartbeat
+    /// lines must keep its `last_err_msg` in build #2, even though the steady-
+    /// state version window no longer contains the error line.
+    #[tokio::test]
+    async fn incremental_fold_keeps_silent_unit_error_card() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let unit = "user-pond@water-staging.service";
+        let tail_lines = 5;
+
+        // ---- Build #1: backfill window contains the ok + err lines. ----
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_journal_table(
+            &ctx,
+            "jt_b1",
+            &[
+                (100, "Run summary A outcome=ok"),
+                (200, "Run summary B outcome=err"),
+                (250, "Peak memory usage: 12.0 MB"),
+            ],
+        )
+        .await;
+        let fold1 = fold_unit_versions(&ctx, "jt_b1", tail_lines).await.unwrap();
+        let prior = status_summary::load(cache_dir, unit)
+            .unwrap()
+            .unwrap_or_default();
+        // First fold seeds from an empty prior; watermark advances to 1.
+        let merged1 = status_summary::merge(prior, fold1, 1, tail_lines);
+        status_summary::save(cache_dir, unit, &merged1).unwrap();
+        assert_eq!(merged1.last_err_us, Some(200));
+        assert_eq!(
+            merged1.last_err_msg.as_deref(),
+            Some("Run summary B outcome=err")
+        );
+
+        // ---- Build #2: steady-state version window has ONLY newer heartbeat
+        // lines (the error scrolled out of the version_gt window). ----
+        let ctx2 = datafusion::prelude::SessionContext::new();
+        register_journal_table(
+            &ctx2,
+            "jt_b2",
+            &[(400, "just a heartbeat"), (500, "another heartbeat")],
+        )
+        .await;
+        let fold2 = fold_unit_versions(&ctx2, "jt_b2", tail_lines)
+            .await
+            .unwrap();
+        let prior2 = status_summary::load(cache_dir, unit).unwrap().unwrap();
+        assert_eq!(prior2.processed_version, 1);
+        let merged2 = status_summary::merge(prior2, fold2, 2, tail_lines);
+        status_summary::save(cache_dir, unit, &merged2).unwrap();
+
+        // The durable summary still carries the error from build #1...
+        assert_eq!(merged2.last_err_us, Some(200));
+        assert_eq!(
+            merged2.last_err_msg.as_deref(),
+            Some("Run summary B outcome=err")
+        );
+        // ...and the ok/peak fields, while last_seen advanced to the newest line.
+        assert_eq!(merged2.last_ok_us, Some(100));
+        assert_eq!(merged2.last_peak_us, Some(250));
+        assert_eq!(merged2.last_seen_us, Some(500));
+        assert_eq!(merged2.processed_version, 2);
+
+        // Rendered card reflects the preserved error.
+        let status = summary_to_pond_status(&merged2, unit);
+        assert_eq!(status.last_err_us, Some(200));
+        assert_eq!(
+            status.last_err_msg.as_deref(),
+            Some("Run summary B outcome=err")
+        );
+        assert_eq!(status.peak_rss_bytes, Some((12.0 * 1024.0 * 1024.0) as u64));
+        // Tail merged across builds, newest-first render is oldest->newest.
+        assert_eq!(
+            status.tail_messages.last().map(String::as_str),
+            Some("another heartbeat")
         );
     }
 

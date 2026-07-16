@@ -179,14 +179,14 @@ impl Pathed<crate::file::Handle> {
         self.handle.async_reader().await
     }
 
-    /// Get async reader with an optional event-time lower bound (epoch µs) so
-    /// append-only series nodes prune versions whose recorded `max_event_time`
-    /// is below the bound. See [`crate::file::File::async_reader_bounded`].
+    /// Get async reader that may prune append-only series versions per the
+    /// supplied [`crate::file::SeriesReadBounds`].
+    /// See [`crate::file::File::async_reader_bounded`].
     pub async fn async_reader_bounded(
         &self,
-        event_time_lo: Option<i64>,
+        bounds: crate::file::SeriesReadBounds,
     ) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
-        self.handle.async_reader_bounded(event_time_lo).await
+        self.handle.async_reader_bounded(bounds).await
     }
 
     /// Get async writer for streaming file content

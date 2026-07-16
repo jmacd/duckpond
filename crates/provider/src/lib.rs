@@ -361,13 +361,14 @@ pub trait FileProvider {
     /// Open a URL with optional decompression
     async fn open_url(&self, url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>>;
 
-    /// Open a URL with optional decompression, passing an event-time lower
-    /// bound (epoch µs) so append-only series nodes prune versions below it.
-    /// The default ignores the bound and delegates to [`FileProvider::open_url`].
+    /// Open a URL with optional decompression, passing [`tinyfs::SeriesReadBounds`]
+    /// so append-only series nodes prune versions below an event-time bound
+    /// and/or at-or-below a version watermark. The default ignores the bounds
+    /// and delegates to [`FileProvider::open_url`].
     async fn open_url_bounded(
         &self,
         url: &Url,
-        _event_time_lo: Option<i64>,
+        _bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
         self.open_url(url).await
     }
@@ -377,19 +378,20 @@ pub trait FileProvider {
 impl FileProvider for tinyfs::FS {
     /// Open a file for reading with optional decompression (Layer 1)
     async fn open_url(&self, url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-        self.open_url_bounded(url, None).await
+        self.open_url_bounded(url, tinyfs::SeriesReadBounds::NONE)
+            .await
     }
 
     async fn open_url_bounded(
         &self,
         url: &Url,
-        event_time_lo: Option<i64>,
+        bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
         // Get reader from TinyFS
         let reader = self
             .root()
             .await?
-            .async_reader_path_bounded(url.path(), event_time_lo)
+            .async_reader_path_bounded(url.path(), bounds)
             .await?;
 
         // Cast AsyncReadSeek to AsyncRead before decompression

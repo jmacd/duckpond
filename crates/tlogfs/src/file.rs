@@ -101,7 +101,7 @@ impl File for OpLogFile {
 
     async fn async_reader_bounded(
         &self,
-        event_time_lo: Option<i64>,
+        bounds: tinyfs::SeriesReadBounds,
     ) -> tinyfs::Result<Pin<Box<dyn AsyncReadSeek>>> {
         // Check transaction state
         let state = self.transaction_state.read().await;
@@ -112,12 +112,12 @@ impl File for OpLogFile {
         }
         drop(state);
 
-        // For FilePhysicalSeries this prunes versions whose recorded
-        // max_event_time is below the bound before concatenation; for other
-        // node types the bound is ignored by the persistence layer.
+        // For FilePhysicalSeries this prunes versions per `bounds` (event-time
+        // lower bound and/or version watermark) before concatenation; for other
+        // node types the bounds are ignored by the persistence layer.
         let reader = self
             .state
-            .async_file_reader_bounded(self.id, event_time_lo)
+            .async_file_reader_bounded(self.id, bounds)
             .await
             .map_other()?;
 
