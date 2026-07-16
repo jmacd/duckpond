@@ -4006,8 +4006,14 @@ impl InnerState {
                     record.content.as_ref().map(|c| c.len() as i64).unwrap_or(0)
                 };
 
-                // Extract extended metadata for file:series
-                let extended_metadata = if record.file_type.is_series_file() {
+                // Extract extended metadata for series files. Both TablePhysical
+                // series (is_series_file) and FilePhysicalSeries (e.g. jsonlogs
+                // journals) record per-version min/max_event_time via
+                // new_file_series; expose it so bounded consumers (the cached
+                // ListingTable prune) can skip versions outside the hot window.
+                let extended_metadata = if record.file_type.is_series_file()
+                    || record.file_type == EntryType::FilePhysicalSeries
+                {
                     let mut metadata = HashMap::new();
                     if let (Some(min_time), Some(max_time)) =
                         (record.min_event_time, record.max_event_time)
