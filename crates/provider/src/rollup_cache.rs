@@ -602,9 +602,8 @@ pub fn sealed_manifest_digest(manifest: &SealedManifest) -> Result<String> {
 /// digest for the whole resolution.
 pub async fn write_sealed_manifest(res_dir: &Path, manifest: &SealedManifest) -> Result<String> {
     tokio::fs::create_dir_all(res_dir).await?;
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| {
-        crate::error::Error::Arrow(format!("serialize sealed manifest: {}", e))
-    })?;
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| crate::error::Error::Arrow(format!("serialize sealed manifest: {}", e)))?;
     let digest = blake3::hash(&bytes).to_hex().to_string();
     let path = sealed_manifest_path(res_dir);
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));

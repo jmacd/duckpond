@@ -1260,8 +1260,10 @@ impl TemporalReduceSqlFile {
         let rows_w = rows.clone();
         let mapped = stream.map(move |r| {
             r.inspect(|batch| {
-                let _ = rows_w
-                    .fetch_add(batch.num_rows() as u64, std::sync::atomic::Ordering::Relaxed);
+                let _ = rows_w.fetch_add(
+                    batch.num_rows() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             })
             .map_err(|e| crate::error::Error::Arrow(e.to_string()))
         });
@@ -4577,10 +4579,7 @@ mod tests {
         let file_arc = file_handle.get_file().await;
         let file_guard = file_arc.lock().await;
         let queryable = file_guard.as_queryable().expect("queryable");
-        let table_provider = match queryable
-            .as_table_provider(file_id, provider_context)
-            .await
-        {
+        let table_provider = match queryable.as_table_provider(file_id, provider_context).await {
             Ok(p) => p,
             Err(e) => return Err(e.to_string()),
         };
@@ -4633,10 +4632,7 @@ mod tests {
         let file_arc = file_handle.get_file().await;
         let file_guard = file_arc.lock().await;
         let queryable = file_guard.as_queryable().expect("queryable");
-        let table_provider = match queryable
-            .as_table_provider(file_id, provider_context)
-            .await
-        {
+        let table_provider = match queryable.as_table_provider(file_id, provider_context).await {
             Ok(p) => p,
             Err(e) => return Err(e.to_string()),
         };
@@ -4739,7 +4735,9 @@ mod tests {
             let _ = queryable.as_table_provider(file_id, &pctx).await;
         }
 
-        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        let runs = walk_find(&cache_dir, &|n| {
+            n.starts_with("run-") && n.ends_with(".parquet")
+        });
         assert!(!runs.is_empty(), "expected at least one sealed run file");
 
         // Inspect the on-disk schema of a sealed run file.
@@ -4809,15 +4807,20 @@ mod tests {
         // Append days 1..=4 as successive newer versions, rebuilding each time.
         for day in 1..=4u32 {
             append_day_series(&fs, "/ingest/weather.csv", day).await;
-            let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
-                .await
-                .expect("append within lateness window must succeed");
+            let rows = daily_max(
+                &reduce_ctx(&persistence, &cache_dir),
+                lateness_config(Some("1d")),
+            )
+            .await
+            .expect("append within lateness window must succeed");
             assert_eq!(rows.len(), day as usize, "day {day}: one bucket per day");
         }
 
         // The watermark (data_hi - 1d) has advanced past the earliest days, so
         // at least one sealed run file must exist on disk.
-        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        let runs = walk_find(&cache_dir, &|n| {
+            n.starts_with("run-") && n.ends_with(".parquet")
+        });
         assert!(
             !runs.is_empty(),
             "expected sealed run files after history advanced, found none under {}",
@@ -4830,9 +4833,12 @@ mod tests {
         assert_eq!(manifests.len(), 1, "one manifest for the single resolution");
 
         // Final output still spans all four days with correct maxima.
-        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
-            .await
-            .unwrap();
+        let rows = daily_max(
+            &reduce_ctx(&persistence, &cache_dir),
+            lateness_config(Some("1d")),
+        )
+        .await
+        .unwrap();
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert_eq!(rows.len(), 4);
         for (i, day) in (1..=4u32).enumerate() {
@@ -4864,15 +4870,21 @@ mod tests {
         // 10-day lateness window: the watermark is far below day 1, so nothing
         // is sealed and the backfill is within the hot window.
         append_day_series(&fs, "/ingest/weather.csv", 5).await;
-        let r1 = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("10d")))
-            .await
-            .unwrap();
+        let r1 = daily_max(
+            &reduce_ctx(&persistence, &cache_dir),
+            lateness_config(Some("10d")),
+        )
+        .await
+        .unwrap();
         assert_eq!(r1.len(), 1);
 
         append_day_series(&fs, "/ingest/weather.csv", 1).await;
-        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("10d")))
-            .await
-            .expect("within-window backfill must succeed");
+        let rows = daily_max(
+            &reduce_ctx(&persistence, &cache_dir),
+            lateness_config(Some("10d")),
+        )
+        .await
+        .expect("within-window backfill must succeed");
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert_eq!(rows.len(), 2, "day1 + day5, got {:?}", rows);
         assert!(
@@ -4901,20 +4913,25 @@ mod tests {
         // Build days 1..=3 under a 1-day window (seals early runs).
         for day in 1..=3u32 {
             append_day_series(&fs, "/ingest/weather.csv", day).await;
-            _ = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
-                .await
-                .unwrap();
+            _ = daily_max(
+                &reduce_ctx(&persistence, &cache_dir),
+                lateness_config(Some("1d")),
+            )
+            .await
+            .unwrap();
         }
         let manifests = walk_find(&cache_dir, &|n| n == "manifest.json");
         assert_eq!(manifests.len(), 1);
-        let m: Value =
-            serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
+        let m: Value = serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
         assert_eq!(m["allowed_lateness_secs"], 86400, "1d window recorded");
 
         // Rebuild the SAME data with a 3-day window: mismatch -> reset + rebuild.
-        let rows = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("3d")))
-            .await
-            .expect("lateness change resets and rebuilds cleanly");
+        let rows = daily_max(
+            &reduce_ctx(&persistence, &cache_dir),
+            lateness_config(Some("3d")),
+        )
+        .await
+        .expect("lateness change resets and rebuilds cleanly");
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert_eq!(rows.len(), 3, "all three days after reset, got {:?}", rows);
         for (i, day) in (1..=3u32).enumerate() {
@@ -4924,8 +4941,7 @@ mod tests {
                 rows
             );
         }
-        let m2: Value =
-            serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
+        let m2: Value = serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
         assert_eq!(
             m2["allowed_lateness_secs"], 259200,
             "manifest reflects the new 3d window after reset"
@@ -4955,11 +4971,16 @@ mod tests {
         // runs plus a hot file coexist.
         for day in 1..=6u32 {
             append_day_series(&fs, "/ingest/weather.csv", day).await;
-            _ = daily_max(&reduce_ctx(&persistence, &cache_dir), lateness_config(Some("1d")))
-                .await
-                .unwrap();
+            _ = daily_max(
+                &reduce_ctx(&persistence, &cache_dir),
+                lateness_config(Some("1d")),
+            )
+            .await
+            .unwrap();
         }
-        let runs = walk_find(&cache_dir, &|n| n.starts_with("run-") && n.ends_with(".parquet"));
+        let runs = walk_find(&cache_dir, &|n| {
+            n.starts_with("run-") && n.ends_with(".parquet")
+        });
         assert!(
             runs.len() >= 2,
             "test needs multiple sealed runs to exercise the merge, got {}",
@@ -4969,7 +4990,8 @@ mod tests {
         // Acquire the reduced table provider (built during the last rollup).
         let provider_context = reduce_ctx(&persistence, &cache_dir);
         let context = test_context(&provider_context, FileID::root());
-        let temporal_dir = TemporalReduceDirectory::new(lateness_config(Some("1d")), context).unwrap();
+        let temporal_dir =
+            TemporalReduceDirectory::new(lateness_config(Some("1d")), context).unwrap();
         let temporal_handle = temporal_dir.create_handle();
         let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
         let NodeType::Directory(weather_dir) = &weather_node.node_type else {
