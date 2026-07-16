@@ -16,6 +16,70 @@ pub trait AsyncReadSeek: AsyncRead + AsyncSeek + Send + Unpin {}
 /// Blanket implementation for types that implement both AsyncRead and AsyncSeek
 impl<T: AsyncRead + AsyncSeek + Send + Unpin> AsyncReadSeek for T {}
 
+/// Optional bounds applied when reading an append-only *series* file, used to
+/// keep per-read memory bounded regardless of retained history. Both bounds are
+/// combined with AND; a `None` field imposes no constraint. Non-series backends
+/// (and files without per-version metadata) ignore these bounds. The all-`None`
+/// value ([`SeriesReadBounds::NONE`]) reads the full series, unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeriesReadBounds {
+    /// Retain only versions whose recorded `max_event_time` is at or above this
+    /// value (epoch microseconds). Versions lacking a recorded bound are always
+    /// retained (a missing bound must never drop data).
+    pub event_time_lo: Option<i64>,
+    /// Retain only versions whose version number is strictly greater than this
+    /// watermark. Used to fold only journal versions not yet seen by a durable
+    /// summary.
+    pub version_gt: Option<i64>,
+}
+
+impl SeriesReadBounds {
+    /// No bounds: read the full series (equivalent to the unbounded reader).
+    pub const NONE: Self = Self {
+        event_time_lo: None,
+        version_gt: None,
+    };
+
+    /// Bound by an event-time lower bound only (epoch microseconds).
+    #[must_use]
+    pub fn from_event_time_lo(event_time_lo: i64) -> Self {
+        Self {
+            event_time_lo: Some(event_time_lo),
+            version_gt: None,
+        }
+    }
+
+    /// Bound by an exclusive version watermark only.
+    #[must_use]
+    pub fn from_version_gt(version_gt: i64) -> Self {
+        Self {
+            event_time_lo: None,
+            version_gt: Some(version_gt),
+        }
+    }
+
+    /// Decide whether a series version is retained by these bounds. Both bounds
+    /// combine with AND (a `None` field imposes no constraint):
+    ///
+    /// - `event_time_lo`: retain iff the version's recorded `max_event_time` is
+    ///   at or above the bound. A version with no recorded bound (`None`) is
+    ///   **always retained** — a missing bound must never silently drop data.
+    /// - `version_gt`: retain iff the version number is strictly greater than
+    ///   the watermark.
+    #[must_use]
+    pub fn retains(&self, max_event_time: Option<i64>, version: i64) -> bool {
+        let event_time_ok = match self.event_time_lo {
+            Some(lo) => max_event_time.is_none_or(|max_ts| max_ts >= lo),
+            None => true,
+        };
+        let version_ok = match self.version_gt {
+            Some(watermark) => version > watermark,
+            None => true,
+        };
+        event_time_ok && version_ok
+    }
+}
+
 /// Trait for writers that can accept file metadata (e.g., temporal bounds from parquet)
 /// This allows metadata extracted during serialization to be passed to the storage layer
 /// without re-reading the file
@@ -41,6 +105,18 @@ pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
 pub trait File: Metadata + Send + Sync {
     /// Create a reader stream - implementation specific
     async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>>;
+
+    /// Create a reader stream that, for append-only series files, may prune
+    /// versions per the supplied [`SeriesReadBounds`] (event-time lower bound
+    /// and/or version watermark). Backends without per-version metadata (and
+    /// non-series files) ignore the bounds. The default delegates to
+    /// [`File::async_reader`], reading the full content.
+    async fn async_reader_bounded(
+        &self,
+        _bounds: SeriesReadBounds,
+    ) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        self.async_reader().await
+    }
 
     /// Create a writer stream - implementation specific
     /// Returns a writer that can optionally accept metadata via FileMetadataWriter trait
@@ -94,6 +170,16 @@ impl Handle {
     pub async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
         let file = self.0.lock().await;
         file.async_reader().await
+    }
+
+    /// Get an async reader that may prune series versions per `bounds`
+    /// - delegated to implementation (see [`File::async_reader_bounded`]).
+    pub async fn async_reader_bounded(
+        &self,
+        bounds: SeriesReadBounds,
+    ) -> error::Result<Pin<Box<dyn AsyncReadSeek>>> {
+        let file = self.0.lock().await;
+        file.async_reader_bounded(bounds).await
     }
 
     /// Get an async writer - delegated to implementation  

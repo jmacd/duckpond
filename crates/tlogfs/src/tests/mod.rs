@@ -3128,3 +3128,132 @@ async fn commit_no_op_returns_none() {
         "empty commit must not advance the Delta table version"
     );
 }
+
+/// Phase-4 memory-plateau guard (see docs/journal-status-bounded-memory-design.md
+/// §6 "Memory regression guard"). An append-only `FilePhysicalSeries` grows one
+/// version per tick forever. A full read materializes O(total history); an
+/// event-time-bounded read (the fix) must materialize only the versions inside
+/// the hot window, so the read size **plateaus** as history grows even though
+/// on-disk history keeps growing.
+///
+/// The test builds journals of increasing length (N versions at event times
+/// 1..=N) and, for each, reads with a fixed-width hot window pinned to the
+/// newest data (`event_time_lo = N - 1`, i.e. the two newest versions). It
+/// asserts the bounded read stays flat across N while the unbounded read grows
+/// monotonically with N.
+#[tokio::test]
+async fn series_bounded_read_memory_plateaus_as_history_grows() {
+    use tinyfs::SeriesReadBounds;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Build a fresh pond with `n` `FilePhysicalSeries` versions at event times
+    // 1..=n (each a distinct fixed-size payload so content-addressing can't
+    // dedupe them), then return (bounded_read_len, unbounded_read_len,
+    // retained_count) where the bound keeps only versions with
+    // max_event_time >= n-1 (the two newest).
+    async fn measure(n: i64) -> (usize, usize, usize) {
+        const PAYLOAD_LEN: usize = 128;
+        let path = "logs/journal.series";
+        let store_path = test_dir();
+        let mut persistence = OpLogPersistence::create_test(&store_path)
+            .await
+            .expect("create pond");
+
+        for t in 1..=n {
+            let tx = persistence.begin_test().await.expect("begin");
+            let wd = tx.root().await.expect("root");
+            if !wd.exists(std::path::Path::new("logs")).await {
+                let _ = wd.create_dir_path("logs").await.expect("mkdir");
+            }
+            // Distinct content of constant length (t in the first 8 bytes) so
+            // each append is a real new version, not a content-addressed dedupe.
+            let mut payload = vec![b'x'; PAYLOAD_LEN];
+            payload[0..8].copy_from_slice(&t.to_le_bytes());
+
+            let mut writer = wd
+                .async_writer_path_with_type(path, tinyfs::EntryType::FilePhysicalSeries)
+                .await
+                .expect("writer");
+            writer.write_all(&payload).await.expect("write");
+            // Record this version's event-time bound (min == max == t).
+            writer.set_temporal_metadata(t, t, "timestamp".to_string());
+            writer.shutdown().await.expect("shutdown");
+            tx.commit_test().await.expect("commit");
+        }
+
+        // Hot window: keep only the two newest versions (event time >= n-1).
+        let lo = n - 1;
+        let bounds = SeriesReadBounds::from_event_time_lo(lo);
+
+        let tx = persistence.begin_test().await.expect("begin read");
+        let wd = tx.root().await.expect("root");
+
+        // Sanity: exactly two versions fall inside the fixed-width window,
+        // independent of N (the plateau precondition).
+        let versions = wd.list_file_versions(path).await.expect("versions");
+        assert_eq!(versions.len() as i64, n, "one version per append");
+        let retained = versions
+            .iter()
+            .filter(|v| {
+                let max_et = v
+                    .extended_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("max_event_time"))
+                    .and_then(|s| s.parse::<i64>().ok());
+                bounds.retains(max_et, v.version as i64)
+            })
+            .count();
+
+        let mut bounded = Vec::new();
+        let _ = wd
+            .async_reader_path_bounded(path, bounds)
+            .await
+            .expect("bounded reader")
+            .read_to_end(&mut bounded)
+            .await
+            .expect("read bounded");
+
+        let mut full = Vec::new();
+        let _ = wd
+            .async_reader_path_bounded(path, SeriesReadBounds::NONE)
+            .await
+            .expect("full reader")
+            .read_to_end(&mut full)
+            .await
+            .expect("read full");
+
+        (bounded.len(), full.len(), retained)
+    }
+
+    let (b4, f4, r4) = measure(4).await;
+    let (b8, f8, r8) = measure(8).await;
+    let (b16, f16, r16) = measure(16).await;
+
+    // Fixed-width window retains a constant number of versions regardless of N.
+    assert_eq!(
+        (r4, r8, r16),
+        (2, 2, 2),
+        "hot window keeps 2 versions at every N"
+    );
+
+    // Plateau: the bounded read materializes a flat amount of data as history
+    // grows 4 -> 8 -> 16 versions.
+    assert_eq!(b4, b8, "bounded read must not grow with history (4 vs 8)");
+    assert_eq!(b8, b16, "bounded read must not grow with history (8 vs 16)");
+
+    // Control: the unbounded read grows monotonically with history, proving the
+    // journal really is getting larger (so the plateau is a real win, not an
+    // artifact of a non-growing series).
+    assert!(
+        f4 < f8,
+        "unbounded read grows with history (4 -> 8): {f4} < {f8}"
+    );
+    assert!(
+        f8 < f16,
+        "unbounded read grows with history (8 -> 16): {f8} < {f16}"
+    );
+    assert!(
+        b16 < f16,
+        "bounded read must be smaller than the full-history read at N=16: {b16} < {f16}"
+    );
+}

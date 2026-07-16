@@ -202,13 +202,27 @@ never write, so running them before maintain/checkpoint is safe.
 
 ## Known limitations and observed inefficiencies
 
-### 1. Format-cache version explosion (the big one)
+### 1. Format-cache version explosion (the big one) — **fixed**
+
+> **Status (fixed).** The bounded-read work in
+> `docs/journal-status-bounded-memory-design.md` (Phases 1–4) addressed this.
+> The series read now takes an optional `SeriesReadBounds`
+> (`event_time_lo` / `version_gt`) that prunes versions **on both paths**: the
+> `status_grid` MemTable read skips versions with `max_event_time < lo`, and the
+> cached `ListingTable` (perf-chart / `sql-derived-series`) lists only the
+> retained version Parquets. `status_grid` additionally maintains a durable
+> per-unit summary advanced by a version watermark, so a build folds only the
+> handful of versions ingested since the last build instead of all history. The
+> `series_bounded_read_memory_plateaus_as_history_grows` regression test asserts
+> the bounded read stays flat as the journal grows. The measurements below are
+> retained as the historical record of the unbounded cost.
 
 `journal-ingest` writes one new FileSeries version per tick. The
 `jsonlogs://` table provider goes through the format cache, which
-materializes **one Parquet file per source version**. After ~100 ticks
-(~100 minutes) a single 32 KB JSONL becomes 101 tiny Parquet files
-(avg ~325 bytes of payload each).
+materialized (before the fix) **one Parquet file per source version**,
+all scanned on every render. After ~100 ticks (~100 minutes) a single
+32 KB JSONL became 101 tiny Parquet files (avg ~325 bytes of payload
+each).
 
 Measured on watershop, `user-pond@water-staging.service.jsonl` (32 KB,
 v101):
@@ -219,21 +233,23 @@ v101):
 | Warm, unbounded `COUNT(*)` | 7.2 s | 124 MB | 3819 |
 | Warm, `WHERE __REALTIME_TIMESTAMP >= now()-30min` | 10.5 s | 125 MB | 85 |
 
-Adding `WHERE` is correctness-correct but does **not** help: every
-query opens all 101 versioned Parquets. DataFusion's `ListingTable`
-does not prune by `__REALTIME_TIMESTAMP` (Utf8) file-level stats, and
-even if it did, opening 101 files just to read footers is itself the
-dominant cost. `journal-ingest` already calls
+Adding `WHERE` alone did **not** help: a query opened all 101 versioned
+Parquets. DataFusion's `ListingTable` does not prune by
+`__REALTIME_TIMESTAMP` (Utf8) file-level stats, and even if it did,
+opening 101 files just to read footers is itself a dominant cost.
+`journal-ingest` already calls
 `writer.set_temporal_metadata(min_ts, max_ts, ts_col)` per version
-(`journal_ingest.rs:417`), but those bounds are not yet threaded into
-the `jsonlogs://` listing path.
+(`journal_ingest.rs:417`); the fix threads those recorded bounds into
+the read via `SeriesReadBounds`, so versions outside the hot window are
+never opened — on both the `status_grid` MemTable path and the cached
+`ListingTable` path — and the durable per-unit summary means a build no
+longer re-aggregates history at all.
 
-Consequence: every status_grid render re-pays the full cost. As the
-journal grows, per-render cost grows unboundedly.
-
-This is the same shape of cost we suspect is hurting `pond@site-staging`'s
-multi-hour sitegen runs (many small parquets in `temporal-reduce`
-output), so a fix here likely benefits both.
+Before the fix, every status_grid render re-paid the full cost and, as
+the journal grew, per-render cost grew unboundedly. This was the same
+shape of cost affecting `pond@site-staging`'s multi-hour sitegen runs
+(many small parquets in `temporal-reduce` output); the temporal-reduce
+bounded-memory work tracks that path separately.
 
 ### 2. Many tiny JSONL files
 
@@ -243,13 +259,18 @@ incremental and cheap, but the cumulative on-disk inode pressure and
 per-version Parquet cache footprint scales linearly with retained
 ticks.
 
-### 3. Status-grid re-runs full SQL each render
+### 3. Status-grid re-runs full SQL each render — **fixed**
 
-`run_status_grid_queries` (`watertown/crates/sitegen/src/factory.rs`,
-~lines 681 and 738) issues two queries per (unit, glob): a
-`MAX(...)`-style status query and a `LIMIT N ORDER BY DESC` tail
-query. With currently ~9 ponds × 2 globs = ~18 queries per sitegen
-build. Each query pays the version-explosion cost from (1).
+`run_status_grid_queries` (`watertown/crates/sitegen/src/factory.rs`)
+issues two queries per (unit, glob): a `MAX(...)`-style status query and
+a `LIMIT N ORDER BY DESC` tail query (~9 ponds × 2 globs ≈ 18 queries
+per build). These once paid the full version-explosion cost from (1).
+After the bounded-read + durable-summary work, each build folds only the
+versions ingested since the last build (bounded by the version
+watermark) and renders the card from the persisted per-unit summary, so
+the per-render cost no longer scales with total history. The pairing bug
+in the old status SQL (independent `MAX(ts)` / `MAX(MESSAGE)`) was fixed
+at the same time.
 
 ### 4. Selfmon loads the system intentionally
 

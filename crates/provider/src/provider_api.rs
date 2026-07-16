@@ -100,7 +100,23 @@ impl Provider {
     pub async fn create_table_provider(
         &self,
         url_str: &str,
+        ctx: &SessionContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        self.create_table_provider_bounded(url_str, ctx, tinyfs::SeriesReadBounds::NONE)
+            .await
+    }
+
+    /// As [`Provider::create_table_provider`], but for append-only series read
+    /// the supplied [`tinyfs::SeriesReadBounds`] prune versions (event-time
+    /// lower bound and/or version watermark) so a bounded reader never
+    /// materializes old history. The bounds apply to both the no-cache MemTable
+    /// path (`async_reader_bounded`) and the cached-`ListingTable` path (only
+    /// the retained version Parquets are listed).
+    pub async fn create_table_provider_bounded(
+        &self,
+        url_str: &str,
         _ctx: &SessionContext,
+        bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let url = Url::parse(url_str)?;
 
@@ -173,12 +189,13 @@ impl Provider {
                     format_provider.as_ref(),
                     cache_dir,
                     &provider_context.datafusion_session,
+                    bounds,
                 )
                 .await;
         }
 
         // No cache available -- fall back to MemTable
-        self.create_memtable_from_url(&url, format_provider.as_ref())
+        self.create_memtable_from_url(&url, format_provider.as_ref(), bounds)
             .await
     }
 
@@ -415,9 +432,11 @@ impl Provider {
         &self,
         url: &Url,
         format_provider: &dyn FormatProvider,
+        bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        // Open file with decompression
-        let reader = self.fs.open_url(url).await?;
+        // Open file with decompression, pruning series versions per the
+        // supplied bounds (event-time lower bound and/or version watermark).
+        let reader = self.fs.open_url_bounded(url, bounds).await?;
 
         // Stream data with format provider
         let (schema, mut stream) = format_provider.open_stream(reader, url).await?;
@@ -438,21 +457,27 @@ impl Provider {
     /// For each version of the source file, checks if a cached Parquet file
     /// exists.  Uncached versions are parsed via the format provider and
     /// streamed to cache Parquet files.  Returns a `ListingTable` over the
-    /// cache directory.
+    /// cache directory, pruned to the versions retained by `bounds` (so a
+    /// bounded series reader scans only the hot version Parquets).
     async fn create_cached_table_from_url(
         &self,
         url: &Url,
         format_provider: &dyn FormatProvider,
         cache_dir: &std::path::Path,
         ctx: &SessionContext,
+        bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let scheme = url.scheme();
-        let (node_id, _versions) = self
+        let (node_id, versions) = self
             .ensure_url_cached(url, format_provider, cache_dir)
             .await?;
 
-        // Return ListingTable over all cached version Parquet files
-        crate::format_cache::listing_table_from_cache(cache_dir, scheme, &node_id, ctx).await
+        // Return ListingTable over the cached version Parquet files retained by
+        // the bounds (all versions when bounds are NONE).
+        crate::format_cache::listing_table_from_cache_bounded(
+            cache_dir, scheme, &node_id, &versions, &bounds, ctx,
+        )
+        .await
     }
 
     /// Populate the per-node cache for a URL, returning the `NodeID` and its

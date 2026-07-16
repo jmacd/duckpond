@@ -197,6 +197,17 @@ pub struct ReconstructedTxn {
     pub timestamp_micros: i64,
 }
 
+/// Decide whether a `FilePhysicalSeries` version is retained by the supplied
+/// [`SeriesReadBounds`]. Delegates to [`tinyfs::SeriesReadBounds::retains`] so
+/// the read-path filter and the cached-`ListingTable` prune share one predicate.
+fn series_version_retained(
+    max_event_time: Option<i64>,
+    version: i64,
+    bounds: &tinyfs::SeriesReadBounds,
+) -> bool {
+    bounds.retains(max_event_time, version)
+}
+
 impl OpLogPersistence {
     /// Get the Delta table for query operations
     #[must_use]
@@ -1432,6 +1443,21 @@ impl State {
         self.inner.lock().await.async_file_reader(id).await
     }
 
+    /// As [`Self::async_file_reader`], but prunes `FilePhysicalSeries` versions
+    /// per the supplied [`tinyfs::SeriesReadBounds`] (event-time lower bound
+    /// and/or version watermark). See [`InnerState::async_file_reader_bounded`].
+    pub(crate) async fn async_file_reader_bounded(
+        &self,
+        id: FileID,
+        bounds: tinyfs::SeriesReadBounds,
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .async_file_reader_bounded(id, bounds)
+            .await
+    }
+
     /// Add an arbitrary OplogEntry record to pending transaction state
     /// This is used for metadata-only operations like temporal bounds setting
     pub async fn add_oplog_entry(&self, entry: OplogEntry) -> Result<(), TLogFSError> {
@@ -2575,13 +2601,28 @@ impl InnerState {
         &mut self,
         id: FileID,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        self.async_file_reader_bounded(id, tinyfs::SeriesReadBounds::NONE)
+            .await
+    }
+
+    /// As [`Self::async_file_reader`], but for `FilePhysicalSeries` nodes the
+    /// supplied [`tinyfs::SeriesReadBounds`] prune versions before
+    /// concatenation, so a windowed reader never opens old history. Versions
+    /// lacking recorded event-time bounds are always retained by the event-time
+    /// predicate (a missing bound must never drop data).
+    /// [`tinyfs::SeriesReadBounds::NONE`] reads the full series, unchanged.
+    pub async fn async_file_reader_bounded(
+        &mut self,
+        id: FileID,
+        bounds: tinyfs::SeriesReadBounds,
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
 
         // Check if this is a FilePhysicalSeries - concatenate all versions oldest-to-newest
         if let Some(first_record) = records.first()
             && first_record.file_type == EntryType::FilePhysicalSeries
         {
-            return self.async_file_reader_series(&records).await;
+            return self.async_file_reader_series(&records, bounds).await;
         }
 
         // Find the latest record with actual content (skip empty temporal override versions)
@@ -2613,6 +2654,7 @@ impl InnerState {
     async fn async_file_reader_series(
         &self,
         records: &[OplogEntry],
+        bounds: tinyfs::SeriesReadBounds,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         use tinyfs::chained_reader::ChainedReader;
 
@@ -2628,6 +2670,11 @@ impl InnerState {
             .iter()
             .filter(|r| r.size.unwrap_or(0) > 0) // Skip 0-byte versions
             .filter(|r| collapsed_through.is_none_or(|k| r.version > k))
+            // Bounded pruning: skip versions below the event-time lower bound
+            // and/or at-or-below the version watermark. Versions without a
+            // recorded `max_event_time` are retained by the event-time
+            // predicate (a missing bound must never drop data).
+            .filter(|r| series_version_retained(r.max_event_time, r.version, &bounds))
             .collect();
         valid_records.reverse(); // Now oldest-first
 
@@ -3959,8 +4006,14 @@ impl InnerState {
                     record.content.as_ref().map(|c| c.len() as i64).unwrap_or(0)
                 };
 
-                // Extract extended metadata for file:series
-                let extended_metadata = if record.file_type.is_series_file() {
+                // Extract extended metadata for series files. Both TablePhysical
+                // series (is_series_file) and FilePhysicalSeries (e.g. jsonlogs
+                // journals) record per-version min/max_event_time via
+                // new_file_series; expose it so bounded consumers (the cached
+                // ListingTable prune) can skip versions outside the hot window.
+                let extended_metadata = if record.file_type.is_series_file()
+                    || record.file_type == EntryType::FilePhysicalSeries
+                {
                     let mut metadata = HashMap::new();
                     if let (Some(min_time), Some(max_time)) =
                         (record.min_event_time, record.max_event_time)
@@ -4494,5 +4547,85 @@ mod node_factory {
         // The node will be automatically cached when returned
 
         Ok(node)
+    }
+}
+
+#[cfg(test)]
+mod series_bounds_tests {
+    use super::series_version_retained;
+    use tinyfs::SeriesReadBounds;
+
+    // Version number is irrelevant to the event-time predicate; use a fixed one.
+    const V: i64 = 1;
+
+    #[test]
+    fn no_bound_retains_all_versions() {
+        // NONE reads the full series regardless of recorded bounds.
+        assert!(series_version_retained(Some(0), V, &SeriesReadBounds::NONE));
+        assert!(series_version_retained(
+            Some(i64::MAX),
+            V,
+            &SeriesReadBounds::NONE
+        ));
+        assert!(series_version_retained(None, V, &SeriesReadBounds::NONE));
+    }
+
+    #[test]
+    fn event_time_bound_prunes_versions_strictly_below() {
+        let b = SeriesReadBounds::from_event_time_lo(1_000);
+        // Below the bound: pruned.
+        assert!(!series_version_retained(Some(999), V, &b));
+        // At the bound: retained (inclusive).
+        assert!(series_version_retained(Some(1_000), V, &b));
+        // Above the bound: retained.
+        assert!(series_version_retained(Some(1_001), V, &b));
+    }
+
+    #[test]
+    fn null_event_time_versions_are_always_retained() {
+        // Critical invariant: a version without a recorded max_event_time must
+        // never be pruned by the event-time predicate, or windowed reads would
+        // silently drop data.
+        assert!(series_version_retained(
+            None,
+            V,
+            &SeriesReadBounds::from_event_time_lo(1_000)
+        ));
+        assert!(series_version_retained(
+            None,
+            V,
+            &SeriesReadBounds::from_event_time_lo(i64::MAX)
+        ));
+    }
+
+    #[test]
+    fn version_watermark_is_exclusive() {
+        let b = SeriesReadBounds::from_version_gt(5);
+        // At or below the watermark: pruned (already folded).
+        assert!(!series_version_retained(Some(0), 4, &b));
+        assert!(!series_version_retained(Some(0), 5, &b));
+        // Above the watermark: retained (unseen), even with NULL event time.
+        assert!(series_version_retained(Some(0), 6, &b));
+        assert!(series_version_retained(None, 6, &b));
+    }
+
+    #[test]
+    fn bounds_combine_with_and() {
+        // Both an event-time floor and a version watermark: a version must
+        // satisfy BOTH to be retained.
+        let b = SeriesReadBounds {
+            event_time_lo: Some(1_000),
+            version_gt: Some(5),
+        };
+        // New enough version but too-old event time -> pruned.
+        assert!(!series_version_retained(Some(999), 6, &b));
+        // Recent event time but already-folded version -> pruned.
+        assert!(!series_version_retained(Some(2_000), 5, &b));
+        // Satisfies both -> retained.
+        assert!(series_version_retained(Some(2_000), 6, &b));
+        // NULL event time is retained by the event-time predicate, so version
+        // gate alone decides.
+        assert!(series_version_retained(None, 6, &b));
+        assert!(!series_version_retained(None, 5, &b));
     }
 }

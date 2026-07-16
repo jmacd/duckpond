@@ -179,6 +179,16 @@ impl Pathed<crate::file::Handle> {
         self.handle.async_reader().await
     }
 
+    /// Get async reader that may prune append-only series versions per the
+    /// supplied [`crate::file::SeriesReadBounds`].
+    /// See [`crate::file::File::async_reader_bounded`].
+    pub async fn async_reader_bounded(
+        &self,
+        bounds: crate::file::SeriesReadBounds,
+    ) -> Result<Pin<Box<dyn crate::file::AsyncReadSeek>>> {
+        self.handle.async_reader_bounded(bounds).await
+    }
+
     /// Get async writer for streaming file content
     pub async fn async_writer(&self) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         self.handle.async_writer().await

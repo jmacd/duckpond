@@ -20,5 +20,6 @@ pub mod markdown;
 pub mod partitions;
 mod routes;
 mod shortcodes;
+mod status_summary;
 
 pub use config::SiteConfig;

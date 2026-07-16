@@ -170,6 +170,72 @@ pub async fn listing_table_from_cache(
     Ok(Arc::new(table))
 }
 
+/// Extract a series version's recorded `max_event_time` (epoch µs) from its
+/// extended metadata, if present. Non-series versions and versions written
+/// without event-time bounds return `None` (and are always retained by an
+/// event-time bound -- a missing bound must never drop data).
+#[must_use]
+fn version_max_event_time(v: &FileVersionInfo) -> Option<i64> {
+    v.extended_metadata
+        .as_ref()?
+        .get("max_event_time")?
+        .parse::<i64>()
+        .ok()
+}
+
+/// Build a `ListingTable` over only the cached version Parquets retained by
+/// `bounds` (per-version event-time / watermark prune), so a bounded reader
+/// scans only the hot files instead of all cached history.
+///
+/// When `bounds` is [`tinyfs::SeriesReadBounds::NONE`] this is equivalent to
+/// [`listing_table_from_cache`] (all versions). When the bounds retain no
+/// version, an empty table over the merged cache schema is returned (0 rows),
+/// never a silent full scan.
+pub async fn listing_table_from_cache_bounded(
+    cache_dir: &Path,
+    scheme: &str,
+    node_id: &tinyfs::NodeID,
+    versions: &[FileVersionInfo],
+    bounds: &tinyfs::SeriesReadBounds,
+    ctx: &SessionContext,
+) -> Result<Arc<dyn TableProvider>> {
+    if *bounds == tinyfs::SeriesReadBounds::NONE {
+        return listing_table_from_cache(cache_dir, scheme, node_id, ctx).await;
+    }
+
+    let dir = cache_node_dir(cache_dir, scheme, node_id);
+    let merged_schema = merge_parquet_schemas_in_dir(&dir).await?;
+
+    // Collect the retained versions' Parquet paths (only those present on disk).
+    let mut paths: Vec<ListingTableUrl> = Vec::new();
+    for v in versions {
+        if !bounds.retains(version_max_event_time(v), v.version as i64) {
+            continue;
+        }
+        let p = cache_version_path(cache_dir, scheme, node_id, v);
+        if p.exists() {
+            paths.push(ListingTableUrl::parse(format!("file://{}", p.display()))?);
+        }
+    }
+
+    if paths.is_empty() {
+        // Every version pruned: return an empty table over the cache schema so
+        // the query yields 0 rows rather than erroring or scanning everything.
+        // MemTable requires at least one partition (a partition with no batches).
+        let table = datafusion::datasource::MemTable::try_new(merged_schema, vec![vec![]])?;
+        return Ok(Arc::new(table));
+    }
+
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
+    let config = ListingTableConfig::new_with_multi_paths(paths)
+        .with_listing_options(listing_options)
+        .with_schema(merged_schema);
+
+    let table = ListingTable::try_new(config)?;
+    Ok(Arc::new(table))
+}
+
 /// Directory for a glob-scoped unified cache (all files matching a pattern).
 ///
 /// Returns `{cache_dir}/{scheme}_glob_{pattern_hash}/`
@@ -354,6 +420,21 @@ mod tests {
         }
     }
 
+    /// A series version stamped with a recorded `max_event_time` (epoch µs),
+    /// as `list_file_versions` exposes for `FilePhysicalSeries` files.
+    fn test_series_version(version: u64, blake3: &str, max_event_time: i64) -> FileVersionInfo {
+        let mut meta = std::collections::HashMap::new();
+        let _ = meta.insert("max_event_time".to_string(), max_event_time.to_string());
+        FileVersionInfo {
+            version,
+            timestamp: 0,
+            size: 100,
+            blake3: Some(blake3.to_string()),
+            entry_type: tinyfs::EntryType::FilePhysicalSeries,
+            extended_metadata: Some(meta),
+        }
+    }
+
     fn test_node_id() -> tinyfs::NodeID {
         tinyfs::NodeID::new(uuid7::uuid7().to_string())
     }
@@ -469,6 +550,168 @@ mod tests {
         assert_eq!(table_schema.fields().len(), 2);
         assert_eq!(table_schema.field(0).name(), "timestamp");
         assert_eq!(table_schema.field(1).name(), "value");
+    }
+
+    /// `listing_table_from_cache_bounded` includes only the version Parquets
+    /// retained by the bounds: event-time prunes old versions (retaining any
+    /// without a recorded bound), version_gt prunes at/below the watermark, and
+    /// pruning everything yields an empty (0-row) table -- never a full scan.
+    #[tokio::test]
+    async fn test_listing_table_from_cache_bounded_prunes() {
+        use datafusion::arrow::array::Int64Array as DfInt64Array;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let node_id = test_node_id();
+        let schema = test_schema();
+
+        // Three series versions, each one row, with distinct recorded event times.
+        // v1 old (t=1000), v2 mid (t=2000), v3 new (t=3000).
+        let versions = vec![
+            test_series_version(1, "h1", 1000),
+            test_series_version(2, "h2", 2000),
+            test_series_version(3, "h3", 3000),
+        ];
+        for v in &versions {
+            let batch = test_batch(&schema, &[v.version as i64], &["x"]);
+            let stream: Pin<
+                Box<
+                    dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send,
+                >,
+            > = Box::pin(futures::stream::once(async move { Ok(batch) }));
+            let _ = cache_write_version(cache_dir, "jsonlogs", &node_id, v, schema.clone(), stream)
+                .await
+                .unwrap();
+        }
+
+        // Count rows a bounded listing table exposes.
+        async fn count_rows(table: Arc<dyn TableProvider>) -> i64 {
+            let ctx = SessionContext::new();
+            let _ = ctx.register_table("t", table).unwrap();
+            let batches = ctx
+                .sql("SELECT COUNT(*) AS c FROM t")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<DfInt64Array>()
+                .unwrap()
+                .value(0)
+        }
+
+        let ctx = SessionContext::new();
+
+        // NONE -> all three versions.
+        let all = listing_table_from_cache_bounded(
+            cache_dir,
+            "jsonlogs",
+            &node_id,
+            &versions,
+            &tinyfs::SeriesReadBounds::NONE,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_rows(all).await, 3);
+
+        // event_time_lo=2500 -> only v3 (max_event_time >= 2500).
+        let hot = listing_table_from_cache_bounded(
+            cache_dir,
+            "jsonlogs",
+            &node_id,
+            &versions,
+            &tinyfs::SeriesReadBounds::from_event_time_lo(2500),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_rows(hot).await, 1);
+
+        // version_gt=1 -> v2 and v3.
+        let watermarked = listing_table_from_cache_bounded(
+            cache_dir,
+            "jsonlogs",
+            &node_id,
+            &versions,
+            &tinyfs::SeriesReadBounds::from_version_gt(1),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_rows(watermarked).await, 2);
+
+        // event_time_lo above every recorded bound -> empty (0 rows), not a full scan.
+        let empty = listing_table_from_cache_bounded(
+            cache_dir,
+            "jsonlogs",
+            &node_id,
+            &versions,
+            &tinyfs::SeriesReadBounds::from_event_time_lo(9999),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_rows(empty).await, 0);
+    }
+
+    /// A version without a recorded `max_event_time` is always retained by an
+    /// event-time bound -- a missing bound must never silently drop data.
+    #[tokio::test]
+    async fn test_bounded_retains_versions_without_event_time() {
+        use datafusion::arrow::array::Int64Array as DfInt64Array;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+        let node_id = test_node_id();
+        let schema = test_schema();
+
+        // v1 has no recorded bound; v2 is old.
+        let versions = vec![
+            test_version(1, "h1"), // extended_metadata: None
+            test_series_version(2, "h2", 1000),
+        ];
+        for v in &versions {
+            let batch = test_batch(&schema, &[v.version as i64], &["x"]);
+            let stream: Pin<
+                Box<
+                    dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send,
+                >,
+            > = Box::pin(futures::stream::once(async move { Ok(batch) }));
+            let _ = cache_write_version(cache_dir, "jsonlogs", &node_id, v, schema.clone(), stream)
+                .await
+                .unwrap();
+        }
+
+        let ctx = SessionContext::new();
+        let table = listing_table_from_cache_bounded(
+            cache_dir,
+            "jsonlogs",
+            &node_id,
+            &versions,
+            &tinyfs::SeriesReadBounds::from_event_time_lo(5000),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let _ = ctx.register_table("t", table).unwrap();
+        let batches = ctx
+            .sql("SELECT COUNT(*) AS c FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let c = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<DfInt64Array>()
+            .unwrap()
+            .value(0);
+        // v2 (t=1000 < 5000) is pruned; v1 (no bound) is retained -> 1 row.
+        assert_eq!(c, 1);
     }
 
     #[test]

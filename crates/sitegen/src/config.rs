@@ -161,6 +161,16 @@ pub struct StatusGridConfig {
     #[serde(default = "default_tail_lines")]
     pub tail_lines: usize,
 
+    /// Optional lookback window (humantime, e.g. `"1d"`, `"12h"`) bounding how
+    /// far back the per-unit status/tail scan reads the append-only journal
+    /// series. Journal versions whose newest event predates
+    /// `now - hot_window` are pruned before the reader materializes them, so
+    /// per-render memory stays bounded regardless of retained history. All
+    /// history remains on disk and queryable; only this default status render
+    /// is windowed. Unset defaults to [`DEFAULT_STATUS_HOT_WINDOW`] (1 day).
+    #[serde(default)]
+    pub hot_window: Option<String>,
+
     /// Optional URL pattern (with `{pond}` placeholder) resolving to
     /// the per-pond perf series produced by `measure-pond.sh` +
     /// `sql-derived-series`.  When set, sitegen reads the latest
@@ -180,6 +190,27 @@ pub struct StatusGridConfig {
 
 fn default_tail_lines() -> usize {
     10
+}
+
+/// Default status-grid lookback window when `hot_window` is unset: one day.
+/// Generous relative to the ~1-min selfmon tick, so ok/err events land in the
+/// window on healthy ponds.
+pub const DEFAULT_STATUS_HOT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+impl StatusGridConfig {
+    /// Resolve the configured `hot_window` as whole seconds, defaulting to
+    /// [`DEFAULT_STATUS_HOT_WINDOW`]. A malformed duration is a hard error
+    /// (surfaced to the caller) rather than a silent default.
+    pub fn hot_window_secs(&self) -> Result<i64, tinyfs::Error> {
+        let dur = match &self.hot_window {
+            Some(s) => humantime::parse_duration(s).map_err(|e| {
+                tinyfs::Error::Other(format!("status_grid: invalid hot_window '{}': {}", s, e))
+            })?,
+            None => DEFAULT_STATUS_HOT_WINDOW,
+        };
+        Ok(dur.as_secs() as i64)
+    }
 }
 
 impl SiteConfig {
