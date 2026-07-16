@@ -198,29 +198,14 @@ pub struct ReconstructedTxn {
 }
 
 /// Decide whether a `FilePhysicalSeries` version is retained by the supplied
-/// [`SeriesReadBounds`]. Both bounds are combined with AND (a `None` field
-/// imposes no constraint).
-///
-/// - `event_time_lo`: retain iff the version's recorded `max_event_time` is at
-///   or above the bound. A version with no recorded bound (`None`) is **always
-///   retained** for this predicate: a missing bound must never silently drop
-///   data.
-/// - `version_gt`: retain iff the version number is strictly greater than the
-///   watermark.
+/// [`SeriesReadBounds`]. Delegates to [`tinyfs::SeriesReadBounds::retains`] so
+/// the read-path filter and the cached-`ListingTable` prune share one predicate.
 fn series_version_retained(
     max_event_time: Option<i64>,
     version: i64,
     bounds: &tinyfs::SeriesReadBounds,
 ) -> bool {
-    let event_time_ok = match bounds.event_time_lo {
-        Some(lo) => max_event_time.is_none_or(|max_ts| max_ts >= lo),
-        None => true,
-    };
-    let version_ok = match bounds.version_gt {
-        Some(watermark) => version > watermark,
-        None => true,
-    };
-    event_time_ok && version_ok
+    bounds.retains(max_event_time, version)
 }
 
 impl OpLogPersistence {

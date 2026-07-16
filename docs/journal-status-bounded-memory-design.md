@@ -296,9 +296,9 @@ bounded; a missing per-version bound retains (never drops) the version.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Optional `event_time_lower_bound` on the series reader; prune `async_file_reader_series` version concatenation by per-version `max_event_time` (retain NULL); plumb the bound from `status_grid` | Proposed |
-| 2 | Durable per-unit version watermark + summary (Piece B): backfill once, fold each unseen version exactly once via `arg_max(msg, ts)`; render from the summary; fix the independent-`MAX` pairing bug | Proposed |
-| 3 | Cached-`ListingTable` pruning + materialized `BIGINT` event-time column for the perf-chart / `sql-derived-series` jsonlogs path (A.2/A.3) | Proposed |
+| 1 | Optional `event_time_lower_bound` on the series reader; prune `async_file_reader_series` version concatenation by per-version `max_event_time` (retain NULL); plumb the bound from `status_grid` | **Done** (commit `9ce877ff`) |
+| 2 | Durable per-unit version watermark + summary (Piece B): backfill once, fold each unseen version exactly once via `arg_max(msg, ts)`; render from the summary; fix the independent-`MAX` pairing bug | **Done** (commits `cbe21da1`, `ac0b3d4d`) |
+| 3 | Cached-`ListingTable` pruning (A.2): the `SeriesReadBounds` now also prune the cached path — `create_cached_table_from_url` lists only the version Parquets whose per-version `max_event_time`/version pass the bounds (empty → 0-row table, never a full scan). A.3 (materialized `BIGINT` event-time column + intra-version row-group predicate) is deferred — optional; realizing the prune in the `sql-derived-series` perf pipeline additionally needs a hot-window config knob there, tracked as follow-up | **Done (A.2)** — A.3 deferred (optional) |
 | 4 | Selfmon memory-plateau stressor test + docs; retire the `docs/selfmon-design.md §1` open item | Proposed |
 
 ### Notes / open questions

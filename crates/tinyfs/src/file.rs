@@ -57,6 +57,27 @@ impl SeriesReadBounds {
             version_gt: Some(version_gt),
         }
     }
+
+    /// Decide whether a series version is retained by these bounds. Both bounds
+    /// combine with AND (a `None` field imposes no constraint):
+    ///
+    /// - `event_time_lo`: retain iff the version's recorded `max_event_time` is
+    ///   at or above the bound. A version with no recorded bound (`None`) is
+    ///   **always retained** — a missing bound must never silently drop data.
+    /// - `version_gt`: retain iff the version number is strictly greater than
+    ///   the watermark.
+    #[must_use]
+    pub fn retains(&self, max_event_time: Option<i64>, version: i64) -> bool {
+        let event_time_ok = match self.event_time_lo {
+            Some(lo) => max_event_time.is_none_or(|max_ts| max_ts >= lo),
+            None => true,
+        };
+        let version_ok = match self.version_gt {
+            Some(watermark) => version > watermark,
+            None => true,
+        };
+        event_time_ok && version_ok
+    }
 }
 
 /// Trait for writers that can accept file metadata (e.g., temporal bounds from parquet)
