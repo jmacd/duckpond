@@ -3087,6 +3087,7 @@ query: ""
                     columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
                 }],
                 transforms: None,
+                allowed_lateness: None,
             };
 
             TemporalReduceDirectory::new(config, context).unwrap()
@@ -3385,6 +3386,7 @@ query: ""
                     columns: None, // This should trigger automatic schema discovery!
                 }],
                 transforms: None,
+                allowed_lateness: None,
             };
 
             // Create temporal reduce directory within the same transaction that will access it
