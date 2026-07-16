@@ -902,14 +902,26 @@ async fn query_pond_status(
     // per-unit `.jsonl` and the fields were always blank.  The
     // `Run summary` line is emitted by pond on every run and is the
     // authoritative outcome marker.
+    //
+    // Each `_msg` column is paired to the SAME row as its matching max
+    // timestamp via `first_value(... ORDER BY ts DESC)`.  A prior version
+    // took `MAX(MESSAGE)` independently of `MAX(ts)`, which returned the
+    // lexicographically-greatest message rather than the message of the
+    // most-recent matching line -- so a card could show an old/ wrong
+    // summary.  `NULLS LAST` on the DESC ordering keeps the non-matching
+    // rows (NULL sort key) after the real ones, so `first_value` lands on
+    // the newest matching row; when no rows match, the column is NULL.
     let status_sql = format!(
         "SELECT \
             MAX(ts) AS last_seen, \
             MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN ts END) AS last_ok_us, \
-            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN MESSAGE END) AS last_ok_msg, \
+            first_value(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN ts END DESC NULLS LAST) AS last_ok_msg, \
             MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN ts END) AS last_err_us, \
-            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN MESSAGE END) AS last_err_msg, \
-            MAX(CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN MESSAGE END) AS last_peak_msg \
+            first_value(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN ts END DESC NULLS LAST) AS last_err_msg, \
+            first_value(CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN MESSAGE END \
+                ORDER BY CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN ts END DESC NULLS LAST) AS last_peak_msg \
          FROM (SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {}) t",
         table_name
     );
@@ -2024,6 +2036,102 @@ impl std::error::Error for GenerateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Register an in-memory journal table (`__REALTIME_TIMESTAMP` + `MESSAGE`,
+    /// both Utf8, mirroring the jsonlogs schema) from `(ts_us, message)` rows.
+    async fn register_journal_table(
+        ctx: &datafusion::prelude::SessionContext,
+        table: &str,
+        rows: &[(i64, &str)],
+    ) {
+        use datafusion::arrow::array::StringArray;
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::datasource::MemTable;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__REALTIME_TIMESTAMP", DataType::Utf8, true),
+            Field::new("MESSAGE", DataType::Utf8, true),
+        ]));
+        let ts: StringArray = rows.iter().map(|(t, _)| Some(t.to_string())).collect();
+        let msg: StringArray = rows.iter().map(|(_, m)| Some(m.to_string())).collect();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(ts), Arc::new(msg)]).unwrap();
+        let provider = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table(
+            datafusion::sql::TableReference::bare(table),
+            Arc::new(provider),
+        )
+        .unwrap();
+    }
+
+    /// The `_msg` fields must be paired to the row holding the matching max
+    /// timestamp, not the lexicographically-greatest message. Rows are seeded so
+    /// the newest ok/err lines sort *before* older ones lexicographically, which
+    /// would trip the old independent-`MAX(MESSAGE)` bug.
+    #[tokio::test]
+    async fn status_msg_paired_to_latest_timestamp() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_journal_table(
+            &ctx,
+            "jt",
+            &[
+                // older ok, lexicographically GREATER (starts with 'Z')
+                (100, "Run summary Z older outcome=ok"),
+                // newest ok, lexicographically smaller (starts with 'A')
+                (200, "Run summary A newest outcome=ok"),
+                // older err, lexicographically greater
+                (150, "Run summary Z older outcome=err"),
+                // newest err, lexicographically smaller
+                (250, "Run summary A newest outcome=err"),
+                // two peak lines; newest should win
+                (300, "Peak memory usage: 10.0 MB"),
+                (120, "Peak memory usage: 99.0 MB"),
+                // an unrelated newer line -> last_seen must reflect overall max
+                (400, "some unrelated log line"),
+            ],
+        )
+        .await;
+
+        let s = query_pond_status(&ctx, "jt", "unit@x.service", 10)
+            .await
+            .expect("query_pond_status");
+
+        assert_eq!(s.last_seen_us, Some(400));
+        assert_eq!(s.last_ok_us, Some(200));
+        assert_eq!(
+            s.last_ok_msg.as_deref(),
+            Some("Run summary A newest outcome=ok")
+        );
+        assert_eq!(s.last_err_us, Some(250));
+        assert_eq!(
+            s.last_err_msg.as_deref(),
+            Some("Run summary A newest outcome=err")
+        );
+        // Newest peak line (ts=300) wins over the lexicographically/numerically
+        // larger-valued older one (ts=120).
+        assert_eq!(s.peak_rss_bytes, Some((10.0 * 1024.0 * 1024.0) as u64));
+    }
+
+    /// A unit with no ok/err/peak lines leaves those fields None (empty-set
+    /// aggregates), while `last_seen` still reflects the max timestamp.
+    #[tokio::test]
+    async fn status_absent_fields_are_none() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_journal_table(&ctx, "jt2", &[(500, "just a heartbeat line")]).await;
+
+        let s = query_pond_status(&ctx, "jt2", "unit@y.service", 10)
+            .await
+            .expect("query_pond_status");
+
+        assert_eq!(s.last_seen_us, Some(500));
+        assert_eq!(s.last_ok_us, None);
+        assert_eq!(s.last_ok_msg, None);
+        assert_eq!(s.last_err_us, None);
+        assert_eq!(s.last_err_msg, None);
+        assert_eq!(s.peak_rss_bytes, None);
+    }
 
     #[test]
     fn extract_pond_name_user_pond() {
