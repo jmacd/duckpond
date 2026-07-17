@@ -123,18 +123,21 @@ export function buildMetricChartSpec(opts) {
   if (byteAxis) yAxis.format = "~s";
   const layers = [];
 
-  // Optional annotation bands: a secondary interval dataset (e.g. leak /
-  // no-leak periods) drawn as full-height shaded rects behind the series.
-  // Rows carry epoch-ms `start`/`end`, a literal `color` (identity scale), and
-  // a `label` for the tooltip. Pushed first so the series draw on top.
+  // Optional annotation bands: a secondary interval dataset (e.g. pump state /
+  // leak risk periods) drawn as full-height shaded rects behind the series.
+  // Rows carry epoch-ms `start`/`end`, a literal `color` (identity scale), a
+  // per-datum `opacity` (identity, so pump categorical bands and leak
+  // score-scaled bands can coexist), and a `label` for the tooltip. Pushed
+  // first so the series draw on top.
   if (annotations && annotations.length) {
     layers.push({
       data: { values: annotations },
-      mark: { type: "rect", clip: true, opacity: 0.15, tooltip: true },
+      mark: { type: "rect", clip: true, tooltip: true },
       encoding: {
         x: { field: "start", type: "temporal", scale: { domain: xDomain }, axis: null },
         x2: { field: "end" },
         color: { field: "color", type: "nominal", scale: null, legend: null },
+        opacity: { field: "opacity", type: "quantitative", scale: null, legend: null },
         tooltip: [{ field: "label", type: "nominal", title: "Period" }],
       },
     });
