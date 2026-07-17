@@ -51,6 +51,28 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     return metricKinds[chartKey] || "gauge";
   }
 
+  // Optional annotation manifest: a secondary interval export (emitted by
+  // sitegen as `script.chart-annotations`) drawn as shaded background bands
+  // behind every chart on the page. Rows come from parquet with `start_time`
+  // / `end_time` (timestamps) and a `label` categorizing each interval
+  // (e.g. "leak" / "no-leak"). Absent manifest => no bands (legacy behaviour).
+  const annotationsEl = document.querySelector('script.chart-annotations[type="application/json"]');
+  let annotationManifest = [];
+  if (annotationsEl) {
+    try {
+      annotationManifest = JSON.parse(annotationsEl.textContent) || [];
+    } catch (e) {
+      annotationManifest = [];
+    }
+  }
+
+  // Fixed colors for known interval labels; unknown labels fall back to gray.
+  // Kept literal (identity color scale) so vega-shared stays domain-agnostic.
+  const ANNOTATION_COLORS = { leak: "#d64545", "no-leak": "#3f9e5a" };
+  function annotationColor(label) {
+    return ANNOTATION_COLORS[label] || "#888888";
+  }
+
   // Optional per-chart caption strings, also emitted by sitegen.  Keys
   // match `metricKinds`; values are plain text rendered beneath each
   // chart.  Missing entries render no caption.
@@ -618,8 +640,41 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     }
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // Annotation files are pond-wide interval sets (not tiled by resolution), so
+  // they are registered once and queried in full for the visible window. Each
+  // row becomes a background band; `color` is resolved from `label` here so
+  // vega-shared can use an identity color scale.
+  const annotationUrls = annotationManifest.map(m => m.file).filter(Boolean);
 
+  async function queryAnnotations(beginMs, endMs) {
+    if (annotationUrls.length === 0) return [];
+    const loaded = await Promise.all(annotationUrls.map(u => ensureFile(u)));
+    const names = loaded.filter(Boolean);
+    if (names.length === 0) return [];
+    const parts = names.map(t =>
+      `SELECT epoch_ms(start_time) AS start, epoch_ms(end_time) AS "end", label ` +
+      `FROM read_parquet('${t}') ` +
+      `WHERE epoch_ms(end_time) >= ${beginMs} AND epoch_ms(start_time) <= ${endMs}`
+    );
+    const sql = parts.join(" UNION ALL BY NAME ") + ' ORDER BY start ASC';
+    try {
+      const result = await conn.query(sql);
+      return result.toArray().map(r => {
+        const label = r.label == null ? "" : String(r.label);
+        return {
+          start: Number(r.start),
+          end: Number(r.end),
+          label,
+          color: annotationColor(label),
+        };
+      });
+    } catch (e) {
+      console.error("Annotation query failed:", e);
+      return [];
+    }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
   // Resolve the page theme's foreground and a faint grid color from CSS custom
   // properties so the Vega charts match the surrounding light/dark styling
   // (Vega cannot read CSS variables itself, so we pass resolved colors in).
@@ -912,6 +967,10 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
     const data = await queryData(domainBegin, domainEnd);
 
+    // Interval annotations (leak/no-leak etc.) for the visible window, shared
+    // by every chart on the page as a shaded background band layer.
+    const annotationBands = await queryAnnotations(domainBegin, domainEnd);
+
     // Keep the raw rows for CSV export; disable the button when empty.
     lastData = data;
     downloadBtn.disabled = data.length === 0;
@@ -1002,6 +1061,7 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
         height: chartHeight,
         byteAxis: isBytes,
         theme: chartTheme,
+        annotations: annotationBands,
       });
 
       const values = plotData.map((d) => {

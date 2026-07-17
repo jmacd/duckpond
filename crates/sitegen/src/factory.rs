@@ -2006,6 +2006,7 @@ fn generate_site(
             labels: config.labels.clone(),
             explore_datasets: explore_datasets.clone(),
             explore_url: explore_url.clone(),
+            annotations: job.annotations.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -2231,6 +2232,7 @@ fn render_partial(
                 labels: config.labels.clone(),
                 explore_datasets: vec![],
                 explore_url: None,
+                annotations: vec![],
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);

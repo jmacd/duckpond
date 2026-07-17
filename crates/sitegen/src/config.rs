@@ -403,6 +403,12 @@ pub struct RouteConfig {
     /// For template routes: which export stage provides data
     #[serde(default)]
     pub export: Option<String>,
+    /// Optional secondary export whose files are handed to the page as
+    /// annotation data (e.g. leak/no-leak interval periods drawn as a shaded
+    /// chart background). Resolved pond-wide (all files of the named export),
+    /// so every page under the route shares the same annotations.
+    #[serde(default)]
+    pub annotations: Option<String>,
     /// For content routes: which content stage provides pages
     #[serde(default)]
     pub content: Option<String>,

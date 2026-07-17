@@ -117,10 +117,29 @@ export function buildMetricChartSpec(opts) {
     height = 300,
     byteAxis = false,
     theme,
+    annotations = [],
   } = opts;
   const yAxis = { grid: true, title: yLabel || null };
   if (byteAxis) yAxis.format = "~s";
   const layers = [];
+
+  // Optional annotation bands: a secondary interval dataset (e.g. leak /
+  // no-leak periods) drawn as full-height shaded rects behind the series.
+  // Rows carry epoch-ms `start`/`end`, a literal `color` (identity scale), and
+  // a `label` for the tooltip. Pushed first so the series draw on top.
+  if (annotations && annotations.length) {
+    layers.push({
+      data: { values: annotations },
+      mark: { type: "rect", clip: true, opacity: 0.15, tooltip: true },
+      encoding: {
+        x: { field: "start", type: "temporal", scale: { domain: xDomain }, axis: null },
+        x2: { field: "end" },
+        color: { field: "color", type: "nominal", scale: null, legend: null },
+        tooltip: [{ field: "label", type: "nominal", title: "Period" }],
+      },
+    });
+  }
+
   let yAssigned = false;
   for (const s of series) {
     if (s.min && s.max) {

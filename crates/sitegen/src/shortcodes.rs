@@ -305,6 +305,14 @@ pub struct ShortcodeContext {
     /// it as `data-explore-url` so chart.js can offer an "Explore this data"
     /// cross-link that hands the current files + window to the explorer.
     pub explore_url: Option<String>,
+
+    /// Optional annotation data files (a secondary export resolved pond-wide)
+    /// drawn as a shaded chart background, e.g. leak/no-leak interval periods.
+    /// Plumbed through from `PageJob.annotations`; empty when the route
+    /// declares no `annotations` export. Renderers that support annotations
+    /// (see `VizRenderer::include_annotations`) emit these as an inline
+    /// `chart-annotations` manifest.
+    pub annotations: Vec<ExportedFile>,
 }
 
 /// A data-explorer dataset resolved from `SiteConfig.explore` against an
@@ -356,6 +364,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                 &c.metric_captions,
                 c.default_range.as_deref(),
                 c.explore_url.as_deref(),
+                &c.annotations,
             )
         });
     }
@@ -395,6 +404,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                     &c.metric_captions,
                     c.default_range.as_deref(),
                     c.explore_url.as_deref(),
+                    &c.annotations,
                 ),
                 None => format!(
                     "<div class=\"chart-container\"><p>Unknown viz renderer: {}</p></div>",
@@ -610,6 +620,9 @@ struct VizRenderer {
     include_default_range: bool,
     /// Emit the `data-explore-url` attribute ("Explore this data" cross-link).
     include_explore: bool,
+    /// Emit an inline `chart-annotations` manifest (a secondary interval export
+    /// drawn as a shaded background) when the page carries annotation files.
+    include_annotations: bool,
     /// Message rendered inside the container when there are no datafiles.
     empty_msg: &'static str,
 }
@@ -623,6 +636,7 @@ const VIZ_CHART: VizRenderer = VizRenderer {
     include_registry: true,
     include_default_range: true,
     include_explore: true,
+    include_annotations: true,
     empty_msg: "No data files available.",
 };
 
@@ -635,6 +649,7 @@ const VIZ_OVERLAY: VizRenderer = VizRenderer {
     include_registry: false,
     include_default_range: false,
     include_explore: true,
+    include_annotations: false,
     empty_msg: "No data files available.",
 };
 
@@ -646,6 +661,7 @@ const VIZ_LOGS: VizRenderer = VizRenderer {
     include_registry: false,
     include_default_range: false,
     include_explore: false,
+    include_annotations: false,
     empty_msg: "No log files available.",
 };
 
@@ -665,6 +681,7 @@ fn viz_renderer(name: &str) -> Option<&'static VizRenderer> {
 /// module self-selects by `id`/`data_class` and no-ops when its container is
 /// absent, so a layout can load several modules and each page activates only
 /// the one whose container the template emitted.
+#[allow(clippy::too_many_arguments)]
 fn render_viz(
     r: &VizRenderer,
     datafiles: &[ExportedFile],
@@ -672,6 +689,7 @@ fn render_viz(
     captions: &BTreeMap<String, String>,
     default_range: Option<&str>,
     explore_url: Option<&str>,
+    annotations: &[ExportedFile],
 ) -> String {
     let class_attr = if r.container_class.is_empty() {
         String::new()
@@ -726,10 +744,19 @@ fn render_viz(
         String::new()
     };
 
+    let annotations_block = if r.include_annotations && !annotations.is_empty() {
+        format!(
+            "<script type=\"application/json\" class=\"chart-annotations\">{}</script>",
+            datafiles_manifest_json(annotations)
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "<div{} id=\"{}\"{}{}>\
          <script type=\"application/json\" class=\"{}\">{}</script>\
-         {}{}\
+         {}{}{}\
          </div>",
         class_attr,
         r.id,
@@ -738,7 +765,8 @@ fn render_viz(
         r.data_class,
         json,
         registry_block,
-        captions_block
+        captions_block,
+        annotations_block
     )
 }
 
@@ -752,6 +780,7 @@ fn render_chart(
     captions: &BTreeMap<String, String>,
     default_range: Option<&str>,
     explore_url: Option<&str>,
+    annotations: &[ExportedFile],
 ) -> String {
     render_viz(
         &VIZ_CHART,
@@ -760,6 +789,7 @@ fn render_chart(
         captions,
         default_range,
         explore_url,
+        annotations,
     )
 }
 
@@ -775,6 +805,7 @@ fn render_overlay_chart(datafiles: &[ExportedFile], explore_url: Option<&str>) -
         &BTreeMap::new(),
         None,
         explore_url,
+        &[],
     )
 }
 
@@ -790,6 +821,7 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
         &BTreeMap::new(),
         None,
         None,
+        &[],
     )
 }
 
@@ -1610,6 +1642,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1621,7 +1654,7 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None, None);
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new(), None, None, &[]);
         assert!(html.contains("No data files"));
     }
 
@@ -1703,7 +1736,7 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None, None);
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), None, None, &[]);
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
         // Empty registry -> no chart-registry script element.
@@ -1722,7 +1755,14 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new(), Some("1M"), None);
+        let html = render_chart(
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some("1M"),
+            None,
+            &[],
+        );
         assert!(html.contains("data-default-range=\"1M\""));
         // No explore url configured -> no cross-link attribute.
         assert!(!html.contains("data-explore-url"));
@@ -1744,6 +1784,7 @@ mod tests {
             &BTreeMap::new(),
             None,
             Some("/explore/"),
+            &[],
         );
         assert!(html.contains("data-explore-url=\"/explore/\""));
     }
@@ -1780,7 +1821,7 @@ mod tests {
             ("committed.txn_ids".to_string(), "counter".to_string()),
             ("size.bytes".to_string(), "updowncounter".to_string()),
         ]);
-        let html = render_chart(&files, &registry, &BTreeMap::new(), None, None);
+        let html = render_chart(&files, &registry, &BTreeMap::new(), None, None, &[]);
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
@@ -1808,9 +1849,17 @@ mod tests {
                 &registry,
                 &captions,
                 Some("1M"),
-                Some("/explore/")
+                Some("/explore/"),
+                &[],
             ),
-            render_chart(&files, &registry, &captions, Some("1M"), Some("/explore/")),
+            render_chart(
+                &files,
+                &registry,
+                &captions,
+                Some("1M"),
+                Some("/explore/"),
+                &[]
+            ),
         );
         assert_eq!(
             render_viz(
@@ -1819,7 +1868,8 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 None,
-                Some("/explore/")
+                Some("/explore/"),
+                &[],
             ),
             render_overlay_chart(&files, Some("/explore/")),
         );
@@ -1830,7 +1880,8 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 None,
-                None
+                None,
+                &[],
             ),
             render_log_viewer(&files),
         );
@@ -1856,6 +1907,7 @@ mod tests {
             &BTreeMap::new(),
             Some("1M"),
             Some("/explore/"),
+            &[],
         );
         assert!(overlay.contains("id=\"overlay-chart\""));
         assert!(!overlay.contains("chart-registry"));
@@ -1870,6 +1922,7 @@ mod tests {
             &BTreeMap::new(),
             Some("1M"),
             Some("/explore/"),
+            &[],
         );
         assert!(logs.contains("id=\"log-viewer\""));
         assert!(!logs.contains("chart-registry"));
@@ -1884,6 +1937,63 @@ mod tests {
         assert!(viz_renderer("logs").is_some());
         assert!(viz_renderer("log-viewer").is_some());
         assert!(viz_renderer("nope").is_none());
+    }
+
+    #[test]
+    fn test_render_viz_emits_annotations_only_for_capable_renderers() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let annotations = vec![ExportedFile {
+            path: "leak-periods.parquet".to_string(),
+            file: "analysis/leak-periods.parquet".to_string(),
+            captures: vec!["leak-periods".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+
+        // chart supports annotations -> emits the manifest referencing the file.
+        let chart = render_viz(
+            &VIZ_CHART,
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &annotations,
+        );
+        assert!(chart.contains("class=\"chart-annotations\""));
+        assert!(chart.contains("analysis/leak-periods.parquet"));
+
+        // No annotations -> no manifest, preserving legacy markup.
+        let plain = render_viz(
+            &VIZ_CHART,
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+        );
+        assert!(!plain.contains("chart-annotations"));
+
+        // overlay/logs never emit annotations even when supplied.
+        let overlay = render_viz(
+            &VIZ_OVERLAY,
+            &files,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &annotations,
+        );
+        assert!(!overlay.contains("chart-annotations"));
     }
 
     #[test]
@@ -1921,6 +2031,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1996,6 +2107,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -2087,6 +2199,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -2233,6 +2346,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -2297,6 +2411,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -2379,6 +2494,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -2454,6 +2570,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -2550,6 +2667,7 @@ mod tests {
             labels: BTreeMap::new(),
             explore_datasets: vec![],
             explore_url: None,
+            annotations: vec![],
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");
