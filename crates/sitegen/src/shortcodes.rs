@@ -378,6 +378,32 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ viz renderer="chart|overlay|logs" /}} -- unified visualization
+    // container. Emits the container div + inline parquet manifest that the
+    // named client-side module binds to. This is the general, extensible seam
+    // for telemetry visualizations; the {{ chart }}, {{ overlay_chart }} and
+    // {{ log_viewer }} shortcodes above are thin aliases over the same path.
+    {
+        let c = ctx.clone();
+        shortcodes.register("viz", move |args: &ShortcodeArgs| {
+            let name = args.get_str("renderer").unwrap_or("chart");
+            match viz_renderer(name) {
+                Some(r) => render_viz(
+                    r,
+                    &c.datafiles,
+                    &c.metric_registry,
+                    &c.metric_captions,
+                    c.default_range.as_deref(),
+                    c.explore_url.as_deref(),
+                ),
+                None => format!(
+                    "<div class=\"chart-container\"><p>Unknown viz renderer: {}</p></div>",
+                    html_escape(name)
+                ),
+            }
+        });
+    }
+
     // {{ explore table="reduced" label="Reduced tiers" /}} -- emit the data
     // explorer container with a `datasets` manifest built from this page's
     // exported files. Client-side explore.js registers the parquet as a DuckDB
@@ -537,14 +563,189 @@ fn prefix_with_base_url(base_url: &str, path: &str) -> String {
     }
 }
 
+/// Serialize a page's exported parquet manifest to the JSON array that every
+/// client-side visualization module consumes (chart.js, overlay.js,
+/// log-viewer.js, and future telemetry renderers). One shape, one place.
+fn datafiles_manifest_json(datafiles: &[ExportedFile]) -> String {
+    let files_json: Vec<serde_json::Value> = datafiles
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "file": f.file,
+                "captures": f.captures,
+                "temporal": f.temporal,
+                "start_time": f.start_time,
+                "end_time": f.end_time,
+            })
+        })
+        .collect();
+    serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Static description of a client-side visualization renderer: which DOM
+/// container the matching JS module binds to, which optional inline data blocks
+/// and attributes it consumes, and the message shown when the page exported no
+/// data.
+///
+/// This descriptor is the single seam that makes telemetry visualizations
+/// extensible through the `{{ viz }}` shortcode. Adding a new plot is:
+///   1. a `VizRenderer` entry + a `viz_renderer()` arm here,
+///   2. a JS module that binds to `id` / `data_class`,
+///   3. a `<script type="module">` tag in the page layout, and
+///   4. `{{ viz renderer="<id>" /}}` in the template.
+///
+/// No bespoke Rust rendering code is written per plot -- `render_viz` emits the
+/// container for all of them.
+struct VizRenderer {
+    /// Container element `id`, and the `renderer=` value that selects it.
+    id: &'static str,
+    /// Class on the container `<div>` (empty string omits the attribute).
+    container_class: &'static str,
+    /// Class on the inline JSON manifest `<script>` the module reads.
+    data_class: &'static str,
+    /// Emit the metric registry + captions blocks (chart.js consumes these).
+    include_registry: bool,
+    /// Emit the `data-default-range` attribute (chart.js initial window).
+    include_default_range: bool,
+    /// Emit the `data-explore-url` attribute ("Explore this data" cross-link).
+    include_explore: bool,
+    /// Message rendered inside the container when there are no datafiles.
+    empty_msg: &'static str,
+}
+
+/// Generic time-series charts (chart.js): metric registry/captions, a default
+/// window, and a per-chart explore cross-link.
+const VIZ_CHART: VizRenderer = VizRenderer {
+    id: "chart",
+    container_class: "chart-container",
+    data_class: "chart-data",
+    include_registry: true,
+    include_default_range: true,
+    include_explore: true,
+    empty_msg: "No data files available.",
+};
+
+/// Bespoke multi-plot analysis (overlay.js): its own DOM id, an explore
+/// cross-link, no metric registry.
+const VIZ_OVERLAY: VizRenderer = VizRenderer {
+    id: "overlay-chart",
+    container_class: "chart-container",
+    data_class: "overlay-data",
+    include_registry: false,
+    include_default_range: false,
+    include_explore: true,
+    empty_msg: "No data files available.",
+};
+
+/// Raw log/table viewer (log-viewer.js): manifest only.
+const VIZ_LOGS: VizRenderer = VizRenderer {
+    id: "log-viewer",
+    container_class: "",
+    data_class: "log-data",
+    include_registry: false,
+    include_default_range: false,
+    include_explore: false,
+    empty_msg: "No log files available.",
+};
+
+/// Resolve a `renderer=` name (from the `{{ viz }}` shortcode) to its
+/// descriptor. Unknown names yield `None` so the shortcode can surface an error.
+fn viz_renderer(name: &str) -> Option<&'static VizRenderer> {
+    match name {
+        "chart" => Some(&VIZ_CHART),
+        "overlay" => Some(&VIZ_OVERLAY),
+        "logs" | "log" | "log-viewer" => Some(&VIZ_LOGS),
+        _ => None,
+    }
+}
+
+/// Emit the container `<div>` + inline parquet manifest (and any optional data
+/// blocks/attributes) for a visualization renderer. The matching client-side
+/// module self-selects by `id`/`data_class` and no-ops when its container is
+/// absent, so a layout can load several modules and each page activates only
+/// the one whose container the template emitted.
+fn render_viz(
+    r: &VizRenderer,
+    datafiles: &[ExportedFile],
+    registry: &BTreeMap<String, String>,
+    captions: &BTreeMap<String, String>,
+    default_range: Option<&str>,
+    explore_url: Option<&str>,
+) -> String {
+    let class_attr = if r.container_class.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", r.container_class)
+    };
+
+    if datafiles.is_empty() {
+        return format!(
+            "<div{} id=\"{}\"><p>{}</p></div>",
+            class_attr, r.id, r.empty_msg
+        );
+    }
+
+    let json = datafiles_manifest_json(datafiles);
+
+    let default_range_attr = if r.include_default_range {
+        match default_range {
+            Some(v) if !v.is_empty() => format!(" data-default-range=\"{}\"", html_escape(v)),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    let explore_url_attr = if r.include_explore {
+        match explore_url {
+            Some(u) if !u.is_empty() => format!(" data-explore-url=\"{}\"", html_escape(u)),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    let registry_block = if r.include_registry && !registry.is_empty() {
+        let registry_json = serde_json::to_string(registry).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "<script type=\"application/json\" class=\"chart-registry\">{}</script>",
+            registry_json
+        )
+    } else {
+        String::new()
+    };
+
+    let captions_block = if r.include_registry && !captions.is_empty() {
+        let captions_json = serde_json::to_string(captions).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "<script type=\"application/json\" class=\"chart-captions\">{}</script>",
+            captions_json
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "<div{} id=\"{}\"{}{}>\
+         <script type=\"application/json\" class=\"{}\">{}</script>\
+         {}{}\
+         </div>",
+        class_attr,
+        r.id,
+        default_range_attr,
+        explore_url_attr,
+        r.data_class,
+        json,
+        registry_block,
+        captions_block
+    )
+}
+
 /// Render a chart container with inline datafile manifest.
 ///
-/// Emits two `<script type="application/json">` blocks:
-///   - `class="chart-data"` -- the data-file manifest (existing).
-///   - `class="chart-registry"` -- metric instrument-kind map keyed
-///     by `<param>.<unit>` (only emitted if the registry is
-///     non-empty, to keep chart-data layout unchanged for legacy
-///     dashboards).
+/// Thin alias over [`render_viz`] with the [`VIZ_CHART`] renderer; kept for the
+/// legacy `{{ chart }}` shortcode and existing call sites/tests.
 fn render_chart(
     datafiles: &[ExportedFile],
     registry: &BTreeMap<String, String>,
@@ -552,144 +753,43 @@ fn render_chart(
     default_range: Option<&str>,
     explore_url: Option<&str>,
 ) -> String {
-    if datafiles.is_empty() {
-        return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
-    }
-
-    let files_json: Vec<serde_json::Value> = datafiles
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "path": f.path,
-                "file": f.file,
-                "captures": f.captures,
-                "temporal": f.temporal,
-                "start_time": f.start_time,
-                "end_time": f.end_time,
-            })
-        })
-        .collect();
-
-    let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
-
-    let registry_block = if registry.is_empty() {
-        String::new()
-    } else {
-        let registry_json = serde_json::to_string(registry).unwrap_or_else(|_| "{}".to_string());
-        format!(
-            "<script type=\"application/json\" class=\"chart-registry\">{}</script>",
-            registry_json
-        )
-    };
-
-    let captions_block = if captions.is_empty() {
-        String::new()
-    } else {
-        let captions_json = serde_json::to_string(captions).unwrap_or_else(|_| "{}".to_string());
-        format!(
-            "<script type=\"application/json\" class=\"chart-captions\">{}</script>",
-            captions_json
-        )
-    };
-
-    let default_range_attr = match default_range {
-        Some(r) if !r.is_empty() => {
-            format!(" data-default-range=\"{}\"", html_escape(r))
-        }
-        _ => String::new(),
-    };
-
-    let explore_url_attr = match explore_url {
-        Some(u) if !u.is_empty() => {
-            format!(" data-explore-url=\"{}\"", html_escape(u))
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        "<div class=\"chart-container\" id=\"chart\"{}{}>\
-         <script type=\"application/json\" class=\"chart-data\">{}</script>\
-         {}\
-         {}\
-         </div>",
-        default_range_attr, explore_url_attr, json, registry_block, captions_block
+    render_viz(
+        &VIZ_CHART,
+        datafiles,
+        registry,
+        captions,
+        default_range,
+        explore_url,
     )
 }
 
-/// Render an overlay chart container for pump cycle analysis.
+/// Render an overlay (bespoke multi-plot analysis) container.
 ///
-/// Similar to render_chart but uses a different container ID and CSS class
-/// so that overlay.js picks it up instead of chart.js.
+/// Thin alias over [`render_viz`] with the [`VIZ_OVERLAY`] renderer; overlay.js
+/// binds to `id="overlay-chart"` and drives the pump-cycle plots.
 fn render_overlay_chart(datafiles: &[ExportedFile], explore_url: Option<&str>) -> String {
-    if datafiles.is_empty() {
-        return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
-    }
-
-    let files_json: Vec<serde_json::Value> = datafiles
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "path": f.path,
-                "file": f.file,
-                "captures": f.captures,
-                "temporal": f.temporal,
-                "start_time": f.start_time,
-                "end_time": f.end_time,
-            })
-        })
-        .collect();
-
-    let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
-
-    // Emit the explorer URL (when configured) so overlay.js can offer an
-    // "Explore this data" cross-link that hands the page's pump-cycles and
-    // cycle-summary parquet to the explorer as two separate datasets.
-    let explore_url_attr = match explore_url {
-        Some(u) if !u.is_empty() => {
-            format!(" data-explore-url=\"{}\"", html_escape(u))
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        "<div class=\"chart-container\" id=\"overlay-chart\"{}>\
-         <script type=\"application/json\" class=\"overlay-data\">{}</script>\
-         </div>",
-        explore_url_attr, json
+    render_viz(
+        &VIZ_OVERLAY,
+        datafiles,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+        explore_url,
     )
 }
 
-/// Render a log viewer container with inline datafile manifest.
+/// Render a log/table viewer container.
 ///
-/// Emits a `<div id="log-viewer">` with a `<script type="application/json">`
-/// block containing the file manifest. Client-side log-viewer.js reads this
-/// and uses DuckDB-WASM to query the parquet files with SQL.
+/// Thin alias over [`render_viz`] with the [`VIZ_LOGS`] renderer; log-viewer.js
+/// binds to `id="log-viewer"` and offers a SQL grid over the parquet manifest.
 fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
-    if datafiles.is_empty() {
-        return "<div id=\"log-viewer\"><p>No log files available.</p></div>".to_string();
-    }
-
-    let files_json: Vec<serde_json::Value> = datafiles
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "path": f.path,
-                "file": f.file,
-                "captures": f.captures,
-                "temporal": f.temporal,
-                "start_time": f.start_time,
-                "end_time": f.end_time,
-            })
-        })
-        .collect();
-
-    let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
-
-    format!(
-        "<div id=\"log-viewer\">\
-         <script type=\"application/json\" class=\"log-data\">{}</script>\
-         </div>",
-        json
+    render_viz(
+        &VIZ_LOGS,
+        datafiles,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+        None,
     )
 }
 
@@ -1684,6 +1784,106 @@ mod tests {
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
+    }
+
+    #[test]
+    fn test_render_viz_matches_legacy_aliases() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let registry = BTreeMap::from([("a.b".to_string(), "counter".to_string())]);
+        let captions = BTreeMap::from([("a.b".to_string(), "A over B".to_string())]);
+
+        // The unified renderer must produce byte-for-byte the same markup as the
+        // legacy alias functions for every built-in renderer.
+        assert_eq!(
+            render_viz(
+                &VIZ_CHART,
+                &files,
+                &registry,
+                &captions,
+                Some("1M"),
+                Some("/explore/")
+            ),
+            render_chart(&files, &registry, &captions, Some("1M"), Some("/explore/")),
+        );
+        assert_eq!(
+            render_viz(
+                &VIZ_OVERLAY,
+                &files,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+                Some("/explore/")
+            ),
+            render_overlay_chart(&files, Some("/explore/")),
+        );
+        assert_eq!(
+            render_viz(
+                &VIZ_LOGS,
+                &files,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+                None
+            ),
+            render_log_viewer(&files),
+        );
+    }
+
+    #[test]
+    fn test_render_viz_respects_renderer_capabilities() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec![],
+            temporal: BTreeMap::new(),
+            start_time: 0,
+            end_time: 0,
+        }];
+        let registry = BTreeMap::from([("a.b".to_string(), "counter".to_string())]);
+
+        // Overlay ignores the registry and default-range, but keeps explore.
+        let overlay = render_viz(
+            &VIZ_OVERLAY,
+            &files,
+            &registry,
+            &BTreeMap::new(),
+            Some("1M"),
+            Some("/explore/"),
+        );
+        assert!(overlay.contains("id=\"overlay-chart\""));
+        assert!(!overlay.contains("chart-registry"));
+        assert!(!overlay.contains("data-default-range"));
+        assert!(overlay.contains("data-explore-url=\"/explore/\""));
+
+        // Logs ignore registry, default-range and explore entirely.
+        let logs = render_viz(
+            &VIZ_LOGS,
+            &files,
+            &registry,
+            &BTreeMap::new(),
+            Some("1M"),
+            Some("/explore/"),
+        );
+        assert!(logs.contains("id=\"log-viewer\""));
+        assert!(!logs.contains("chart-registry"));
+        assert!(!logs.contains("data-default-range"));
+        assert!(!logs.contains("data-explore-url"));
+    }
+
+    #[test]
+    fn test_viz_renderer_lookup() {
+        assert!(viz_renderer("chart").is_some());
+        assert!(viz_renderer("overlay").is_some());
+        assert!(viz_renderer("logs").is_some());
+        assert!(viz_renderer("log-viewer").is_some());
+        assert!(viz_renderer("nope").is_none());
     }
 
     #[test]
