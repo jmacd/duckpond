@@ -190,7 +190,115 @@ To write a correct skeleton row for an *evicted* version without its bytes:
 Net shape: *N cheap metadata reads (skeleton) + windowed full-blob fetches*,
 versus a full clone's *N full-blob fetches*.
 
-## 6. Salvage from the spike
+## 6. The recursive ("composite") clone design
+
+§5 is about *which bytes* of one pond are resident. This section is about *which
+ponds* a clone pulls. They are orthogonal axes and compose (see §6.5).
+
+### 6.1 The problem: grafts are non-transitive
+
+A pond can **import** another pond's subtree at a mount point (e.g. the caspar
+**site** pond imports `water`, `noyo`, and `septic` staging ponds). Today one
+`pond restore` / `pond pull` copies exactly **one** pond's folded closure and
+leaves each import as a **dangling reference**: reconstituting the composite
+requires manually re-attaching every remote and pulling it. A "shallow" clone of
+a composite pond is therefore not very useful on its own.
+
+The reason is deliberate, not a bug: the content-addressed **Merkle fold stops
+at mount points** (`tlogfs/.../content_tree.rs`: "Foreign-pond rows … are never
+folded into this pond's tree; the fold skips a mount point and everything under
+it"). Imported data is materialized under the **foreign** `pond_id` with its
+**own** tip, and is excluded from the mounting pond's root-tree hash. So a mirror
+clone — one tip, one root-hash fold — *cannot* transitively pull imports; each
+foreign remote must be pulled separately.
+
+### 6.2 What the tree already records (the submodule-pointer model)
+
+Because the fold omits the mount node, the design records the graft as ordinary
+folded content so it survives replication as an inert pointer — directly
+analogous to a **git submodule pointer**:
+
+- **`/sys/remotes/<name>`** — REPLICATED `RemoteAttachment` YAML: `url`, `region`,
+  creds, `endpoint`, `allow_http`. (Note: **no direction/kind field** — both
+  `pond backup add` and `pond remote add` write identical YAML.)
+- **`/sys/grafts/<name>`** — REPLICATED `GraftPin { foreign_pond_id, mount_path,
+  pinned_tip }`. The graft `<name>` is the **same** name as its remote config.
+  Only **imports** create grafts; plain mirrors/backups (root-mount) do not.
+
+Both `SYS_REMOTES_DIR` and `SYS_GRAFTS_DIR` are hardcoded consts in `steward`
+(convention, not config-driven). Together a graft pin + its like-named remote
+carry everything needed to re-fetch a referenced pond to an exact, reproducible
+tip — the tree already *is* the recursive manifest.
+
+### 6.3 The config-split gap that blocks a naive shallow clone
+
+What is **not** replicated is per-replica **control** state (`raw_config`, the
+disposable control table): `remote.mode.<name>` (push / pull / both),
+`remote.mount_path.<name>`, and `last_pulled_tip:` / `last_pushed_tip:`
+watermarks. Critically, `pull_command` **dispatches mirror-vs-import on the
+control `mount_path`** — so even after a clone has the replicated remotes + graft
+pins, a plain `pond pull <name>` won't know to treat `<name>` as an import until
+the control table is **rehydrated** from the pins. A correct recursive clone must
+therefore *also* seed control from the replicated pins (mode = pull/import,
+`mount_path` = the pin's `mount_path`) for each graft it follows.
+
+### 6.4 Design: `pond clone <url> --recursive`
+
+Restore the top pond as today (§8), then walk grafts:
+
+1. Restore/pull the top pond to its tip; fold-verify against the remote root.
+2. Enumerate `/sys/grafts/*`. For each `GraftPin { foreign_pond_id, mount_path,
+   pinned_tip }`:
+   a. Open the like-named `/sys/remotes/<name>` for `url` + creds.
+   b. Pull that foreign pond **to `pinned_tip`** (reproducible; not "latest").
+   c. Materialize the mount at `mount_path` and **rehydrate control** for
+      `<name>` (mode = import, `mount_path`) so later `pond pull` dispatches
+      correctly (§6.3).
+   d. **Recurse** into that pond's own `/sys/grafts/*`.
+3. **Dedupe by `foreign_pond_id`** (a diamond import is fetched once) and **guard
+   cycles** (a visited-set on `foreign_pond_id`).
+
+Notes:
+- **Nothing from the mode/direction question is needed.** Grafts self-identify as
+  imports; the missing `/sys/remotes` direction field only matters for *root*
+  remotes (backup-vs-mirror), which the user considers inconsequential (read/write
+  replicas will dissolve the push/pull distinction).
+- **Reproducible by default; `--latest` to fast-forward.** Pinned tips give a
+  bit-exact composite; `--latest` re-pins each graft to its remote's current tip
+  (a deliberate, separate pointer bump — never silent, per operator policy).
+- **Hard-fail on missing creds.** If a graft's `/sys/remotes/<name>` references an
+  env var that is unset, fail loudly (matches the operator's hard-failure
+  preference); do not silently skip a referenced pond.
+- **Rides the O(N²) clone fix.** Each per-pond pull uses the batched
+  `preload_objects()` object-graph fetch, so recursion cost is linear in the ponds
+  actually referenced.
+
+### 6.5 Composing with the partial clone (§5)
+
+The two axes are independent and compose:
+
+| Flag | Axis | Meaning |
+|---|---|---|
+| `--recursive` | which **ponds** | follow graft pins transitively |
+| `--since <T>` | which **bytes** | promisor skeleton + windowed residency (§5) |
+
+`pond clone <url> --recursive --since <T>` = fetch the full graft closure of
+ponds, each as a windowed promisor clone. Each is a real, writable, fold-verified
+local pond; identity (`local root == remote root`) holds per pond regardless of
+recursion depth or byte residency.
+
+### 6.6 Open questions
+
+- **Config-driven convention?** Making `SYS_REMOTES_DIR` / `SYS_GRAFTS_DIR` policy
+  in a `pond config` menu (rather than hardcoded consts) is an open idea; recursion
+  does **not** require it — the hardcoded convention is sufficient.
+- **Control rehydration surface.** §6.4c reuses the same control-seeding that
+  `pond pull` of an import already performs (`materialize_mount` writes the pin;
+  the mode/mount_path control write happens in `pond remote add` / the pull path).
+  Confirm a single reusable helper seeds control from a pin so clone and pull
+  share one code path (avoid a second, drifting rehydrator).
+
+## 7. Salvage from the spike
 
 - **`ContentRemote::object_size()`** — cheap `HEAD`/inline-length sizing; broadly
   useful and a direct building block for §5.2/§5.4. (Reverted with the spike; to
@@ -200,7 +308,7 @@ versus a full clone's *N full-blob fetches*.
 - The **"skip rotations outside a window via name timestamp"** idea maps cleanly
   onto §5's `--since` selection of which blobs to fetch.
 
-## 7. Recommended local clone-to-preview workflow
+## 8. Recommended local clone-to-preview workflow
 
 Until a partial clone lands, the supported preview path is a **full local clone**
 of the pond, then normal tooling:
@@ -221,13 +329,17 @@ parallel read engine.
 > (command, storage options, cache location) in the operator guide, and record
 > the measured full-pull cost against staging.
 
-## 8. Status / next steps
+## 9. Status / next steps
 
 - [x] Studied and measured the remote-read pond (this document).
 - [x] Decided to set it aside; revert the spike commit.
+- [x] Landed the O(N²) object-graph fetch fix (batched `preload_objects()`), so
+      per-pond pulls are linear — a prerequisite for practical recursion.
 - [ ] Re-land `ContentRemote::object_size()` standalone when partial-clone work
       begins.
 - [ ] Resolve the blake3 cumulative-vs-per-version reconciliation (§5.4.1).
 - [ ] Prototype `pond pull --since <T>` (skeleton write + windowed fetch +
       read-miss policy).
-- [ ] Document the verified full-clone preview workflow (§7 action item).
+- [ ] Prototype `pond clone --recursive` (graft-walk + control rehydration +
+      dedupe/cycle guard) — §6. Compose with `--since` (§6.5).
+- [ ] Document the verified full-clone preview workflow (§8 action item).
