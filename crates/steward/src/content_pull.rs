@@ -120,6 +120,27 @@ pub async fn fetch_object_graph(
         return Ok(FetchedGraph::default());
     };
 
+    // Snapshot the whole `objects` partition once so every inline-object read
+    // below is an in-memory lookup rather than a per-hash full-table Delta scan
+    // (turns an O(objects x table-size) clone into a single scan).  The snapshot
+    // is per-operation: clear it before returning so a later read or re-pull
+    // never sees stale bytes.
+    remote
+        .preload_objects()
+        .await
+        .map_err(|e| StewardError::Content(e.to_string()))?;
+
+    let result = descend_from_tip(remote, tip).await;
+    remote.clear_object_cache();
+    result
+}
+
+/// Build the fetched graph from `tip`: walk the commit chain, then descend the
+/// tip commit's root tree.  Assumes the caller has preloaded the object cache.
+async fn descend_from_tip(
+    remote: &ContentRemote,
+    tip: ObjectHash,
+) -> Result<FetchedGraph, StewardError> {
     let mut graph = FetchedGraph {
         tip: Some(tip),
         ..FetchedGraph::default()
