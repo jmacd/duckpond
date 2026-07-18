@@ -210,6 +210,20 @@ impl ContentRemote {
         }
     }
 
+    /// Size in bytes of content object `hash`, resolved cheaply: an external
+    /// blob via a HEAD request (no body download); an inline object via its
+    /// stored row length. Returns `None` if the object is absent. Lets a
+    /// consumer enumerate version sizes without downloading multi-megabyte
+    /// blobs it does not need to read.
+    pub async fn object_size(&self, hash: ObjectHash) -> Result<Option<u64>> {
+        match self.store.object_store().head(&Self::blob_path(hash)).await {
+            Ok(meta) => return Ok(Some(meta.size as u64)),
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(StoreError::Invariant(format!("blob head: {e}"))),
+        }
+        Ok(self.get_object(hash).await?.map(|b| b.len() as u64))
+    }
+
     /// Stream a large blob's raw bytes from `reader` into the remote blob store,
     /// keyed by `hash`.  Chunks flow through a bounded buffer to a multipart
     /// upload; the bytes are hashed as they pass so a value can never be stored
