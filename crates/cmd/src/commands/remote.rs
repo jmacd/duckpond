@@ -238,41 +238,57 @@ async fn add_remote_attachment_internal(
     let storage_options = attachment.to_storage_options()?;
     let is_import = mode == RemoteMode::Pull && matches!(mount_path, Some(p) if p != "/");
     if is_import {
-        // Cross-pond import: content-addressed pull (ContentRemote graph
-        // fetch + foreign-pond rebuild + mount).  The remote must be a
-        // content remote whose store_id is a foreign pond.
-        match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options.clone()).await
-        {
-            Ok(remote) => {
-                let remote_store_id = remote.pond_id();
-                if remote_store_id == local_pond_id {
+        // Cross-pond import: content-addressed pull (graph fetch + foreign-pond
+        // rebuild + mount).  The source must expose a foreign pond store_id --
+        // either a content remote (`s3://`, `file://`) or a producer pond clone
+        // on local disk (`pond://<path>`, the develop-and-preview workflow).
+        let remote_store_id = if let Some(path) = attachment.url.strip_prefix("pond://") {
+            use steward::ContentSource;
+            match steward::LocalPondSource::open(path).await {
+                Ok(source) => source.pond_id(),
+                Err(e) => {
                     return Err(anyhow!(
-                        "remote `{}` at {} has store_id {} which matches this pond's pond_id; \
-                         mount path is reserved for cross-pond imports (foreign store_id must \
-                         differ). Use `/` to attach this remote as a mirror restart.",
+                        "remote `{}` at {} is not a readable local pond: {}; pull-mode \
+                         `pond://` remotes must point at an existing pond clone on disk.",
                         name,
                         attachment.url,
-                        remote_store_id
+                        e
                     ));
                 }
-                validate_no_foreign_store_id_collision(&mut ship, name, remote_store_id, overwrite)
-                    .await?;
-                log::info!(
-                    "remote {} ({}) ready for import (store_id={})",
-                    name,
-                    attachment.url,
-                    remote_store_id
-                );
             }
-            Err(_) => {
-                return Err(anyhow!(
-                    "remote `{}` at {} is not a content remote; pull-mode remotes must point at \
-                     an existing pond. The consumer cannot initialize an empty upstream remote.",
-                    name,
-                    attachment.url
-                ));
+        } else {
+            match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options.clone())
+                .await
+            {
+                Ok(remote) => remote.pond_id(),
+                Err(_) => {
+                    return Err(anyhow!(
+                        "remote `{}` at {} is not a content remote; pull-mode remotes must \
+                         point at an existing pond. The consumer cannot initialize an empty \
+                         upstream remote.",
+                        name,
+                        attachment.url
+                    ));
+                }
             }
+        };
+        if remote_store_id == local_pond_id {
+            return Err(anyhow!(
+                "remote `{}` at {} has store_id {} which matches this pond's pond_id; \
+                 mount path is reserved for cross-pond imports (foreign store_id must \
+                 differ). Use `/` to attach this remote as a mirror restart.",
+                name,
+                attachment.url,
+                remote_store_id
+            ));
         }
+        validate_no_foreign_store_id_collision(&mut ship, name, remote_store_id, overwrite).await?;
+        log::info!(
+            "remote {} ({}) ready for import (store_id={})",
+            name,
+            attachment.url,
+            remote_store_id
+        );
     } else {
         // Mirror restart, backup, or push/both: content-addressed remote.
         match sync_store::ContentRemote::open_at_url(&attachment.url, storage_options.clone()).await
