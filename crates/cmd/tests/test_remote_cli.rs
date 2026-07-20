@@ -2566,3 +2566,182 @@ async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
         assert_eq!(c_pin, b_pin, "C's replicated graft pin must equal B's");
     }
 }
+
+/// Variant 2b (`pond://` local content source): a consumer pond imports a
+/// producer pond clone directly from local disk -- no S3/`file://` remote,
+/// no `pond push`.  This is the local develop-and-preview workflow: clone a
+/// producer (e.g. water), edit and iterate, and have a consumer import its
+/// derived content directly from the on-disk clone.
+///
+/// Mirrors `cross_pond_pull_materializes_mount_entry` but replaces the
+/// push-to-`file://`-remote step with a `pond://<producer-path>` URL, so it
+/// exercises `open_content_source` -> `LocalPondSource` -> `fetch_object_graph`
+/// -> `import_pond` end-to-end.
+#[tokio::test]
+async fn cross_pond_pull_via_pond_scheme_materializes_mount_entry() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+
+    // 1) Producer pond A: init + write a file.  No remote, no push.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx, "test-host").await.expect("init A");
+    write_small_file(
+        &a_ctx,
+        "/sensor.txt",
+        b"data from local producer pond A",
+        vec!["copy", "sensor.txt"],
+    )
+    .await
+    .expect("write sensor.txt on A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+
+    // A `pond://` URL points straight at A's on-disk clone.
+    let pond_url = format!("pond://{}", a_pond.display());
+
+    // 2) Consumer pond B: init (distinct pond_id).
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx, "test-host").await.expect("init B");
+    let b_pond_id = {
+        let ship = b_ctx.open_pond().await.expect("open B");
+        ship.control_table().pond_id_uuid()
+    };
+    assert_ne!(
+        a_pond_id, b_pond_id,
+        "test invariant: A and B must have different pond_ids"
+    );
+
+    // 3) B attaches A as a cross-pond import via `pond://` at
+    //    /imports/upstream.  `remote add` opens a LocalPondSource to learn
+    //    A's (foreign) store_id and verify it differs from B's.
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &pond_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond pond:// attach on B");
+
+    // 4) B pulls -- fetch_object_graph + import_pond sourced entirely from
+    //    A's local clone (no network / no S3).
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream (pond://) on B");
+
+    // 5) The foreign file is readable on B through the mount.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/sensor.txt")
+        .await
+        .expect("read foreign file through pond:// mount");
+    assert_eq!(bytes, b"data from local producer pond A");
+
+    // 6) The mount entry carries A's pond_id (foreign namespace), exactly as
+    //    an S3/file import would -- so navigation through it resolves in A's
+    //    namespace (the property cross-pond dynamic-series resolution needs).
+    {
+        use steward::PondUserMetadata;
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        let tx = ship
+            .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
+            .await
+            .expect("begin read");
+        {
+            let fs = &*tx;
+            let root = fs.root().await.expect("root B");
+            let imports = root.open_dir_path("/imports").await.expect("open /imports");
+            let entry = imports
+                .get("upstream")
+                .await
+                .expect("get upstream")
+                .expect("upstream entry present");
+            let entry_pond = entry.node.id().pond_id();
+            let a_uuid7 = uuid7::Uuid::from(*a_pond_id.as_bytes());
+            assert_eq!(
+                entry_pond, a_uuid7,
+                "mount entry must carry foreign pond_id"
+            );
+        }
+        let _ = tx.commit().await.expect("commit read");
+    }
+
+    // 7) A second pull is idempotent.
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("second pond:// pull is idempotent");
+    let bytes2 = read_small_file(&b_ctx, "/imports/upstream/sensor.txt")
+        .await
+        .expect("read foreign file after second pond:// pull");
+    assert_eq!(bytes2, b"data from local producer pond A");
+}
+
+/// After the producer clone is edited (a new commit), re-pulling the
+/// `pond://` import brings the consumer up to the producer's new tip -- the
+/// "edit and iterate" half of the develop-and-preview loop.
+#[tokio::test]
+async fn cross_pond_pull_via_pond_scheme_follows_producer_edits() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx, "test-host").await.expect("init A");
+    write_small_file(&a_ctx, "/v.txt", b"v1", vec!["copy", "v.txt"])
+        .await
+        .expect("write v1 on A");
+
+    let pond_url = format!("pond://{}", a_pond.display());
+
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx, "test-host").await.expect("init B");
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &pond_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("attach pond:// on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("first pull on B");
+    assert_eq!(
+        read_small_file(&b_ctx, "/imports/upstream/v.txt")
+            .await
+            .expect("read v1 through mount"),
+        b"v1"
+    );
+
+    // Producer edits: overwrite the file (new version -> new tip).
+    write_small_file(&a_ctx, "/v.txt", b"v2-edited", vec!["copy", "v.txt"])
+        .await
+        .expect("write v2 on A");
+
+    // Re-pull picks up the producer's new tip.
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("re-pull on B after producer edit");
+    assert_eq!(
+        read_small_file(&b_ctx, "/imports/upstream/v.txt")
+            .await
+            .expect("read v2 through mount"),
+        b"v2-edited",
+        "re-pull must follow the producer's edit"
+    );
+}

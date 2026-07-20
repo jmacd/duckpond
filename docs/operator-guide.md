@@ -159,6 +159,44 @@ $ pond remote add septic s3://other-bucket/septic /imports/septic
 The first `pond pull` from a cross-pond remote materializes the mount
 entry at the configured path automatically.
 
+### Bootstrap a full clone (`pond restore`)
+
+To spin up a **fresh local replica** of a pond that is already published
+to a remote -- the quickest, most reliable way to get real
+production/staging data onto a workstation for development or preview --
+use `pond restore`.  In one command it discovers the source pond's id
+from the remote, stamps a local pond with that id, attaches the remote as
+a mirror at `/`, and pulls the full content graph.  It **refuses to run
+over an existing pond** (choose an empty `$POND` target), so it is safe
+to script.
+
+```
+# Local directory backup
+$ POND=~/preview-mysite pond restore origin file:///backups/mysite
+
+# S3 / MinIO.  Same credential rules as `pond backup add`:
+# `--secret-access-key` must be a single-quoted `${env:VAR}` reference, and the
+# variable must be exported so the pond process can resolve it at use time.
+$ export S3_SECRET_KEY=...
+$ POND=~/preview-mysite pond restore origin s3://my-bucket/mysite \
+    --region us-west-2 --endpoint http://minio.local:9000 --allow-http \
+    --access-key-id caspar \
+    --secret-access-key '${env:S3_SECRET_KEY}'
+```
+
+`restore` fetches the **entire object graph** reachable from the remote
+tip (every reachable blob, tree, and commit) and verifies it folds to the
+remote's root hash, so the first run transfers the pond's full live
+content.  The graph fetch loads the remote's object index once rather than
+per object, so a clone runs at roughly stream-once speed over the link
+(e.g. a multi-GB staging pond over LAN MinIO clones in a few minutes, not
+hours).
+
+A restored clone is a normal, fully queryable pond -- `pond list`,
+`pond cat <path> --sql "..."`, and factory runs all work against it with
+no network access.  Keep it current with an incremental `pond pull origin`,
+which transfers only the objects the clone is missing.
+
 ### List and detach
 
 ```
@@ -168,6 +206,53 @@ $ pond backup list                 # push-side attachments only
 $ pond remote remove upstream      # detach: drop YAML + watermarks
 $ pond remote remove --purge septic  # also drop the cross-pond mount entry
 ```
+
+### Preview an in-development site locally
+
+To iterate on site content -- the blog or new analysis pages -- against
+real data before deploying, build a **local preview pond**, generate the
+static site from it, and serve it.  There are two shapes, depending on how
+many data sources the site needs:
+
+1. **Single-pond site (`pond restore`).**  If the site's content and data
+   live in one pond, clone it with `pond restore` (above), then generate
+   and serve:
+
+   ```
+   $ POND=~/preview-mysite pond restore origin s3://my-bucket/mysite ...
+   $ POND=~/preview-mysite pond run /system/etc/90-sitegen build ./build
+   $ (cd ./build && python3 -m http.server 8080)   # http://localhost:8080/
+   ```
+
+2. **Composite site (init + cross-pond imports).**  If the site stitches
+   together several data ponds plus git-managed content (the usual shape
+   for a public site), bootstrap a fresh site pond and pull each source
+   in:
+
+   ```
+   $ POND=~/preview-site pond init
+   $ POND=~/preview-site pond apply -f config/site.yaml   # git-ingest + import remotes + sitegen node
+   $ POND=~/preview-site pond run /content pull            # site content from git
+   $ POND=~/preview-site pond run /system/etc/10-water pull  # cross-pond data import (repeat per source)
+   $ POND=~/preview-site pond run /system/etc/90-sitegen build ./build
+   $ (cd ./build && python3 -m http.server 8080)
+   ```
+
+   The cross-pond `pull` steps fetch only the objects the local pond is
+   missing, using the same one-shot object-index load as `restore`, so a
+   first full import of a large staging pond completes in minutes.
+
+The sitegen node path (`/system/etc/90-sitegen`) and the set of import
+remotes are defined by the deployment's site config, not by the platform.
+A deployment typically wraps these steps in scripts; the caspar.water
+site, for example, keeps a `local/` harness (`setup.sh` -> `sync.sh` ->
+`generate.sh` -> `serve.sh`, plus `refresh.sh` for fast content-only
+re-iteration) -- prefer such scripts over running the commands by hand.
+
+> Rebuild the site after each content change with the sitegen `build`
+> run; use an incremental `pull` (git content and/or data) only when the
+> upstream source has changed.  Only committed git content is visible to
+> git-ingest, so commit local edits before regenerating.
 
 ---
 
@@ -438,6 +523,7 @@ $ pond verify origin     # run on the producer side
 ```
 SETUP
   pond init                                   Create a pond
+  pond restore <name> <url> [s3 opts]         Bootstrap a full local clone (dev/preview)
   pond backup add <name> <url> [s3 opts]      Attach a push backup
   pond remote add <name> <url> <path>         Attach a pull remote (/ = mirror)
   pond remote list / pond backup list         List attachments
@@ -460,8 +546,9 @@ RECOVERY
   pond emergency ...                          Destructive recovery
 ```
 
-S3 options for `pond backup add` / `pond remote add`: `--region`,
-`--access-key-id`, `--secret-access-key`, `--endpoint`, `--allow-http`.
+S3 options for `pond restore` / `pond backup add` / `pond remote add`:
+`--region`, `--access-key-id`, `--secret-access-key`, `--endpoint`,
+`--allow-http`.
 `--secret-access-key` must be a `${env:VAR}` reference (single-quoted),
 not a literal secret.  See [cli-reference.md](cli-reference.md) for the
 complete list.

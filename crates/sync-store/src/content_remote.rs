@@ -28,7 +28,9 @@
 //! `object_store` provides the commit atomicity the Delta protocol already
 //! requires on S3.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::RwLock;
 
 use uuid::Uuid;
 
@@ -54,6 +56,18 @@ const POND_ID_KEY: &str = "pond_id";
 pub struct ContentRemote {
     store: Store,
     pond_id: Uuid,
+    /// Optional in-memory snapshot of the entire `objects` partition, keyed by
+    /// hex object hash.  [`Self::preload_objects`] fills it with a single
+    /// [`Store::list`] scan so a bulk read (e.g. cloning the object graph)
+    /// resolves each object from memory instead of a full-table Delta scan per
+    /// hash -- the difference between O(objects x table-size) and one scan.
+    ///
+    /// It is a *per-operation* snapshot, not a durable cache: a caller preloads
+    /// at the start of a bulk read and [`Self::clear_object_cache`]s at the end,
+    /// so a later read (or a re-pull after new commits) never sees stale bytes.
+    /// `None` means "not preloaded"; [`Self::get_object`] then falls back to a
+    /// per-hash store lookup, preserving prior behavior.
+    object_cache: RwLock<Option<HashMap<String, Vec<u8>>>>,
 }
 
 impl ContentRemote {
@@ -66,7 +80,11 @@ impl ContentRemote {
     /// exists there.
     pub async fn create_at(path: impl AsRef<Path>, pond_id: Uuid) -> Result<Self> {
         let store = Store::create(path).await?;
-        let mut me = Self { store, pond_id };
+        let mut me = Self {
+            store,
+            pond_id,
+            object_cache: RwLock::new(None),
+        };
         me.write_pond_id().await?;
         Ok(me)
     }
@@ -74,7 +92,11 @@ impl ContentRemote {
     /// Open an existing remote at `path`.
     pub async fn open_at(path: impl AsRef<Path>, pond_id: Uuid) -> Result<Self> {
         let store = Store::open(path).await?;
-        Ok(Self { store, pond_id })
+        Ok(Self {
+            store,
+            pond_id,
+            object_cache: RwLock::new(None),
+        })
     }
 
     /// Create a fresh remote at `url` with `storage_options` (e.g. S3 creds),
@@ -85,7 +107,11 @@ impl ContentRemote {
         storage_options: std::collections::HashMap<String, String>,
     ) -> Result<Self> {
         let store = Store::create_at_url(url, storage_options).await?;
-        let mut me = Self { store, pond_id };
+        let mut me = Self {
+            store,
+            pond_id,
+            object_cache: RwLock::new(None),
+        };
         me.write_pond_id().await?;
         Ok(me)
     }
@@ -105,7 +131,11 @@ impl ContentRemote {
             .map_err(|e| StoreError::Invariant(format!("pond_id not utf8: {e}")))?;
         let pond_id =
             Uuid::parse_str(&s).map_err(|e| StoreError::Invariant(format!("bad pond_id: {e}")))?;
-        Ok(Self { store, pond_id })
+        Ok(Self {
+            store,
+            pond_id,
+            object_cache: RwLock::new(None),
+        })
     }
 
     async fn write_pond_id(&mut self) -> Result<()> {
@@ -183,9 +213,51 @@ impl ContentRemote {
 
     /// Read the bytes of the object with the given hash, or `None` if absent.
     pub async fn get_object(&self, hash: ObjectHash) -> Result<Option<Vec<u8>>> {
+        // When preloaded, the snapshot is authoritative for the whole `objects`
+        // partition: a hit returns the bytes, and a miss definitively means the
+        // hash is not an inline object (e.g. it is a large external blob).
+        // Either way we skip the per-hash Delta scan entirely.
+        {
+            let guard = self
+                .object_cache
+                .read()
+                .map_err(|_| StoreError::Invariant("object_cache lock poisoned".into()))?;
+            if let Some(cache) = guard.as_ref() {
+                return Ok(cache.get(&hash.to_hex()).cloned());
+            }
+        }
         self.store
             .get(self.pond_id, OBJECTS_PARTITION, &hash.to_hex())
             .await
+    }
+
+    /// Snapshot the entire `objects` partition into memory with one
+    /// [`Store::list`] scan, so subsequent [`Self::get_object`] / [`Self::has_object`]
+    /// calls resolve from memory instead of one full-table Delta scan per hash.
+    ///
+    /// This is the fast path for bulk reads such as cloning the object graph.
+    /// The snapshot is *per-operation*: each call re-scans and replaces any
+    /// prior snapshot, and callers must [`Self::clear_object_cache`] when the
+    /// bulk read finishes so no later read sees stale bytes.  Only inline
+    /// objects live in the `objects` partition (large blobs are external,
+    /// Decision D7), so the snapshot is bounded and does not buffer bulk content.
+    pub async fn preload_objects(&self) -> Result<()> {
+        let rows = self.store.list(self.pond_id, OBJECTS_PARTITION).await?;
+        let map: HashMap<String, Vec<u8>> = rows.into_iter().collect();
+        let mut guard = self
+            .object_cache
+            .write()
+            .map_err(|_| StoreError::Invariant("object_cache lock poisoned".into()))?;
+        *guard = Some(map);
+        Ok(())
+    }
+
+    /// Drop any snapshot taken by [`Self::preload_objects`], restoring per-hash
+    /// store lookups.  Call this when a bulk read finishes.
+    pub fn clear_object_cache(&self) {
+        if let Ok(mut guard) = self.object_cache.write() {
+            *guard = None;
+        }
     }
 
     /// True if the object with the given hash is present on the remote.

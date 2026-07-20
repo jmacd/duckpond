@@ -51,6 +51,57 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     return metricKinds[chartKey] || "gauge";
   }
 
+  // Optional annotation manifest: a secondary interval export (emitted by
+  // sitegen as `script.chart-annotations`) drawn as shaded background bands
+  // behind every chart on the page. Rows come from parquet with `start_time`
+  // / `end_time` (timestamps) and a `label` categorizing each interval
+  // (e.g. "leak" / "no-leak"). Absent manifest => no bands (legacy behaviour).
+  const annotationsEl = document.querySelector('script.chart-annotations[type="application/json"]');
+  let annotationManifest = [];
+  if (annotationsEl) {
+    try {
+      annotationManifest = JSON.parse(annotationsEl.textContent) || [];
+    } catch (e) {
+      annotationManifest = [];
+    }
+  }
+
+  // Fixed colors for known interval labels; unknown labels fall back to gray.
+  // Kept literal (identity color scale) so vega-shared stays domain-agnostic.
+  // Pump-state and leak labels share this table (both drawn as bands).
+  const ANNOTATION_COLORS = {
+    leak: "#d64545",
+    "no-leak": "#3f9e5a",
+    pumping: "#4a72b0",
+    recovery: "#b8912f",
+  };
+  function annotationColor(label) {
+    return ANNOTATION_COLORS[label] || "#888888";
+  }
+
+  // The merged water-overlay carries two independent overlays (tracks) in its
+  // columns: pump state (categorical) and leak risk (score-scaled). Each is
+  // toggled by its own checkbox; the choice is persisted in localStorage so it
+  // sticks across pages. Legacy label-only annotation files map to the leak
+  // track. Defaults: both on.
+  const OVERLAY_TRACKS = [
+    { id: "pump", label: "Pump state" },
+    { id: "leak", label: "Leak risk" },
+  ];
+  const TRACK_STORAGE_KEY = "sitegen.overlayTracks";
+  function loadEnabledTracks() {
+    try {
+      const raw = localStorage.getItem(TRACK_STORAGE_KEY);
+      if (raw) return { pump: true, leak: true, ...JSON.parse(raw) };
+    } catch (e) { /* ignore */ }
+    return { pump: true, leak: true };
+  }
+  function saveEnabledTracks() {
+    try { localStorage.setItem(TRACK_STORAGE_KEY, JSON.stringify(enabledTracks)); }
+    catch (e) { /* ignore */ }
+  }
+  let enabledTracks = loadEnabledTracks();
+
   // Optional per-chart caption strings, also emitted by sitegen.  Keys
   // match `metricKinds`; values are plain text rendered beneath each
   // chart.  Missing entries render no caption.
@@ -202,6 +253,34 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     renderChart();
   };
   toolbar.appendChild(resetBtn);
+
+  // Overlay track checkboxes — only when this page has an annotation manifest.
+  // Toggling re-renders the chart(s) with the selected tracks and persists the
+  // choice. Placed in its own toolbar row so it reads as page-level controls.
+  if (annotationManifest.length) {
+    const trackBar = document.createElement("div");
+    trackBar.className = "overlay-tracks";
+    const lbl = document.createElement("span");
+    lbl.className = "overlay-tracks-label";
+    lbl.textContent = "Overlays:";
+    trackBar.appendChild(lbl);
+    OVERLAY_TRACKS.forEach(t => {
+      const wrap = document.createElement("label");
+      wrap.className = "overlay-track";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = enabledTracks[t.id] !== false;
+      cb.onchange = () => {
+        enabledTracks[t.id] = cb.checked;
+        saveEnabledTracks();
+        renderChart();
+      };
+      wrap.appendChild(cb);
+      wrap.appendChild(document.createTextNode(" " + t.label));
+      trackBar.appendChild(wrap);
+    });
+    toolbar.appendChild(trackBar);
+  }
 
   function showResetBtn() { resetBtn.disabled = false; }
   function hideResetBtn() { resetBtn.disabled = true; }
@@ -618,8 +697,111 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     }
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // Annotation files are pond-wide interval sets (not tiled by resolution), so
+  // they are registered once and queried in full for the visible window. Each
+  // file is expected to carry the merged water-overlay schema (start_time,
+  // end_time, pump_state, leak_score, leak_label, leak_confidence); a legacy
+  // label-only file is accepted too (its `label` maps to the leak track). The
+  // schema is probed once so the SELECT can substitute NULLs for absent
+  // columns without erroring in DuckDB.
+  const annotationUrls = annotationManifest.map(m => m.file).filter(Boolean);
+  let annotationColumns = null;
 
+  async function getAnnotationColumns(name) {
+    if (annotationColumns) return annotationColumns;
+    try {
+      const r = await conn.query(`SELECT * FROM read_parquet('${name}') LIMIT 0`);
+      annotationColumns = r.schema.fields.map(f => f.name);
+    } catch (e) {
+      annotationColumns = [];
+    }
+    return annotationColumns;
+  }
+
+  async function queryAnnotations(beginMs, endMs) {
+    if (annotationUrls.length === 0) return [];
+    const loaded = await Promise.all(annotationUrls.map(u => ensureFile(u)));
+    const names = loaded.filter(Boolean);
+    if (names.length === 0) return [];
+    const cols = await getAnnotationColumns(names[0]);
+    const has = c => cols.includes(c);
+    const sel = [
+      "epoch_ms(start_time) AS start",
+      'epoch_ms(end_time) AS "end"',
+      has("pump_state") ? "pump_state" : "NULL AS pump_state",
+      has("leak_score") ? "CAST(leak_score AS DOUBLE) AS leak_score" : "NULL AS leak_score",
+      has("leak_label")
+        ? "leak_label"
+        : (has("label") ? "label AS leak_label" : "NULL AS leak_label"),
+      has("leak_confidence")
+        ? "CAST(leak_confidence AS DOUBLE) AS leak_confidence"
+        : "NULL AS leak_confidence",
+    ].join(", ");
+    const parts = names.map(t =>
+      `SELECT ${sel} FROM read_parquet('${t}') ` +
+      `WHERE epoch_ms(end_time) >= ${beginMs} AND epoch_ms(start_time) <= ${endMs}`
+    );
+    const sql = parts.join(" UNION ALL BY NAME ") + " ORDER BY start ASC";
+    try {
+      const result = await conn.query(sql);
+      return result.toArray().map(r => ({
+        start: Number(r.start),
+        end: Number(r.end),
+        pump_state: r.pump_state == null ? null : String(r.pump_state),
+        leak_score: r.leak_score == null ? null : Number(r.leak_score),
+        leak_label: r.leak_label == null ? null : String(r.leak_label),
+        leak_confidence: r.leak_confidence == null ? null : Number(r.leak_confidence),
+      }));
+    } catch (e) {
+      console.error("Annotation query failed:", e);
+      return [];
+    }
+  }
+
+  // Convert merged-overlay rows into the flat band list vega-shared draws.
+  // Two tracks are layered: pump state (behind) then leak risk (on top). Each
+  // band carries an identity `color` and per-datum `opacity`. Pump bands use a
+  // fixed faint opacity; leak bands scale opacity with the score so confident
+  // leaks read strongly while low-risk periods stay faint. Only enabled tracks
+  // contribute.
+  const PUMP_OPACITY = 0.12;
+  const LEAK_OPACITY_FLOOR = 0.05;
+  const LEAK_OPACITY_SPAN = 0.4;
+  function buildAnnotationBands(rows) {
+    const bands = [];
+    if (enabledTracks.pump !== false) {
+      for (const r of rows) {
+        if (!r.pump_state) continue;
+        bands.push({
+          start: r.start,
+          end: r.end,
+          color: annotationColor(r.pump_state),
+          opacity: PUMP_OPACITY,
+          label: r.pump_state,
+        });
+      }
+    }
+    if (enabledTracks.leak !== false) {
+      for (const r of rows) {
+        if (r.leak_score == null && !r.leak_label) continue;
+        const score = r.leak_score == null
+          ? (r.leak_label === "leak" ? 1 : 0)
+          : Math.max(0, Math.min(1, r.leak_score));
+        const label = r.leak_label || (score >= 0.5 ? "leak" : "no-leak");
+        const conf = r.leak_confidence == null ? 1 : Math.max(0, Math.min(1, r.leak_confidence));
+        bands.push({
+          start: r.start,
+          end: r.end,
+          color: annotationColor(label),
+          opacity: LEAK_OPACITY_FLOOR + LEAK_OPACITY_SPAN * score * conf,
+          label: `${label} (${Math.round(score * 100)}%)`,
+        });
+      }
+    }
+    return bands;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
   // Resolve the page theme's foreground and a faint grid color from CSS custom
   // properties so the Vega charts match the surrounding light/dark styling
   // (Vega cannot read CSS variables itself, so we pass resolved colors in).
@@ -912,6 +1094,13 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
     const data = await queryData(domainBegin, domainEnd);
 
+    // Interval annotations (pump state / leak risk) for the visible window,
+    // shared by every chart on the page as shaded background band layers. Rows
+    // are queried once, then flattened into per-track bands honoring the
+    // current checkbox selection.
+    const annotationRows = await queryAnnotations(domainBegin, domainEnd);
+    const annotationBands = buildAnnotationBands(annotationRows);
+
     // Keep the raw rows for CSV export; disable the button when empty.
     lastData = data;
     downloadBtn.disabled = data.length === 0;
@@ -1002,6 +1191,7 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
         height: chartHeight,
         byteAxis: isBytes,
         theme: chartTheme,
+        annotations: annotationBands,
       });
 
       const values = plotData.map((d) => {

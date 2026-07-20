@@ -5,7 +5,7 @@
 //! Content-graph fetch: the consumer side of the content-addressed remote
 //! (design Section 8.5, Fork 2).
 //!
-//! This module implements the *fetch walk*: given a [`ContentRemote`] and its
+//! This module implements the *fetch walk*: given a [`ContentSource`] and its
 //! tip commit, descend the object graph by `child_hash` and collect the
 //! reachable, verified object closure.  It does no tlogfs rebuild yet; it
 //! produces the in-memory [`FetchedGraph`] a rebuild consumes, and it is the
@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use sync_store::ContentRemote;
+use crate::content_source::ContentSource;
 use sync_store::content::{
     Commit, ManifestEntry, ObjectHash, TreeEntry, decode_manifest, decode_recipe, decode_series,
     decode_tree,
@@ -109,7 +109,7 @@ impl FetchedGraph {
 /// fetched object's bytes do not hash to the key it was fetched under, or if a
 /// structured object fails to decode.
 pub async fn fetch_object_graph(
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     ref_name: &str,
 ) -> Result<FetchedGraph, StewardError> {
     let Some(tip) = remote
@@ -120,6 +120,27 @@ pub async fn fetch_object_graph(
         return Ok(FetchedGraph::default());
     };
 
+    // Snapshot the whole `objects` partition once so every inline-object read
+    // below is an in-memory lookup rather than a per-hash full-table Delta scan
+    // (turns an O(objects x table-size) clone into a single scan).  The snapshot
+    // is per-operation: clear it before returning so a later read or re-pull
+    // never sees stale bytes.
+    remote
+        .preload_objects()
+        .await
+        .map_err(|e| StewardError::Content(e.to_string()))?;
+
+    let result = descend_from_tip(remote, tip).await;
+    remote.clear_object_cache();
+    result
+}
+
+/// Build the fetched graph from `tip`: walk the commit chain, then descend the
+/// tip commit's root tree.  Assumes the caller has preloaded the object cache.
+async fn descend_from_tip(
+    remote: &dyn ContentSource,
+    tip: ObjectHash,
+) -> Result<FetchedGraph, StewardError> {
     let mut graph = FetchedGraph {
         tip: Some(tip),
         ..FetchedGraph::default()
@@ -157,7 +178,7 @@ pub async fn fetch_object_graph(
 /// Fetch and decode the tip commit's node manifest, verifying its bytes hash to
 /// the commit's `node_manifest_hash` (Section 4.5).
 async fn fetch_manifest(
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     manifest_hash: ObjectHash,
 ) -> Result<Vec<ManifestEntry>, StewardError> {
     let bytes = fetch_verified(remote, manifest_hash).await?;
@@ -166,7 +187,7 @@ async fn fetch_manifest(
 
 /// Recursively fetch a tree object and everything reachable from its entries.
 async fn fetch_tree(
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     tree_hash: ObjectHash,
     graph: &mut FetchedGraph,
 ) -> Result<(), StewardError> {
@@ -206,7 +227,7 @@ async fn fetch_tree(
 
 /// Fetch a series object and its version blobs.
 async fn fetch_series(
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     series_hash: ObjectHash,
     graph: &mut FetchedGraph,
 ) -> Result<(), StewardError> {
@@ -232,7 +253,7 @@ async fn fetch_series(
 /// rebuild time so a multi-gigabyte value never lands in a single buffer
 /// (Decision D7).  Either way the rebuild adopts the bytes by hash.
 async fn fetch_blob(
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     hash: ObjectHash,
     graph: &mut FetchedGraph,
 ) -> Result<(), StewardError> {
@@ -270,7 +291,10 @@ async fn fetch_blob(
 }
 
 /// Fetch an object's bytes and verify they hash to the requested key.
-async fn fetch_verified(remote: &ContentRemote, hash: ObjectHash) -> Result<Vec<u8>, StewardError> {
+async fn fetch_verified(
+    remote: &dyn ContentSource,
+    hash: ObjectHash,
+) -> Result<Vec<u8>, StewardError> {
     let bytes = remote
         .get_object(hash)
         .await
@@ -416,7 +440,7 @@ enum ApplyOp {
 /// the tip commit's `node_manifest_hash`; a mismatch is an error.
 pub async fn rebuild_pond(
     target: &mut Ship,
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     graph: &FetchedGraph,
 ) -> Result<RebuildOutcome, StewardError> {
     let root = graph
@@ -504,7 +528,7 @@ pub async fn rebuild_pond(
 /// must fold to the tip root tree hash with a matching node manifest.
 pub async fn import_pond(
     target: &mut Ship,
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
     graph: &FetchedGraph,
     foreign_pond_id: uuid7::Uuid,
 ) -> Result<RebuildOutcome, StewardError> {
@@ -1069,7 +1093,7 @@ async fn apply_ops(
     root_node_id: &str,
     root_wd: WD,
     ops: &[ApplyOp],
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
 ) -> Result<(), StewardError> {
     let mut dir_wd: HashMap<String, WD> = HashMap::new();
     let _ = dir_wd.insert(root_node_id.to_string(), root_wd.clone());
@@ -1183,7 +1207,7 @@ async fn write_version(
     mut writer: std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>,
     version: &VersionSource,
     entry_type: EntryType,
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
 ) -> Result<(), StewardError> {
     match version {
         VersionSource::Inline(bytes) => {
@@ -1202,7 +1226,7 @@ async fn write_version(
 async fn stream_external_blob(
     writer: &mut std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>,
     hash: ObjectHash,
-    remote: &ContentRemote,
+    remote: &dyn ContentSource,
 ) -> Result<(), StewardError> {
     use tokio::io::AsyncReadExt;
     let mut reader = remote

@@ -473,6 +473,32 @@ tr:hover td {
   color: var(--fg-muted);
 }
 
+.overlay-tracks {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--fg-secondary);
+}
+
+.overlay-tracks-label {
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.overlay-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.overlay-track input {
+  cursor: pointer;
+}
+
 /* ── Window readout / editor + shareable link ───────────────── */
 
 .window-bar {

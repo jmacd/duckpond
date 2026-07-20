@@ -57,6 +57,9 @@ pub struct PageJob {
     pub captures: Vec<String>,
     /// Exported data files for this page (empty for static routes)
     pub datafiles: Vec<ExportedFile>,
+    /// Optional annotation data files (a secondary export, resolved pond-wide)
+    /// drawn as a shaded chart background; empty when the route declares none.
+    pub annotations: Vec<ExportedFile>,
     /// Breadcrumb trail: (label, url)
     pub breadcrumbs: Vec<(String, String)>,
 }
@@ -111,6 +114,31 @@ pub fn expand_routes(
     }
 
     RouteExpansion { jobs, content_urls }
+}
+
+/// Resolve a route's optional `annotations` export into a flat file list.
+///
+/// Annotations are pond-wide interval data (all `$0` groups of the named export
+/// flattened), so every page under the route shares the same set. Returns an
+/// empty vec when the route declares no annotations (or the export is missing).
+fn resolve_annotations(
+    route: &RouteConfig,
+    exports: &BTreeMap<String, ExportContext>,
+) -> Vec<ExportedFile> {
+    match route.annotations.as_deref() {
+        Some(name) => match exports.get(name) {
+            Some(ctx) => ctx.by_key.values().flatten().cloned().collect(),
+            None => {
+                log::warn!(
+                    "Route '{}' references annotations export '{}' which has no results",
+                    route.name,
+                    name
+                );
+                vec![]
+            }
+        },
+        None => vec![],
+    }
 }
 
 /// Recursively expand a single route node and its children.
@@ -173,6 +201,7 @@ fn expand_route(
                     page_source: page.clone(),
                     captures: vec![],
                     datafiles,
+                    annotations: resolve_annotations(route, exports),
                     breadcrumbs: breadcrumbs.clone(),
                 });
             }
@@ -230,6 +259,7 @@ fn expand_route(
                         page_source: page.clone(),
                         captures,
                         datafiles: files.clone(),
+                        annotations: resolve_annotations(route, exports),
                         breadcrumbs: breadcrumbs.clone(),
                     });
                 }
@@ -302,6 +332,7 @@ fn expand_route(
                     page_source: page.source_path.clone(),
                     captures: vec![],
                     datafiles: vec![],
+                    annotations: vec![],
                     breadcrumbs,
                 });
             }
@@ -449,6 +480,7 @@ mod tests {
                 slug: "".to_string(),
                 page: Some("/site/index.md".to_string()),
                 export: None,
+                annotations: None,
                 content: None,
                 routes: vec![RouteConfig {
                     name: "params".to_string(),
@@ -456,6 +488,7 @@ mod tests {
                     slug: "params".to_string(),
                     page: Some("/site/params.md".to_string()),
                     export: None,
+                    annotations: None,
                     content: None,
                     routes: vec![RouteConfig {
                         name: "param".to_string(),
@@ -463,6 +496,7 @@ mod tests {
                         slug: "$0".to_string(),
                         page: Some("/site/param.md".to_string()),
                         export: Some("params".to_string()),
+                        annotations: None,
                         content: None,
                         routes: vec![],
                     }],
@@ -631,6 +665,7 @@ mod tests {
                 slug: "".to_string(),
                 page: Some("/site/index.md".to_string()),
                 export: None,
+                annotations: None,
                 content: None,
                 routes: vec![RouteConfig {
                     name: "pages".to_string(),
@@ -638,6 +673,7 @@ mod tests {
                     slug: "".to_string(),
                     page: None,
                     export: None,
+                    annotations: None,
                     content: Some("pages".to_string()),
                     routes: vec![],
                 }],

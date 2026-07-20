@@ -16,6 +16,7 @@ mod content_diff;
 mod content_objects;
 mod content_pull;
 mod content_push;
+mod content_source;
 mod content_tree;
 mod content_verify;
 mod control_table;
@@ -37,6 +38,7 @@ pub use content_pull::{
     FetchedGraph, FetchedObject, RebuildOutcome, fetch_object_graph, import_pond, rebuild_pond,
 };
 pub use content_push::{ContentPushOutcome, push_content_to_remote};
+pub use content_source::{BlobReader, ContentSource, LocalPondSource};
 pub use content_tree::{
     ContentTreeReport, MaterializedObjects, compute_content_tree, compute_content_tree_for_table,
     materialize_content_objects,

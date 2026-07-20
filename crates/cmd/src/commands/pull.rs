@@ -62,7 +62,7 @@ pub async fn pull_command(ship_context: &ShipContext, name: Option<String>) -> R
 /// refreshes `last_pulled_tip` only after a real rebuild/import lands.
 async fn already_at_tip(
     ship: &steward::Ship,
-    remote: &sync_store::ContentRemote,
+    remote: &dyn steward::ContentSource,
     url: &str,
     name: &str,
 ) -> Result<bool> {
@@ -82,6 +82,27 @@ async fn already_at_tip(
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Open a [`steward::ContentSource`] for `attachment`: a `pond://<path>` URL
+/// resolves to a producer pond clone on local disk
+/// ([`steward::LocalPondSource`]) for the local develop-and-preview workflow;
+/// any other URL (`s3://`, `file://`) opens a content-addressed remote store.
+async fn open_content_source(
+    attachment: &steward::RemoteAttachment,
+) -> Result<Box<dyn steward::ContentSource>> {
+    if let Some(path) = attachment.url.strip_prefix("pond://") {
+        let source = steward::LocalPondSource::open(path)
+            .await
+            .map_err(|e| anyhow!("open local pond source at `{}`: {}", path, e))?;
+        Ok(Box::new(source))
+    } else {
+        let storage_options = attachment.to_storage_options()?;
+        let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
+            .await
+            .map_err(|e| anyhow!("open content remote at `{}`: {}", attachment.url, e))?;
+        Ok(Box::new(remote))
+    }
 }
 
 async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
@@ -109,10 +130,10 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         return pull_mirror(ship, name, &attachment).await;
     }
 
-    let storage_options = attachment.to_storage_options()?;
-    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
+    let source = open_content_source(&attachment)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
+    let remote: &dyn steward::ContentSource = source.as_ref();
 
     let ship_ref = ship
         .as_pond_mut()
@@ -136,14 +157,14 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     // tip we last pulled, the mount is up to date -- skip the full graph fetch
     // and re-import entirely.  This is the bandwidth-bug guard: without it,
     // every pull re-walks and re-downloads the whole reachable object closure.
-    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+    if already_at_tip(ship_ref, remote, &attachment.url, name).await? {
         return Ok(());
     }
 
     // Fetch the foreign object graph and rebuild it under the foreign pond_id
     // partition, then mount it.  The local allocator stays contiguous; only the
     // foreign pond's seq frontier advances inside `import_pond`.
-    let graph = steward::fetch_object_graph(&remote, "main")
+    let graph = steward::fetch_object_graph(remote, "main")
         .await
         .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
     if graph.is_empty() {
@@ -154,7 +175,7 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         return Ok(());
     }
     let foreign_uuid7 = uuid7::Uuid::from(*foreign_pond_id.as_bytes());
-    let outcome = steward::import_pond(ship_ref, &remote, &graph, foreign_uuid7)
+    let outcome = steward::import_pond(ship_ref, remote, &graph, foreign_uuid7)
         .await
         .map_err(|e| anyhow!("import from `{}`: {}", attachment.url, e))?;
     log::info!(
@@ -202,10 +223,10 @@ async fn pull_mirror(
     name: &str,
     attachment: &steward::RemoteAttachment,
 ) -> Result<()> {
-    let storage_options = attachment.to_storage_options()?;
-    let remote = sync_store::ContentRemote::open_at_url(&attachment.url, storage_options)
+    let source = open_content_source(attachment)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
+    let remote: &dyn steward::ContentSource = source.as_ref();
 
     let ship_ref = ship
         .as_pond_mut()
@@ -213,11 +234,11 @@ async fn pull_mirror(
 
     // Incremental short-circuit (CA3): skip the full graph fetch and rebuild
     // when the mirror already reflects the remote tip.
-    if already_at_tip(ship_ref, &remote, &attachment.url, name).await? {
+    if already_at_tip(ship_ref, remote, &attachment.url, name).await? {
         return Ok(());
     }
 
-    let graph = steward::fetch_object_graph(&remote, "main")
+    let graph = steward::fetch_object_graph(remote, "main")
         .await
         .map_err(|e| anyhow!("fetch from `{}`: {}", attachment.url, e))?;
     if graph.is_empty() {
@@ -227,7 +248,7 @@ async fn pull_mirror(
         );
         return Ok(());
     }
-    let outcome = steward::rebuild_pond(ship_ref, &remote, &graph)
+    let outcome = steward::rebuild_pond(ship_ref, remote, &graph)
         .await
         .map_err(|e| anyhow!("rebuild from `{}`: {}", attachment.url, e))?;
     log::info!(
