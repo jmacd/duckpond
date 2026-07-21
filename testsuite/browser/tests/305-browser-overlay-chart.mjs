@@ -1,6 +1,6 @@
 /**
- * Overlay chart rendering test -- verifies overlay.js renders pump cycle
- * charts without errors.
+ * Overlay chart rendering test -- verifies overlay.js renders the well
+ * drawdown / Horner recovery band charts without errors.
  *
  * Looks for pages with an #overlay-chart container, loads them in Puppeteer,
  * and verifies:
@@ -198,8 +198,8 @@ async function testPage(browser, pagePath) {
   // ── "Explore this data" pivot ─────────────────────────────────────────────
   // The overlay chart offers a cross-link to the data explorer when sitegen
   // emitted a data-explore-url. Verify the button exists, then click it and
-  // confirm the explorer registers this page's two schemas as separate
-  // datasets (pump_cycles + cycle_summary) rather than a single merged view.
+  // confirm the explorer registers this chart's parquet files as a single
+  // `chart_data` view (chart.js-style handoff) selected in the picker.
   const hasExploreUrl = await tab.evaluate(() => {
     const el = document.getElementById("overlay-chart");
     return Boolean(el && el.dataset.exploreUrl);
@@ -212,24 +212,23 @@ async function testPage(browser, pagePath) {
         tab.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
         exploreBtn.click(),
       ]);
-      // Each overlay page is scoped to its own capture ($0), so it hands the
-      // explorer exactly the dataset(s) it loaded: pump_cycles or cycle_summary
-      // (the multi-dataset handoff supports 1..N). Confirm the handoff arrived
-      // via the URL hash and that the explorer prepended it to the picker as
-      // the selected dataset.
+      // Each band chart hands the explorer its own parquet file(s) via the
+      // `files=` hash param, registered under the single table `chart_data`
+      // together with a human `label`. Confirm the handoff arrived.
       const handed = await tab.evaluate(() => {
         const p = new URLSearchParams(location.hash.replace(/^#/, ""));
-        try {
-          return JSON.parse(p.get("datasets") || "[]");
-        } catch (e) {
-          return [];
-        }
+        return {
+          files: (p.get("files") || "").split(",").filter(Boolean),
+          label: p.get("label") || "",
+        };
       });
       check(
-        Array.isArray(handed) &&
-          handed.length > 0 &&
-          handed.every((d) => ["pump_cycles", "cycle_summary"].includes(d.table)),
-        `handoff carries page dataset(s) (${handed.map((d) => d.table).join(", ")})`
+        handed.files.length > 0,
+        `handoff carries chart parquet file(s) (${handed.files.length})`
+      );
+      check(
+        /drawdown by month|horner recovery by month/i.test(handed.label),
+        `handoff carries chart label (${handed.label})`
       );
       await tab
         .waitForSelector("select.explore-dataset option", { timeout: 120000 })
@@ -241,7 +240,7 @@ async function testPage(browser, pagePath) {
         return { options, selected };
       });
       check(
-        /pump cycles|cycle summary/i.test(picker.selected || ""),
+        /drawdown by month|horner recovery by month/i.test(picker.selected || ""),
         `explorer selects the handed dataset (${picker.selected})`
       );
     }

@@ -110,7 +110,7 @@ echo "--- Step 3: Create analysis config (cross-overlay reference) ---"
 
 cat > "${HOST_ROOT}/analysis.yaml" << 'YAML'
 entries:
-  - name: "pump-cycles"
+  - name: "drawdown-by-month"
     factory: "sql-derived-series"
     config:
       patterns:
@@ -152,21 +152,36 @@ entries:
               PARTITION BY pump_event_id ORDER BY timestamp
             ) as depth_at_start
           FROM filtered
+        ),
+        draw AS (
+          SELECT
+            date_trunc('month', event_start) as month_start,
+            CAST(EXTRACT(EPOCH FROM (timestamp - event_start)) AS BIGINT) as elapsed_s,
+            depth_at_start - depth as s
+          FROM with_meta
+          WHERE is_draw = true
+            AND EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
+        ),
+        agg AS (
+          SELECT month_start, elapsed_s,
+            approx_percentile_cont(s, 0.1) as s_p10,
+            approx_percentile_cont(s, 0.5) as s_p50,
+            approx_percentile_cont(s, 0.9) as s_p90,
+            COUNT(*) as n
+          FROM draw
+          GROUP BY month_start, elapsed_s
         )
         SELECT
-          timestamp,
-          CAST(pump_event_id AS INT) as pump_event_id,
-          CAST(EXTRACT(MONTH FROM event_start) AS INT) as month,
-          EXTRACT(EPOCH FROM (timestamp - event_start)) as elapsed_s,
-          depth_at_start - depth as drawdown,
-          depth,
-          depth_at_start as static_depth,
-          CASE WHEN is_draw THEN 'draw' ELSE 'recovery' END as phase
-        FROM with_meta
-        WHERE EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
-        ORDER BY timestamp
+          to_timestamp(EXTRACT(EPOCH FROM month_start) + elapsed_s) as timestamp,
+          CAST(EXTRACT(YEAR FROM month_start) AS VARCHAR) || '-' ||
+            LPAD(CAST(EXTRACT(MONTH FROM month_start) AS VARCHAR), 2, '0') as month,
+          elapsed_s,
+          s_p10, s_p50, s_p90,
+          CAST(n AS BIGINT) as n
+        FROM agg
+        ORDER BY month_start, elapsed_s
 
-  - name: "cycle-summary"
+  - name: "horner-by-month"
     factory: "sql-derived-series"
     config:
       patterns:
@@ -199,37 +214,54 @@ entries:
         filtered AS (
           SELECT * FROM with_event_id WHERE pump_event_id > 0
         ),
-        with_meta AS (
-          SELECT timestamp, depth, is_draw, pump_event_id,
+        rec_meta AS (
+          SELECT timestamp, depth, pump_event_id,
             FIRST_VALUE(timestamp) OVER (
               PARTITION BY pump_event_id ORDER BY timestamp
             ) as event_start,
-            FIRST_VALUE(depth) OVER (
-              PARTITION BY pump_event_id ORDER BY timestamp
-            ) as depth_at_start
+            FIRST_VALUE(timestamp) OVER (
+              PARTITION BY pump_event_id ORDER BY depth ASC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ) as trough_ts,
+            MAX(depth) OVER (PARTITION BY pump_event_id) as static_depth
           FROM filtered
         ),
-        capped AS (
-          SELECT * FROM with_meta
-          WHERE EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
+        rec AS (
+          SELECT
+            date_trunc('month', event_start) as month_start,
+            EXTRACT(EPOCH FROM (timestamp - event_start)) as tp_dt,
+            EXTRACT(EPOCH FROM (timestamp - trough_ts)) as dt,
+            static_depth - depth as s
+          FROM rec_meta
+          WHERE timestamp > trough_ts
+            AND EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
+        ),
+        bucketed AS (
+          SELECT month_start,
+            ROUND(log10(tp_dt / dt) / 0.05) * 0.05 as log_ratio,
+            s
+          FROM rec
+          WHERE dt > 0 AND tp_dt > 0
+        ),
+        agg AS (
+          SELECT month_start, log_ratio,
+            approx_percentile_cont(s, 0.1) as s_p10,
+            approx_percentile_cont(s, 0.5) as s_p50,
+            approx_percentile_cont(s, 0.9) as s_p90,
+            COUNT(*) as n
+          FROM bucketed
+          GROUP BY month_start, log_ratio
         )
         SELECT
-          CAST(pump_event_id AS INT) as pump_event_id,
-          MIN(timestamp) as timestamp,
-          CAST(EXTRACT(MONTH FROM MIN(event_start)) AS INT) as month,
-          CAST(EXTRACT(DOY FROM MIN(event_start)) AS INT) as day_of_year,
-          SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) * 60.0 as draw_duration_s,
-          SUM(CASE WHEN NOT is_draw THEN 1 ELSE 0 END) * 60.0 as recovery_duration_s,
-          COUNT(*) * 60.0 as total_duration_s,
-          MAX(depth_at_start - depth) as max_drawdown,
-          MAX(depth_at_start) as depth_at_start,
-          MAX(depth_at_start) as static_depth,
-          MIN(depth) as min_depth,
-          CAST(COUNT(*) AS INT) as num_points
-        FROM capped
-        GROUP BY pump_event_id
-        HAVING COUNT(*) >= 3
-        ORDER BY MIN(timestamp)
+          to_timestamp(EXTRACT(EPOCH FROM month_start)
+            + CAST(log_ratio * 1000 AS BIGINT)) as timestamp,
+          CAST(EXTRACT(YEAR FROM month_start) AS VARCHAR) || '-' ||
+            LPAD(CAST(EXTRACT(MONTH FROM month_start) AS VARCHAR), 2, '0') as month,
+          log_ratio,
+          s_p10, s_p50, s_p90,
+          CAST(n AS BIGINT) as n
+        FROM agg
+        ORDER BY month_start, log_ratio
 YAML
 
 echo "analysis.yaml created (reads from series:///reduced/...)"
@@ -253,23 +285,23 @@ check 'echo "${REDUCE_OUT}" | grep -q "30"' "reduce overlay has 30 rows"
 ANALYSIS_OUT=$(pond cat -d "${HOST_ROOT}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
   --hostmount "/analysis=host+dyndir:///analysis.yaml" \
-  "host+file:///analysis/pump-cycles" \
-  --format=table --sql "SELECT COUNT(DISTINCT pump_event_id) as cycles FROM source" 2>&1)
+  "host+file:///analysis/drawdown-by-month" \
+  --format=table --sql "SELECT COUNT(DISTINCT month) as months FROM source" 2>&1)
 echo "Analysis output: ${ANALYSIS_OUT}"
-check 'echo "${ANALYSIS_OUT}" | grep -q "3"' "analysis detects 3 pump cycles"
+check 'echo "${ANALYSIS_OUT}" | grep -q "2"' "drawdown-by-month aggregates 2 calendar months"
 
-# Verify cycle summary
+# Verify horner recovery series
 SUMMARY_OUT=$(pond cat -d "${HOST_ROOT}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
   --hostmount "/analysis=host+dyndir:///analysis.yaml" \
-  "host+file:///analysis/cycle-summary" \
-  --format=table --sql "SELECT pump_event_id, month, num_points FROM source ORDER BY pump_event_id" 2>&1)
+  "host+file:///analysis/horner-by-month" \
+  --format=table --sql "SELECT month, log_ratio, n FROM source ORDER BY month, log_ratio" 2>&1)
 echo "Summary output: ${SUMMARY_OUT}"
-check 'echo "${SUMMARY_OUT}" | grep -q "pump_event_id"' "cycle summary has expected columns"
+check 'echo "${SUMMARY_OUT}" | grep -q "log_ratio"' "horner-by-month has expected columns"
 
-# Verify months: cycles 1,2 in March (3), cycle 3 in July (7)
-check 'echo "${SUMMARY_OUT}" | grep -q "| 3 "' "March cycles detected (month=3)"
-check 'echo "${SUMMARY_OUT}" | grep -q "| 7 "' "July cycle detected (month=7)"
+# Verify months: two March cycles (2024-03), one July cycle (2024-07)
+check 'echo "${SUMMARY_OUT}" | grep -q "2024-03"' "March cycles detected (month=2024-03)"
+check 'echo "${SUMMARY_OUT}" | grep -q "2024-07"' "July cycle detected (month=2024-07)"
 
 # ==============================================================================
 # Step 5: Verify list --long shows entry types
@@ -284,8 +316,8 @@ LIST_OUT=$(pond list -d "${HOST_ROOT}" \
   "host+file:///analysis/*" --long 2>&1)
 echo "List output: ${LIST_OUT}"
 check 'echo "${LIST_OUT}" | grep -q "table:dynamic"' "list --long shows table:dynamic"
-check 'echo "${LIST_OUT}" | grep -q "pump-cycles"' "list shows pump-cycles entry"
-check 'echo "${LIST_OUT}" | grep -q "cycle-summary"' "list shows cycle-summary entry"
+check 'echo "${LIST_OUT}" | grep -q "drawdown-by-month"' "list shows drawdown-by-month entry"
+check 'echo "${LIST_OUT}" | grep -q "horner-by-month"' "list shows horner-by-month entry"
 
 # ==============================================================================
 # Step 6: Verify pond cat --explain
@@ -297,10 +329,10 @@ echo "--- Step 6: Verify pond cat --explain ---"
 EXPLAIN_OUT=$(pond cat -d "${HOST_ROOT}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
   --hostmount "/analysis=host+dyndir:///analysis.yaml" \
-  "host+file:///analysis/pump-cycles" --explain 2>&1)
+  "host+file:///analysis/drawdown-by-month" --explain 2>&1)
 echo "Explain output: ${EXPLAIN_OUT}"
 check 'echo "${EXPLAIN_OUT}" | grep -q "table:dynamic"' "explain shows entry type"
-check 'echo "${EXPLAIN_OUT}" | grep -q "pump_event_id"' "explain shows schema"
+check 'echo "${EXPLAIN_OUT}" | grep -q "s_p50"' "explain shows schema"
 check 'echo "${EXPLAIN_OUT}" | grep -q "elapsed_s"' "explain shows elapsed_s field"
 
 # ==============================================================================
@@ -314,8 +346,8 @@ echo "--- Step 7: Verify auto-format behavior ---"
 RAW_OUT=$(pond cat -d "${HOST_ROOT}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
   --hostmount "/analysis=host+dyndir:///analysis.yaml" \
-  "host+file:///analysis/pump-cycles" \
-  --sql "SELECT pump_event_id FROM source LIMIT 1" 2>/dev/null | file -)
+  "host+file:///analysis/drawdown-by-month" \
+  --sql "SELECT s_p50 FROM source LIMIT 1" 2>/dev/null | file -)
 echo "Auto-format pipe output: ${RAW_OUT}"
 check 'echo "${RAW_OUT}" | grep -qi "parquet\|data"' "auto-format produces parquet when piped"
 
@@ -422,25 +454,25 @@ echo ""
 echo "--- Verification ---"
 
 # HTML pages generated
-check 'test -f "${OUTDIR}/analysis/pump-cycles.html"' "pump-cycles.html exists"
-check 'test -f "${OUTDIR}/analysis/cycle-summary.html"' "cycle-summary.html exists"
+check 'test -f "${OUTDIR}/analysis/drawdown-by-month.html"' "drawdown-by-month.html exists"
+check 'test -f "${OUTDIR}/analysis/horner-by-month.html"' "horner-by-month.html exists"
 
 # Overlay JS asset
 check 'test -f "${OUTDIR}/overlay.js"' "overlay.js asset generated"
 
 # HTML contains overlay chart container
-check_contains "${OUTDIR}/analysis/pump-cycles.html" \
-  "pump-cycles has overlay chart container" \
+check_contains "${OUTDIR}/analysis/drawdown-by-month.html" \
+  "drawdown-by-month has overlay chart container" \
   'id="overlay-chart"'
 
 # HTML contains overlay data manifest
-check_contains "${OUTDIR}/analysis/pump-cycles.html" \
-  "pump-cycles has overlay data manifest" \
+check_contains "${OUTDIR}/analysis/drawdown-by-month.html" \
+  "drawdown-by-month has overlay data manifest" \
   'class="overlay-data"'
 
 # HTML includes overlay.js script
-check_contains "${OUTDIR}/analysis/pump-cycles.html" \
-  "pump-cycles loads overlay.js" \
+check_contains "${OUTDIR}/analysis/drawdown-by-month.html" \
+  "drawdown-by-month loads overlay.js" \
   'overlay.js'
 
 # Explorer page generated (cross-link target)
@@ -448,8 +480,8 @@ check 'test -f "${OUTDIR}/explore/index.html"' "explore page exists"
 
 # Overlay chart carries the explorer cross-link URL so overlay.js renders the
 # "Explore this data" pivot button.
-check_contains "${OUTDIR}/analysis/pump-cycles.html" \
-  "pump-cycles has data-explore-url cross-link" \
+check_contains "${OUTDIR}/analysis/drawdown-by-month.html" \
+  "drawdown-by-month has data-explore-url cross-link" \
   'data-explore-url'
 
 # Parquet data files exported
@@ -458,8 +490,8 @@ echo "  Parquet files: ${PARQUET_COUNT}"
 check '[ "${PARQUET_COUNT}" -gt 0 ]' "parquet data files exported"
 
 # Manifest references existing parquet files
-MANIFEST_FILE=$(grep -o '/data/pump-cycles/[^"]*\.parquet' \
-  "${OUTDIR}/analysis/pump-cycles.html" | head -1)
+MANIFEST_FILE=$(grep -o '/data/drawdown-by-month/[^"]*\.parquet' \
+  "${OUTDIR}/analysis/drawdown-by-month.html" | head -1)
 echo "  First manifest file: ${MANIFEST_FILE}"
 if [ -n "${MANIFEST_FILE}" ]; then
   check "test -f '${OUTDIR}${MANIFEST_FILE}'" "manifest parquet file exists on disk"

@@ -248,17 +248,20 @@ import { loadVega, sanitizeRows, buildBandSpec, monthShade } from "./vega-shared
   function section(title, blurb) {
     const wrap = document.createElement("section");
     wrap.className = "analysis-block";
+    const head = document.createElement("div");
+    head.className = "overlay-header";
     const h = document.createElement("h3");
     h.textContent = title;
-    wrap.appendChild(h);
+    head.appendChild(h);
     if (blurb) {
       const p = document.createElement("p");
       p.className = "chart-caption";
       p.textContent = blurb;
-      wrap.appendChild(p);
+      head.appendChild(p);
     }
+    wrap.appendChild(head);
     const chart = document.createElement("div");
-    chart.className = "chart-host";
+    chart.className = "chart-host overlay-vega";
     wrap.appendChild(chart);
     container.appendChild(wrap);
     return { wrap: wrap, chart: chart };
