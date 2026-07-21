@@ -140,7 +140,7 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
   const ranges = [
     ["12h", 0.5], ["24h", 1], ["2d", 2], ["7d", 7],
     ["2W", 14], ["1M", 30], ["3M", 90], ["6M", 180],
-    ["1Y", 365], ["2Y", 730], ["5Y", 1826],
+    ["1Y", 365], ["2Y", 730], ["5Y", 1826], ["10Y", 3652],
   ];
   // Will be reassigned after dataSpanDays is computed below.
   let activeDays = 90;
