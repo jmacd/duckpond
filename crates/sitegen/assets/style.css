@@ -895,6 +895,42 @@ body.explore-fullscreen .explore-results {
   overflow-y: auto;
 }
 
+/* ── Per-chart analysis toolbar + full screen ───────────────── */
+
+.analysis-toolbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.analysis-toolbar .fullscreen-toggle {
+  margin: 0;
+}
+
+/* One analysis chart expanded to fill the viewport (over the sidebar). The
+   Vega view refits width via its ResizeObserver; overlay.js bumps its height. */
+body.analysis-fullscreen {
+  overflow: hidden;
+}
+
+.analysis-block.block-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  margin: 0;
+  padding: 1rem 2rem 2rem;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.analysis-block.block-fullscreen .chart-host {
+  width: 100%;
+}
+
 .blog-post {
   background: var(--accent-wash);
   border: 1px solid var(--border);
