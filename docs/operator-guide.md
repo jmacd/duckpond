@@ -254,6 +254,59 @@ re-iteration) -- prefer such scripts over running the commands by hand.
 > upstream source has changed.  Only committed git content is visible to
 > git-ingest, so commit local edits before regenerating.
 
+#### Previewing sitegen asset (JS/CSS) changes
+
+The chart engine assets (`overlay.js`, `vega-shared.js`, `chart.js`,
+`style.css`, ...) are compiled *into* the `pond` binary with `include_str!`,
+so editing one has no effect until the binary is rebuilt.  The site config's
+SQL (e.g. a `sql-derived-series`) runs on whatever binary renders it, but a
+chart's JavaScript ships only in a new image -- a local preview with a
+freshly built binary is the only way to validate a chart change before merge.
+
+1. Rebuild a **debug** binary (fast, incremental; do not build `--release`):
+
+   ```
+   $ cargo build -p cmd --bin pond
+   ```
+
+2. Render and serve with that binary; re-run `build` after every asset edit
+   plus rebuild, and hard-refresh the browser:
+
+   ```
+   $ POND=./preview SITE_BASE_URL=/ ./target/debug/pond \
+       run /system/etc/90-sitegen build ./out
+   $ (cd ./out && python3 -m http.server 8080)
+   ```
+
+When the page under test is driven by a **derived series computed in a
+separate data pond** (e.g. the caspar.water `analysis` exports are computed
+in the *water* pond), you need not import that whole source.  Export each
+series to Parquet once and inject it straight into a throwaway preview pond:
+
+```
+# On the host holding the data, dump each series the page reads
+# (--format raw = Parquet bytes):
+$ POND=/path/to/water/_data pond cat 'oteljson:///ingest/*.json' \
+    --sql "$(cat series-query.sql)" --format raw > series.parquet
+
+# Locally: minimal preview pond, then copy the series into its export tree:
+$ POND=./preview pond init --birthplace preview
+$ POND=./preview pond apply -f preview.yaml   # git-ingest content/templates + sitegen node
+$ POND=./preview pond mkdir /sources/water /sources/water/analysis
+$ POND=./preview pond copy host+series:///abs/path/series.parquet \
+    /sources/water/analysis/<name>
+$ POND=./preview SITE_BASE_URL=/ ./target/debug/pond \
+    run /system/etc/90-sitegen build ./out
+```
+
+`preview.yaml` is a trimmed site config: git-ingest the content, templates and
+images; an `exports:` stage matching the injected path (`/sources/water/
+analysis/*`); and just the route(s) and sidebar for the page(s) under test.
+Add the `explore:` block if the page's "Explore this data" cross-link needs
+exercising.  Commit local template/content edits before regenerating (only
+committed git content is visible to git-ingest); the injected Parquet is
+local and needs no commit.
+
 ---
 
 ## 4. Routine operation
