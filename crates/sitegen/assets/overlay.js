@@ -3,26 +3,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Watertown sitegen -- overlay.js
-// Interactive pump cycle analysis with coordinated brush+filter.
+// Pump/well cycle analysis: two SERVER-SIDE aggregated charts, one band per
+// calendar month.
 //
-// Top: 4-year well-depth overview with a Vega-Lite interval selection for
-// time-range selection. Below: analysis charts (overlay, Horner, drawdown,
-// recovery, summary) that re-render when the selection changes.
+//   * Drawdown  -- drawdown (static - depth) vs elapsed seconds since pump-on.
+//   * Horner    -- residual drawdown vs log10((t_p + dt) / dt) during recovery.
 //
-// All charts render with Vega-Lite via the shared vega module (the Stage 3
-// S3.3 migration -- Observable Plot and D3 are no longer used here).
+// Each dataset already carries per-(calendar-month, x-bucket) P10 / P50 / P90,
+// computed in the water pond (see config/water.yaml: /analysis
+// drawdown-by-month and horner-by-month).  The browser therefore only draws
+// ~28 median lines + on-demand bands, so the page loads instantly -- the old
+// per-cycle overlay downloaded ~150k rows and drew ~3,900 lines.
 //
-// Data sources:
-//   pump-cycles: pump_event_id, month, elapsed_s, depth, static_depth, phase
-//   cycle-summary: pump_event_id, timestamp, month, draw_duration_s, ...
+// Datasets are recognized by their columns:
+//   drawdown-by-month: month, elapsed_s, s_p10, s_p50, s_p90, n
+//   horner-by-month:   month, log_ratio, s_p10, s_p50, s_p90, n
 
-import {
-  loadVega,
-  sanitizeRows,
-  buildMultiLineSpec,
-  buildDotLineSpec,
-  buildBrushOverviewSpec,
-} from "./vega-shared.js";
+import { loadVega, sanitizeRows, buildBandSpec, monthShade } from "./vega-shared.js";
 
 (async function () {
   "use strict";
@@ -45,6 +42,12 @@ import {
 
   const container = document.getElementById("overlay-chart");
   if (!container) return;
+  const exploreUrl = container.dataset.exploreUrl || "";
+  // Optional pre-selected month-of-year from a shared "Copy link" URL (?month=NN).
+  const initMonth = (function () {
+    const m = new URL(location.href).searchParams.get("month");
+    return m && /^(0[1-9]|1[0-2])$/.test(m) ? m : null;
+  })();
 
   let manifest;
   try {
@@ -79,7 +82,7 @@ import {
     return;
   }
 
-  // -- Load parquet files -----------------------------------------------------
+  // -- Register + classify parquet files --------------------------------------
 
   const registeredNames = new Map();
   let fileIdx = 0;
@@ -97,14 +100,11 @@ import {
     return name;
   }
 
-  const pumpCyclesTables = [];
-  const cycleSummaryTables = [];
-  // Absolute URLs + column lists per category, captured for the "Explore this
-  // data" cross-link so the explorer can register each schema as its own view.
-  const pumpCyclesFiles = [];
-  const cycleSummaryFiles = [];
-  let pumpCyclesCols = [];
-  let cycleSummaryCols = [];
+  const drawdownTables = [];
+  const hornerTables = [];
+  // Original manifest file URLs per chart, handed to the explorer verbatim.
+  const drawdownFiles = [];
+  const hornerFiles = [];
 
   for (const entry of manifest) {
     try {
@@ -115,33 +115,25 @@ import {
       const row = probe.toArray()[0];
       if (!row) continue;
       const cols = Object.keys(row);
-      const absUrl = new URL(entry.file, window.location.href).href;
-      if (cols.includes("elapsed_s") && cols.includes("pump_event_id")) {
-        pumpCyclesTables.push(name);
-        pumpCyclesFiles.push(absUrl);
-        if (pumpCyclesCols.length === 0) pumpCyclesCols = cols;
-      } else if (cols.includes("draw_duration_s") && cols.includes("pump_event_id")) {
-        cycleSummaryTables.push(name);
-        cycleSummaryFiles.push(absUrl);
-        if (cycleSummaryCols.length === 0) cycleSummaryCols = cols;
+      if (cols.includes("elapsed_s") && cols.includes("s_p50")) {
+        drawdownTables.push(name);
+        drawdownFiles.push(entry.file);
+      } else if (cols.includes("log_ratio") && cols.includes("s_p50")) {
+        hornerTables.push(name);
+        hornerFiles.push(entry.file);
       }
     } catch (e) {
       console.warn("overlay.js: failed to load", entry.file, e);
     }
   }
 
-  const hasPumpCycles = pumpCyclesTables.length > 0;
-  const hasCycleSummary = cycleSummaryTables.length > 0;
-
-  if (!hasPumpCycles && !hasCycleSummary) {
+  if (drawdownTables.length === 0 && hornerTables.length === 0) {
     container.innerHTML =
-      '<div class="empty-state">Unrecognized data shape for overlay chart.</div>';
+      '<div class="empty-state">Unrecognized data shape for pump analysis.</div>';
     return;
   }
 
-  // Resolve the page theme's foreground and a faint grid color from CSS custom
-  // properties so the Vega charts match the surrounding light/dark styling
-  // (Vega cannot read CSS variables itself; we pass resolved colors in).
+  // Resolve theme colors from CSS custom properties (Vega cannot read them).
   function resolveTheme() {
     const cs = getComputedStyle(document.body);
     const fg = (cs.getPropertyValue("--fg") || "").trim() || "#333333";
@@ -149,10 +141,6 @@ import {
   }
   const chartTheme = resolveTheme();
 
-  // Render a data-less Vega-Lite spec into `targetEl` with the supplied rows
-  // injected as data. The wrapper is appended synchronously by the caller so
-  // chart order is preserved; this async embed fills it in when ready. Errors
-  // surface inline rather than throwing out of the (unawaited) render path.
   async function embedVega(targetEl, spec, rows, fields) {
     try {
       targetEl.style.width = "100%";
@@ -160,18 +148,17 @@ import {
       const renderSpec = { ...spec, data: { values: sanitizeRows(fields, rows) } };
       const res = await embed(targetEl, renderSpec, { actions: false, renderer: "svg" });
       refitView(res && res.view, targetEl);
+      return (res && res.view) || null;
     } catch (e) {
       targetEl.innerHTML =
         '<div class="empty-state">Chart render failed: ' +
         String((e && e.message) || e) +
         "</div>";
+      return null;
     }
   }
 
-  // Vega's `width: "container"` reads the element's clientWidth at embed time.
-  // When layout/fonts have not settled the element can measure zero width, which
-  // collapses every datum to x=0 and leaves the plot blank. Re-fit to the real
-  // width once the layout settles and on every resize so lines span the plot.
+  // Re-fit container width once layout/fonts settle (see vega width:"container").
   function refitView(view, targetEl) {
     if (!view) return;
     const refit = () => {
@@ -183,727 +170,296 @@ import {
     new ResizeObserver(refit).observe(targetEl);
   }
 
-  // -- Constants ---------------------------------------------------------------
+  // -- Load aggregated rows ---------------------------------------------------
 
-  const monthNames = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-  ];
-
-  const monthColors = [
-    "#2166ac", "#4393c3", "#92c5de", "#d1e5f0",
-    "#fddbc7", "#f4a582", "#d6604d", "#b2182b",
-    "#8856a7", "#810f7c", "#1b7837", "#762a83",
-  ];
-
-  function monthColor(m) {
-    return monthColors[(m - 1) % 12];
-  }
-
-  function arrayMax(arr, fn) {
-    let max = -Infinity;
-    for (const v of arr) {
-      const x = fn(v);
-      if (x > max) max = x;
-    }
-    return max;
-  }
-
-  // -- Query all data upfront -------------------------------------------------
-
-  let allPumpRows = [];
-  let allSummaryRows = [];
-
-  if (hasPumpCycles) {
-    const unionSql = pumpCyclesTables
+  async function loadRows(tables, xCol) {
+    if (tables.length === 0) return [];
+    const unionSql = tables
       .map(function (t) { return "SELECT * FROM read_parquet('" + t + "')"; })
       .join(" UNION ALL BY NAME ");
-    try {
-      const result = await conn.query(
-        "SELECT pump_event_id, month, elapsed_s, depth, static_depth, phase " +
-        "FROM (" + unionSql + ") WHERE depth > 30 AND depth < 50 " +
-        "ORDER BY pump_event_id, elapsed_s"
-      );
-      const data = result.toArray();
-      console.log("overlay.js: loaded", data.length, "pump cycle rows");
+    const result = await conn.query(
+      "SELECT month, " + xCol + ", s_p10, s_p50, s_p90, n " +
+      "FROM (" + unionSql + ") ORDER BY month, " + xCol
+    );
+    return result.toArray();
+  }
 
-      const seenEvents = new Set();
-      for (const d of data) {
-        const event = Number(d.pump_event_id);
-        const month = Number(d.month);
-        const color = monthColor(month);
-        const staticDepth = Number(d.static_depth);
+  const num = function (v) { return typeof v === "bigint" ? Number(v) : Number(v); };
 
-        if (!seenEvents.has(event) && staticDepth > 0) {
-          seenEvents.add(event);
-          allPumpRows.push({
-            event, month, color,
-            elapsed_min: -1,
-            depth: staticDepth,
-            drawdown: 0,
-            phase: "static",
-          });
-        }
-
-        allPumpRows.push({
-          event, month, color,
-          elapsed_min: Number(d.elapsed_s) / 60.0,
-          depth: Number(d.depth),
-          drawdown: staticDepth - Number(d.depth),
-          phase: String(d.phase),
-        });
-      }
-    } catch (e) {
-      console.error("Pump cycle query failed:", e);
+  // Add month-of-year, year, and a per-year perceptual shade of the month hue
+  // (darker = older, lighter = newer) so a selected month's years are distinct.
+  function decorateMonths(rows) {
+    if (rows.length === 0) return rows;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const r of rows) {
+      const y = parseInt(r.month.slice(0, 4), 10);
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
     }
-  }
-
-  if (hasCycleSummary) {
-    const unionSql = cycleSummaryTables
-      .map(function (t) { return "SELECT * FROM read_parquet('" + t + "')"; })
-      .join(" UNION ALL BY NAME ");
-    try {
-      const result = await conn.query(
-        "SELECT * FROM (" + unionSql + ") ORDER BY timestamp"
-      );
-      const data = result.toArray();
-      console.log("overlay.js: loaded", data.length, "cycle summary rows");
-
-      for (const d of data) {
-        allSummaryRows.push({
-          pump_event_id: Number(d.pump_event_id),
-          timestamp: new Date(
-            Number(
-              typeof d.timestamp === "bigint"
-                ? d.timestamp / 1000000n
-                : d.timestamp
-            )
-          ),
-          month: Number(d.month),
-          day_of_year: Number(d.day_of_year),
-          draw_duration_min: Number(d.draw_duration_s) / 60.0,
-          recovery_duration_min: Number(d.recovery_duration_s) / 60.0,
-          total_duration_min: Number(d.total_duration_s) / 60.0,
-          max_drawdown: Number(d.max_drawdown),
-          depth_at_start: Number(d.depth_at_start),
-          static_depth: d.static_depth != null ? Number(d.static_depth) : null,
-          min_depth: Number(d.min_depth),
-          num_points: Number(d.num_points),
-          duty_cycle: d.duty_cycle != null ? Number(d.duty_cycle) : null,
-          inter_pump_min: d.inter_pump_s != null ? Number(d.inter_pump_s) / 60.0 : null,
-        });
-      }
-    } catch (e) {
-      console.error("Cycle summary query failed:", e);
+    const span = maxY > minY ? maxY - minY : 1;
+    for (const r of rows) {
+      const moy = r.month.slice(5, 7);
+      const t = (parseInt(r.month.slice(0, 4), 10) - minY) / span; // 0 old..1 new
+      r.moy = moy;
+      r.year = r.month.slice(0, 4);
+      r.shade = monthShade(parseInt(moy, 10) - 1, t);
     }
+    return rows;
   }
 
-  if (allPumpRows.length === 0 && allSummaryRows.length === 0) {
-    container.innerHTML =
-      '<div class="empty-state">No pump cycle data found.</div>';
-    return;
+  let drawdownRows = [];
+  let hornerRows = [];
+  try {
+    const raw = await loadRows(drawdownTables, "elapsed_s");
+    drawdownRows = raw.map(function (d) {
+      return {
+        month: String(d.month),
+        elapsed_min: num(d.elapsed_s) / 60.0,
+        s_p10: num(d.s_p10),
+        s_p50: num(d.s_p50),
+        s_p90: num(d.s_p90),
+        n: num(d.n),
+      };
+    });
+  } catch (e) {
+    console.error("drawdown query failed:", e);
   }
-
-  // -- Data-volume control state ----------------------------------------------
-  // Long pump-down events are the most interesting, so the page opens focused on
-  // roughly the longest 10% of cycles (90th-percentile floor on draw duration).
-  // A slider lets the visitor lower the threshold to reveal shorter cycles.
-  const drawDurations = allSummaryRows
-    .map(function (r) { return r.draw_duration_min; })
-    .filter(function (v) { return v != null && isFinite(v); })
-    .sort(function (a, b) { return a - b; });
-  const maxDurationMin = drawDurations.length
-    ? Math.ceil(drawDurations[drawDurations.length - 1])
-    : 0;
-  function percentile(sorted, p) {
-    if (!sorted.length) return 0;
-    const idx = Math.min(sorted.length - 1, Math.floor(p * sorted.length));
-    return sorted[idx];
+  try {
+    const raw = await loadRows(hornerTables, "log_ratio");
+    hornerRows = raw.map(function (d) {
+      return {
+        month: String(d.month),
+        log_ratio: num(d.log_ratio),
+        s_p10: num(d.s_p10),
+        s_p50: num(d.s_p50),
+        s_p90: num(d.s_p90),
+        n: num(d.n),
+      };
+    });
+  } catch (e) {
+    console.error("horner query failed:", e);
   }
-  let durationThresholdMin = Math.floor(percentile(drawDurations, 0.9));
-  // The currently selected time range (null = full range), tracked so the
-  // duration slider re-renders against the same window and vice versa.
-  let currentDateRange = null;
 
   // -- DOM layout -------------------------------------------------------------
 
   container.innerHTML = "";
 
-  const overviewSection = document.createElement("div");
-  overviewSection.className = "overview-section";
-
-  // Controls bar: minimum-pump-duration slider plus the cycle count (shown once
-  // here, next to the data-volume control, rather than repeated in plot titles).
-  const controlsBar = document.createElement("div");
-  controlsBar.className = "overlay-controls";
-  controlsBar.style.cssText =
-    "display:flex;flex-wrap:wrap;align-items:center;gap:10px;" +
-    "padding:8px 0;font-size:14px;color:var(--fg-muted,#6b7280)";
-
-  const durLabel = document.createElement("label");
-  durLabel.textContent = "Minimum pump duration:";
-  durLabel.style.cssText = "font-weight:500";
-
-  const durSlider = document.createElement("input");
-  durSlider.type = "range";
-  durSlider.min = "0";
-  durSlider.max = String(maxDurationMin);
-  durSlider.step = "1";
-  durSlider.value = String(durationThresholdMin);
-  durSlider.style.cssText = "flex:0 0 220px;max-width:60vw";
-  durSlider.setAttribute("aria-label", "Minimum pump duration (minutes)");
-
-  const durValue = document.createElement("span");
-  durValue.style.cssText = "min-width:64px;font-variant-numeric:tabular-nums";
-  durValue.textContent = "\u2265 " + durationThresholdMin + " min";
-
-  const countSpan = document.createElement("span");
-  countSpan.className = "overlay-cycle-count";
-  countSpan.style.cssText =
-    "margin-left:auto;font-variant-numeric:tabular-nums";
-
-  controlsBar.append(durLabel, durSlider, durValue, countSpan);
-
-  const analysisSection = document.createElement("div");
-  analysisSection.className = "analysis-section";
-
-  container.appendChild(overviewSection);
-  container.appendChild(controlsBar);
-  container.appendChild(analysisSection);
-
-  let durTimer = null;
-  durSlider.addEventListener("input", function () {
-    durationThresholdMin = Number(durSlider.value);
-    durValue.textContent = "\u2265 " + durationThresholdMin + " min";
-    if (durTimer) clearTimeout(durTimer);
-    durTimer = setTimeout(function () {
-      renderAnalysis(currentDateRange);
-    }, 120);
-  });
-
-  // -- "Explore this data" per-plot cross-links --------------------------------
-  // Each analysis plot gets its own "Explore this data" button (like the simple
-  // timeseries charts), so a visitor can reconstruct that plot's query rather
-  // than being handed a single page-level pivot. Both page datasets (pump-cycles
-  // raw samples and per-event cycle summary) are handed over every time so joins
-  // across them are possible; the button preselects the plot's primary dataset
-  // and a starter SQL that reproduces the plot's data shape.
-  const exploreUrl = container.dataset.exploreUrl || "";
-
-  function exploreHandoff() {
-    const handoff = [];
-    if (pumpCyclesFiles.length) {
-      handoff.push({
-        table: "pump_cycles",
-        label: "Pump cycles (raw samples)",
-        files: pumpCyclesFiles,
-        columns: pumpCyclesCols,
-      });
+  function section(title, blurb) {
+    const wrap = document.createElement("section");
+    wrap.className = "analysis-block";
+    const head = document.createElement("div");
+    head.className = "overlay-header";
+    const h = document.createElement("h3");
+    h.textContent = title;
+    head.appendChild(h);
+    if (blurb) {
+      const p = document.createElement("p");
+      p.className = "chart-caption";
+      p.textContent = blurb;
+      head.appendChild(p);
     }
-    if (cycleSummaryFiles.length) {
-      handoff.push({
-        table: "cycle_summary",
-        label: "Cycle summary (per event)",
-        files: cycleSummaryFiles,
-        columns: cycleSummaryCols,
-      });
-    }
-    return handoff;
+    wrap.appendChild(head);
+    const chart = document.createElement("div");
+    chart.className = "chart-host overlay-vega";
+    wrap.appendChild(chart);
+    container.appendChild(wrap);
+    return { wrap: wrap, chart: chart };
   }
 
-  function addExploreButton(headerEl, primaryTable, sql) {
-    if (!exploreUrl) return;
-    const handoff = exploreHandoff();
-    if (!handoff.length) return;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "explore-data";
-    btn.textContent = "Explore this data";
-    btn.style.cssText = "float:right;margin-left:12px";
-    btn.addEventListener("click", function () {
-      const params = new URLSearchParams();
-      params.set("datasets", JSON.stringify(handoff));
-      params.set("dataset", primaryTable);
-      params.set("sql", sql);
-      location.assign(exploreUrl + "#" + params.toString());
-    });
-    headerEl.insertBefore(btn, headerEl.firstChild);
+  // Default explorer visualization for an analysis dataset: one median line per
+  // calendar month over the aggregated x column. The explorer injects the query
+  // result as a view named `chart_data`, so this mirrors the parquet columns.
+  function buildExploreSpec(xCol, xTitle, yTitle) {
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      height: 340,
+      config: { scale: { zero: false } },
+      mark: { type: "line", clip: true, tooltip: true },
+      encoding: {
+        x: { field: xCol, type: "quantitative", title: xTitle },
+        y: { field: "s_p50", type: "quantitative", title: yTitle },
+        color: { field: "month", type: "nominal", title: "Month" },
+      },
+    };
   }
 
-  // -- Build event ID lookup --------------------------------------------------
-
-  const allEventIds = new Set();
-  for (const r of allPumpRows) allEventIds.add(r.event);
-  for (const r of allSummaryRows) allEventIds.add(r.pump_event_id);
-
-  // -- Overview chart with Vega interval selection ----------------------------
-
-  // Month legend (always shows all 12 months)
-  const legendDiv = document.createElement("div");
-  legendDiv.className = "overlay-header";
-  legendDiv.innerHTML = buildMonthLegend([1,2,3,4,5,6,7,8,9,10,11,12]);
-  overviewSection.appendChild(legendDiv);
-
-  // The Vega view backing the overview; rebuilt when zooming into a selection.
-  let overviewView = null;
-
-  if (allSummaryRows.length > 0) {
-    const ovHeader = document.createElement("div");
-    ovHeader.className = "overlay-header";
-    ovHeader.innerHTML =
-      "<h3>Well Depth Timeline</h3>" +
-      '<p class="chart-subtitle">Brush to select a time range, then ' +
-      "release to zoom in. All charts below update to the selection.</p>";
-    overviewSection.appendChild(ovHeader);
-
-    // Reset button
-    const resetBtn = document.createElement("button");
-    resetBtn.textContent = "Reset to full range";
-    resetBtn.style.cssText =
-      "margin:0 0 8px 60px;padding:4px 12px;font-size:13px;" +
-      "cursor:pointer;border:1px solid #999;border-radius:4px;" +
-      "background:var(--bg,#fff);color:var(--fg,#333)";
-    resetBtn.addEventListener("click", function () {
-      embedOverview(null);
-      renderAnalysis(null);
-    });
-    overviewSection.appendChild(resetBtn);
-
-    const ovHolder = document.createElement("div");
-    ovHolder.className = "overlay-vega";
-    overviewSection.appendChild(ovHolder);
-
-    // Project the summary rows once for the overview: a temporal timestamp
-    // (epoch-ms), the per-row month color used verbatim, and the stem top
-    // (static depth, falling back to the cycle's start depth).
-    const overviewRows = allSummaryRows.map(function (d) {
-      return {
-        timestamp: +d.timestamp,
-        min_depth: d.min_depth,
-        static_depth: d.static_depth,
-        y_top: d.static_depth != null ? d.static_depth : d.depth_at_start,
-        color: monthColor(d.month),
-      };
-    });
-
-    // (Re)render the overview chart, optionally zoomed to an [t0, t1] epoch-ms
-    // window. Each embed replaces the holder's content, so the pointerup
-    // listener is attached once to the holder (below), not per embed.
-    async function embedOverview(domain) {
-      const spec = buildBrushOverviewSpec({
-        yDomain: [34, 46],
-        height: 160,
-        theme: chartTheme,
-      });
-      if (domain) spec.encoding.x.scale = { domain: domain };
-      try {
-        const embed = await loadVega();
-        if (overviewView) {
-          try { overviewView.finalize(); } catch (e) { /* already gone */ }
-          overviewView = null;
-        }
-        ovHolder.style.width = "100%";
-        const res = await embed(
-          ovHolder,
-          { ...spec, data: { values: overviewRows } },
-          { actions: false, renderer: "svg" }
-        );
-        overviewView = res.view;
-        refitView(overviewView, ovHolder);
-      } catch (e) {
-        ovHolder.innerHTML =
-          '<div class="empty-state">Overview render failed: ' +
-          String((e && e.message) || e) + "</div>";
+  // Read the currently legend-selected month-of-year ('01'..'12') from a Vega
+  // view's point-selection store, or null when nothing is selected.
+  function selectedMonth(view) {
+    try {
+      const store = view.data("monthSel_store");
+      if (store && store.length && store[0].values && store[0].values.length) {
+        return String(store[0].values[0]);
       }
-    }
+    } catch (e) { /* view not ready */ }
+    return null;
+  }
 
-    // The Vega interval selection updates continuously while dragging; act on
-    // release. Read the `brush` signal's x extent, drive the analysis charts,
-    // and re-render the overview zoomed into the selection (mirrors the old
-    // D3 brush-then-zoom behaviour). A plain click (empty selection) is a no-op.
-    let releaseTimer = null;
-    ovHolder.addEventListener("pointerup", function () {
-      if (releaseTimer) clearTimeout(releaseTimer);
-      releaseTimer = setTimeout(function () {
-        const sel = overviewView && overviewView.signal("brush");
-        const ext = sel && sel.timestamp;
-        if (ext && ext.length === 2 && ext[0] !== ext[1]) {
-          renderAnalysis([new Date(ext[0]), new Date(ext[1])]);
-          embedOverview([ext[0], ext[1]]);
-        }
-      }, 80);
+  const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  // Per-chart toolbar: a full-screen toggle (expands just this chart to fill the
+  // viewport; the Vega view's ResizeObserver refits width, and we bump its
+  // height), a "Copy link" button that captures the selected month (if any) so
+  // the link reopens with it highlighted, and, when the site emitted an explorer
+  // URL, an "Explore this data" cross-link handing this chart's parquet files +
+  // a default query/spec to the explorer -- mirroring chart.js.
+  function addChartControls(block, host, getView, opts) {
+    const bar = document.createElement("div");
+    bar.className = "analysis-toolbar";
+
+    const fsBtn = document.createElement("button");
+    fsBtn.type = "button";
+    fsBtn.className = "fullscreen-toggle";
+    const syncFs = function () {
+      const on = block.classList.contains("block-fullscreen");
+      fsBtn.innerHTML = on
+        ? '<span class="fs-icon">\u00d7</span> Close'
+        : 'Full screen <span class="fs-icon">\u2192</span>';
+      fsBtn.setAttribute("aria-pressed", on ? "true" : "false");
+      fsBtn.title = on ? "Exit full screen (Esc)" : "Expand chart to full screen";
+    };
+    const setFs = function (on) {
+      block.classList.toggle("block-fullscreen", on);
+      document.body.classList.toggle("analysis-fullscreen", on);
+      syncFs();
+      const view = getView();
+      if (view) {
+        const h = on ? Math.max(360, window.innerHeight - 220) : opts.baseHeight;
+        const w = host.clientWidth || 700;
+        view.width(w).height(h).resize().runAsync();
+      }
+    };
+    fsBtn.onclick = function () {
+      setFs(!block.classList.contains("block-fullscreen"));
+    };
+    syncFs();
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && block.classList.contains("block-fullscreen")) {
+        setFs(false);
+      }
     });
+    bar.appendChild(fsBtn);
 
-    await embedOverview(null);
-  }
-
-  // -- Chart render functions -------------------------------------------------
-
-  function buildMonthLegend(monthsPresent) {
-    return '<div class="overlay-legend">' +
-      monthsPresent.map(function (m) {
-        return '<span class="legend-item">' +
-          '<span class="legend-swatch" style="background:' +
-          monthColor(m) + '"></span>' + monthNames[m - 1] + "</span>";
-      }).join("") + "</div>";
-  }
-
-  function renderPumpOverlay(target, rows) {
-    const maxMin = Math.min(90, arrayMax(rows, function (r) {
-      return r.elapsed_min;
-    }));
-
-    const header = document.createElement("div");
-    header.className = "overlay-header";
-    header.innerHTML =
-      "<h3>Pump Cycle Overlay</h3>" +
-      '<p class="chart-subtitle">Each line starts at its pre-pump ' +
-      "static water level. Seasonal variation visible in starting depth.</p>";
-    addExploreButton(
-      header,
-      "pump_cycles",
-      "SELECT pump_event_id, month, elapsed_s, depth, static_depth, phase " +
-        "FROM pump_cycles ORDER BY pump_event_id, elapsed_s"
-    );
-
-    const plot = document.createElement("div");
-    plot.className = "overlay-vega";
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "chart overlay-chart";
-    wrapper.appendChild(header);
-    wrapper.appendChild(plot);
-    target.appendChild(wrapper);
-
-    const spec = buildMultiLineSpec({
-      xField: "elapsed_min",
-      yField: "depth",
-      xTitle: "Elapsed time (minutes)",
-      yTitle: "Well depth (m)",
-      xDomain: [-2, maxMin],
-      yDomain: [30, 45],
-      height: 400,
-      theme: chartTheme,
-    });
-    embedVega(plot, spec, rows, ["elapsed_min", "depth", "event", "color"]);
-  }
-
-  function computeDrawStats(rows) {
-    const stats = new Map();
-    for (const r of rows) {
-      if (r.phase !== "draw") continue;
-      const s = stats.get(r.event);
-      if (!s) {
-        stats.set(r.event, {
-          count: 1,
-          lastElapsed: r.elapsed_min,
-          maxDrawdown: r.drawdown,
-        });
+    // Copy a link to this page that restores the currently selected month.
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "copy-link";
+    copyBtn.textContent = "Copy link";
+    copyBtn.onclick = function () {
+      const view = getView();
+      const m = view ? selectedMonth(view) : null;
+      const u = new URL(location.href);
+      if (m) u.searchParams.set("month", m);
+      else u.searchParams.delete("month");
+      const done = function () {
+        const label = m ? "Copied " + MONTH_NAMES[parseInt(m, 10) - 1] + " link" : "Copied link";
+        const orig = "Copy link";
+        copyBtn.textContent = label;
+        setTimeout(function () { copyBtn.textContent = orig; }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(u.href).then(done, done);
       } else {
-        s.count++;
-        s.lastElapsed = r.elapsed_min;
-        if (r.drawdown > s.maxDrawdown) s.maxDrawdown = r.drawdown;
+        const ta = document.createElement("textarea");
+        ta.value = u.href;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (e) { /* ignore */ }
+        ta.remove();
+        done();
       }
-    }
-    return stats;
-  }
+    };
+    bar.appendChild(copyBtn);
 
-  function renderHorner(target, rows, drawStats) {
-    const hornerRows = [];
-    for (const r of rows) {
-      if (r.phase !== "recovery") continue;
-      const s = drawStats.get(r.event);
-      if (!s || s.count < 3) continue;
-      const dtPrime = r.elapsed_min - s.lastElapsed;
-      if (dtPrime <= 0) continue;
-      const hornerRatio = (s.lastElapsed + dtPrime) / dtPrime;
-      if (hornerRatio <= 1) continue;
-      hornerRows.push({
-        event: r.event,
-        color: r.color,
-        horner_time: Math.log10(hornerRatio),
-        residual_drawdown: s.maxDrawdown - r.drawdown,
-      });
-    }
-
-    if (hornerRows.length === 0) return;
-
-    const header = document.createElement("div");
-    header.className = "overlay-header";
-    header.innerHTML =
-      "<h3>Horner Plot - Recovery Analysis</h3>" +
-      '<p class="chart-subtitle">Residual drawdown vs ' +
-      "log\u2081\u2080((t\u209A + \u0394t') / \u0394t'). " +
-      "Straight-line slope indicates transmissivity.</p>";
-    addExploreButton(
-      header,
-      "pump_cycles",
-      "SELECT pump_event_id, month, elapsed_s, depth, static_depth " +
-        "FROM pump_cycles WHERE phase = 'recovery' " +
-        "ORDER BY pump_event_id, elapsed_s"
-    );
-
-    const plot = document.createElement("div");
-    plot.className = "overlay-vega";
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "chart overlay-chart";
-    wrapper.appendChild(header);
-    wrapper.appendChild(plot);
-    target.appendChild(wrapper);
-
-    const spec = buildMultiLineSpec({
-      xField: "horner_time",
-      yField: "residual_drawdown",
-      xTitle: "log\u2081\u2080(Horner time ratio)",
-      yTitle: "Residual drawdown (m)",
-      height: 400,
-      theme: chartTheme,
-    });
-    embedVega(plot, spec, hornerRows, [
-      "horner_time",
-      "residual_drawdown",
-      "event",
-      "color",
-    ]);
-  }
-
-  function renderDrawdownDetail(target, rows) {
-    const drawOnly = rows.filter(function (r) {
-      return r.phase === "draw" && r.elapsed_min <= 60;
-    });
-    if (drawOnly.length === 0) return;
-
-    const header = document.createElement("div");
-    header.className = "overlay-header";
-    header.innerHTML =
-      "<h3>Drawdown Phase Detail</h3>" +
-      '<p class="chart-subtitle">Pump-on phase only. Seasonal variation ' +
-      "in drawdown rate reflects aquifer recharge state.</p>";
-    addExploreButton(
-      header,
-      "pump_cycles",
-      "SELECT pump_event_id, month, elapsed_s, depth, static_depth " +
-        "FROM pump_cycles WHERE phase = 'draw' " +
-        "ORDER BY pump_event_id, elapsed_s"
-    );
-
-    const plot = document.createElement("div");
-    plot.className = "overlay-vega";
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "chart overlay-chart";
-    wrapper.appendChild(header);
-    wrapper.appendChild(plot);
-    target.appendChild(wrapper);
-
-    const spec = buildMultiLineSpec({
-      xField: "elapsed_min",
-      yField: "drawdown",
-      xTitle: "Elapsed time (minutes)",
-      yTitle: "Drawdown (m)",
-      xDomain: [0, Math.min(60, arrayMax(drawOnly, function (r) {
-        return r.elapsed_min;
-      }))],
-      height: 350,
-      theme: chartTheme,
-    });
-    embedVega(plot, spec, drawOnly, ["elapsed_min", "drawdown", "event", "color"]);
-  }
-
-  function renderRecoveryDetail(target, rows, drawStats) {
-    const recoveryRows = [];
-    for (const r of rows) {
-      if (r.phase !== "recovery") continue;
-      const s = drawStats.get(r.event);
-      if (!s || s.count < 3) continue;
-      const dtMin = r.elapsed_min - s.lastElapsed;
-      if (dtMin <= 0) continue;
-      recoveryRows.push({
-        event: r.event,
-        color: r.color,
-        elapsed_min: dtMin,
-        recovery: s.maxDrawdown - r.drawdown,
-      });
-    }
-
-    if (recoveryRows.length === 0) return;
-
-    const header = document.createElement("div");
-    header.className = "overlay-header";
-    header.innerHTML =
-      "<h3>Recovery Phase Detail</h3>" +
-      '<p class="chart-subtitle">Water level recovery after pump shutoff. ' +
-      "Aligned at pump-off, showing meters recovered vs elapsed time.</p>";
-    addExploreButton(
-      header,
-      "pump_cycles",
-      "SELECT pump_event_id, month, elapsed_s, depth, static_depth " +
-        "FROM pump_cycles WHERE phase = 'recovery' " +
-        "ORDER BY pump_event_id, elapsed_s"
-    );
-
-    const plot = document.createElement("div");
-    plot.className = "overlay-vega";
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "chart overlay-chart";
-    wrapper.appendChild(header);
-    wrapper.appendChild(plot);
-    target.appendChild(wrapper);
-
-    const spec = buildMultiLineSpec({
-      xField: "elapsed_min",
-      yField: "recovery",
-      xTitle: "Minutes since pump off",
-      yTitle: "Recovery (m)",
-      height: 350,
-      theme: chartTheme,
-    });
-    embedVega(plot, spec, recoveryRows, [
-      "elapsed_min",
-      "recovery",
-      "event",
-      "color",
-    ]);
-  }
-
-  function renderSummaryCharts(target, sRows) {
-    if (sRows.length === 0) return;
-
-    // Append a time-series dot+line chart (filled points colored by month over a
-    // faint connecting line). Rows carry a per-row `color` so the points use the
-    // month palette via the spec's identity color scale.
-    function addDotLineChart(headerHtml, rows, yField, yTitle, yDomain, exploreSql) {
-      const header = document.createElement("div");
-      header.className = "overlay-header";
-      header.innerHTML = headerHtml;
-      addExploreButton(header, "cycle_summary", exploreSql);
-
-      const plot = document.createElement("div");
-      plot.className = "overlay-vega";
-
-      const wrapper = document.createElement("div");
-      wrapper.className = "chart overlay-chart";
-      wrapper.appendChild(header);
-      wrapper.appendChild(plot);
-      target.appendChild(wrapper);
-
-      const colored = rows.map(function (d) {
-        return { timestamp: d.timestamp, color: monthColor(d.month), [yField]: d[yField] };
-      });
-      const spec = buildDotLineSpec({
-        yField: yField,
-        yTitle: yTitle,
-        yDomain: yDomain,
-        height: 300,
-        theme: chartTheme,
-      });
-      embedVega(plot, spec, colored, ["timestamp", yField, "color"]);
-    }
-
-    // Duty cycle (draw_duration / inter_pump_interval)
-    addDotLineChart(
-      "<h3>Pump Duty Cycle</h3>" +
-        '<p class="chart-subtitle">Draw duration / time to next pump start. ' +
-        "Rising duty cycle indicates increasing demand or a leak.</p>",
-      sRows.filter(function (d) { return d.duty_cycle != null; }),
-      "duty_cycle",
-      "Duty cycle (draw / interval)",
-      [0, 1],
-      "SELECT timestamp, month, duty_cycle FROM cycle_summary " +
-        "WHERE duty_cycle IS NOT NULL ORDER BY timestamp"
-    );
-
-    // Max drawdown
-    addDotLineChart(
-      "<h3>Maximum Drawdown per Cycle</h3>" +
-        '<p class="chart-subtitle">Peak drawdown reached during each pump ' +
-        "cycle. Deeper drawdown at same duty cycle suggests declining aquifer.</p>",
-      sRows,
-      "max_drawdown",
-      "Max drawdown (m)",
-      undefined,
-      "SELECT timestamp, month, max_drawdown FROM cycle_summary " +
-        "ORDER BY timestamp"
-    );
-
-    // Pump duration
-    addDotLineChart(
-      "<h3>Pump Duration per Cycle</h3>" +
-        '<p class="chart-subtitle">Minutes spent pumping per cycle. ' +
-        "Longer pump times at same consumption indicate reduced well yield.</p>",
-      sRows,
-      "draw_duration_min",
-      "Draw duration (min)",
-      undefined,
-      "SELECT timestamp, month, draw_duration_s / 60.0 AS draw_duration_min " +
-        "FROM cycle_summary ORDER BY timestamp"
-    );
-  }
-
-  // -- Coordinated render -----------------------------------------------------
-
-  function renderAnalysis(dateRange) {
-    currentDateRange = dateRange;
-    let filteredSummary = allSummaryRows;
-    let filteredPump = allPumpRows;
-
-    const hasThreshold = durationThresholdMin > 0;
-
-    if (allSummaryRows.length > 0 && (dateRange || hasThreshold)) {
-      const t0 = dateRange ? dateRange[0] : null;
-      const t1 = dateRange ? dateRange[1] : null;
-      filteredSummary = allSummaryRows.filter(function (r) {
-        if (dateRange && !(r.timestamp >= t0 && r.timestamp <= t1)) return false;
-        if (hasThreshold && !(r.draw_duration_min >= durationThresholdMin)) {
-          return false;
-        }
-        return true;
-      });
-      const ids = new Set(
-        filteredSummary.map(function (r) { return r.pump_event_id; })
-      );
-      filteredPump = allPumpRows.filter(function (r) {
-        return ids.has(r.event);
-      });
-    }
-
-    const totalCycles = allSummaryRows.length || allEventIds.size;
-    const nCycles = filteredSummary.length ||
-      new Set(filteredPump.map(function (r) { return r.event; })).size;
-
-    // Cycle count shown once, next to the data-volume control.
-    let countText = "Showing " + nCycles + " of " + totalCycles + " cycles";
-    if (hasThreshold) countText += " \u2265 " + durationThresholdMin + " min";
-    if (dateRange) {
-      const fmt = function (d) {
-        return d.toLocaleDateString("en-US", {
-          year: "numeric", month: "short",
-        });
+    if (exploreUrl && opts.files && opts.files.length > 0) {
+      const exBtn = document.createElement("button");
+      exBtn.type = "button";
+      exBtn.className = "explore-data";
+      exBtn.textContent = "Explore this data";
+      exBtn.onclick = function () {
+        const urls = opts.files
+          .map(function (f) { return new URL(f, location.href).href; })
+          .filter(Boolean);
+        if (urls.length === 0) return;
+        const params = new URLSearchParams();
+        params.set("label", opts.label);
+        params.set("files", urls.join(","));
+        params.set("sql", "SELECT * FROM chart_data ORDER BY month, " + opts.xCol);
+        params.set("view", "chart");
+        params.set("spec", JSON.stringify(
+          buildExploreSpec(opts.xCol, opts.xTitle, opts.yTitle)));
+        location.assign(exploreUrl + "#" + params.toString());
       };
-      countText += " \u00b7 " + fmt(dateRange[0]) + " \u2013 " + fmt(dateRange[1]);
-    }
-    countSpan.textContent = countText;
-
-    analysisSection.innerHTML = "";
-
-    if (filteredPump.length > 0) {
-      const drawStats = computeDrawStats(filteredPump);
-      renderPumpOverlay(analysisSection, filteredPump);
-      renderHorner(analysisSection, filteredPump, drawStats);
-      renderDrawdownDetail(analysisSection, filteredPump);
-      renderRecoveryDetail(analysisSection, filteredPump, drawStats);
+      bar.appendChild(exBtn);
     }
 
-    if (filteredSummary.length > 0) {
-      renderSummaryCharts(analysisSection, filteredSummary);
-    }
+    block.appendChild(bar);
   }
 
-  // -- Initial render ---------------------------------------------------------
+  const bandFields = ["month", "s_p10", "s_p50", "s_p90", "n", "moy", "year", "shade"];
 
-  renderAnalysis(null);
+  if (drawdownRows.length > 0) {
+    decorateMonths(drawdownRows);
+    const sec = section(
+      "Drawdown by month",
+      "Median drawdown (static level minus well depth) versus time since the " +
+      "pump switched on, one line per calendar month. Click a month in the " +
+      "legend to reveal its P10-P90 band."
+    );
+    const spec = buildBandSpec({
+      xField: "elapsed_min",
+      xTitle: "Minutes since pump-on",
+      yTitle: "Drawdown (m)",
+      theme: chartTheme,
+      initMonth: initMonth,
+    });
+    const view = await embedVega(sec.chart, spec, drawdownRows,
+      bandFields.concat(["elapsed_min"]));
+    addChartControls(sec.wrap, sec.chart, function () { return view; }, {
+      files: drawdownFiles,
+      label: "Drawdown by month",
+      xCol: "elapsed_s",
+      xTitle: "Seconds since pump-on",
+      yTitle: "Drawdown (m)",
+      baseHeight: 380,
+    });
+  }
+
+  if (hornerRows.length > 0) {
+    decorateMonths(hornerRows);
+    const sec = section(
+      "Horner recovery by month",
+      "Median residual drawdown versus the log Horner ratio (t_p + dt) / dt " +
+      "during recovery, one line per calendar month. Larger x is earlier in " +
+      "recovery; the curve heads toward 0 as the well returns to static. " +
+      "Click a month in the legend to reveal its P10-P90 band."
+    );
+    const spec = buildBandSpec({
+      xField: "log_ratio",
+      xTitle: "log10( (t_p + dt) / dt )",
+      yTitle: "Residual drawdown (m)",
+      theme: chartTheme,
+      initMonth: initMonth,
+    });
+    const view = await embedVega(sec.chart, spec, hornerRows,
+      bandFields.concat(["log_ratio"]));
+    addChartControls(sec.wrap, sec.chart, function () { return view; }, {
+      files: hornerFiles,
+      label: "Horner recovery by month",
+      xCol: "log_ratio",
+      xTitle: "log10( (t_p + dt) / dt )",
+      yTitle: "Residual drawdown (m)",
+      baseHeight: 380,
+    });
+  }
+
+  if (drawdownRows.length === 0 && hornerRows.length === 0) {
+    container.innerHTML =
+      '<div class="empty-state">No pump cycle data found.</div>';
+  }
 
   } // end renderOverlay
 })();
