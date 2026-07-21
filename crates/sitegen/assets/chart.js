@@ -213,9 +213,16 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
     if (match) activeDays = match[1];
   }
 
-  // Only show buttons whose window fits within the data span (with a small
-  // margin — show the button if data covers at least 50% of the window).
-  const visibleRanges = ranges.filter(([, days]) => days <= dataSpanDays * 2);
+  // Show every button whose window fits within the data span, plus exactly
+  // one button that exceeds it (the smallest such window). This gives a single
+  // "zoom out past all the data" option without a row of redundant oversized
+  // buttons — e.g. a 6-year series shows up to 5Y plus 10Y, while a 3-month
+  // series shows up to 1M plus 3M and hides everything larger.
+  const visibleRanges = [];
+  for (const r of ranges) {
+    visibleRanges.push(r);
+    if (r[1] > dataSpanDays) break; // first (smallest) exceeding button; stop
+  }
 
   // If the current default doesn't appear in the visible set, pick the largest.
   if (!visibleRanges.some(([, days]) => days === activeDays) && visibleRanges.length > 0) {
