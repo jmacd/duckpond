@@ -157,8 +157,9 @@ echo ""
 echo "=== Generating overlay site via test 305 ==="
 bash "${TESTSUITE_DIR}/run-test.sh" "${RUN_TEST_EXTRA_ARGS[@]}" --output "${OVERLAY_OUTPUT}" 305
 
-if [[ ! -f "${OVERLAY_OUTPUT}/analysis/pump-cycles.html" ]]; then
-    echo "ERROR: Overlay site generation failed — no pump-cycles.html"
+if [[ ! -f "${OVERLAY_OUTPUT}/analysis/drawdown-by-month.html" \
+      || ! -f "${OVERLAY_OUTPUT}/analysis/horner-by-month.html" ]]; then
+    echo "ERROR: Overlay site generation failed — missing analysis overlay pages"
     exit 1
 fi
 echo "  ✓ Overlay site generated"

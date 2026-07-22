@@ -357,12 +357,12 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     // Client-side chart.js reads the JSON to load parquet via DuckDB-WASM.
     {
         let c = ctx.clone();
-        shortcodes.register("chart", move |_args: &ShortcodeArgs| {
+        shortcodes.register("chart", move |args: &ShortcodeArgs| {
             render_chart(
                 &c.datafiles,
                 &c.metric_registry,
                 &c.metric_captions,
-                c.default_range.as_deref(),
+                args.get_str("range").or(c.default_range.as_deref()),
                 c.explore_url.as_deref(),
                 &c.annotations,
             )
@@ -402,7 +402,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                     &c.datafiles,
                     &c.metric_registry,
                     &c.metric_captions,
-                    c.default_range.as_deref(),
+                    args.get_str("range").or(c.default_range.as_deref()),
                     c.explore_url.as_deref(),
                     &c.annotations,
                 ),
