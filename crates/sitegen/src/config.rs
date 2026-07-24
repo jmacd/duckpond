@@ -92,6 +92,9 @@ pub struct SiteConfig {
     ///   counter         -> first-difference per scope, plot rate
     ///   updowncounter   -> plot value as-is (today; future: sum
     ///                       across scopes for spatial aggregation)
+    ///   rate            -> plot value as-is, but with a zero-anchored,
+    ///                       always-rendered y-axis (for flow/rate gauges
+    ///                       such as `usage.gpm` where 0 is meaningful)
     ///   gauge / missing -> plot value as-is (latest/avg)
     ///
     /// The canonical source of truth for each project should be a

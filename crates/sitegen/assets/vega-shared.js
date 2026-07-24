@@ -116,12 +116,36 @@ export function buildMetricChartSpec(opts) {
     yLabel,
     height = 300,
     byteAxis = false,
+    yZero = false,
     theme,
     annotations = [],
   } = opts;
   const yAxis = { grid: true, title: yLabel || null };
   if (byteAxis) yAxis.format = "~s";
+  // For rate/flow metrics (`yZero`), zero is a meaningful baseline, so anchor
+  // the y scale at 0 for every series mapped to it.  Other charts plot
+  // arbitrary-scale readings and keep the fitted-extent default (zero: false).
+  const yScale = yZero ? { zero: true } : null;
   const layers = [];
+
+  // Dedicated invisible layer that always carries the y-axis (and, for rate
+  // charts, pins 0 into the shared domain).  Without it the axis is bound to
+  // the first data layer, so it vanishes whenever that series has no points in
+  // the visible window (e.g. a short recent window where only one of two lines
+  // has data) -- taking the zero reference with it.  This layer always has one
+  // datum, so the axis renders regardless of which series is populated.  Only
+  // emitted for `yZero` charts to avoid forcing 0 onto arbitrary-scale charts.
+  let yAssigned = false;
+  if (yZero) {
+    layers.push({
+      data: { values: [{ __axis0: 0 }] },
+      mark: { type: "rule", opacity: 0, clip: true },
+      encoding: {
+        y: { field: "__axis0", type: "quantitative", scale: yScale, axis: yAxis },
+      },
+    });
+    yAssigned = true;
+  }
 
   // Optional annotation bands: a secondary interval dataset (e.g. pump state /
   // leak risk periods) drawn as full-height shaded rects behind the series.
@@ -143,13 +167,12 @@ export function buildMetricChartSpec(opts) {
     });
   }
 
-  let yAssigned = false;
   for (const s of series) {
     if (s.min && s.max) {
       layers.push({
         mark: { type: "area", color: s.color, opacity: 0.15, clip: true, invalid: null },
         encoding: {
-          y: { field: escapeField(s.min), type: "quantitative", axis: yAssigned ? null : yAxis },
+          y: { field: escapeField(s.min), type: "quantitative", axis: yAssigned ? null : yAxis, ...(yScale ? { scale: yScale } : {}) },
           y2: { field: escapeField(s.max) },
         },
       });
@@ -159,7 +182,7 @@ export function buildMetricChartSpec(opts) {
       layers.push({
         mark: { type: "line", color: s.color, strokeWidth: 1.5, clip: true, invalid: null },
         encoding: {
-          y: { field: escapeField(s.avg), type: "quantitative", axis: yAssigned ? null : yAxis },
+          y: { field: escapeField(s.avg), type: "quantitative", axis: yAssigned ? null : yAxis, ...(yScale ? { scale: yScale } : {}) },
         },
       });
       yAssigned = true;

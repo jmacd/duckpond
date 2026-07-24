@@ -34,10 +34,11 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
 
   // Optional metric instrument-kind registry, emitted by sitegen alongside
   // the chart-data manifest.  Keys are `<param>.<unit>` (chart-grouping
-  // suffix); values are "counter" | "updowncounter" | "gauge".  Counter
-  // metrics are plotted as a first-difference rate per scope; everything
-  // else is plotted as-is.  Missing or empty registry => all metrics treated
-  // as gauges (no transforms), matching legacy behaviour.
+  // suffix); values are "counter" | "updowncounter" | "gauge" | "rate".
+  // Counter metrics are plotted as a first-difference rate per scope; "rate"
+  // metrics plot as-is but with a zero-anchored, always-rendered y-axis;
+  // everything else is plotted as-is.  Missing or empty registry => all
+  // metrics treated as gauges (no transforms), matching legacy behaviour.
   const registryEl = document.querySelector('script.chart-registry[type="application/json"]');
   let metricKinds = {};
   if (registryEl) {
@@ -1137,6 +1138,10 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
       // reflects current activity (events/second).  Updowncounters and
       // gauges plot as-is.
       const isCounter = kindFor(chartKey) === "counter";
+      // Rate/flow gauges (e.g. usage.gpm): plotted as-is like any gauge, but
+      // zero is a meaningful baseline, so anchor the y-axis at 0 and keep it
+      // rendered even when only one line has data in the window.
+      const yZero = kindFor(chartKey) === "rate";
       const allCols = [];
       for (const s of series) {
         if (s.avg) allCols.push(s.avg);
@@ -1197,6 +1202,7 @@ import { loadVega, buildMetricChartSpec, escapeField } from "./vega-shared.js";
         yLabel,
         height: chartHeight,
         byteAxis: isBytes,
+        yZero,
         theme: chartTheme,
         annotations: annotationBands,
       });
